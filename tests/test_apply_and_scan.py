@@ -6,8 +6,9 @@ from pathlib import Path
 from sfs.apply import RunControl, apply_plan
 from sfs.compare import Action, Change
 from sfs.jobs import run_checked
-from sfs.model import Profile, SyncMode
+from sfs.model import ExclusionMode, Profile, SyncMode
 from sfs.scan import scan_profile
+from sfs.settings import set_global_exclusion_mode, set_global_exclusions
 from sfs.walk import MissingVolume, WalkStopped, walk
 
 
@@ -275,3 +276,50 @@ def test_checked_subset_does_not_scan_the_other_job(tmp_path, monkeypatch):
     assert results[0].error is None
     assert results[0].result is not None
     assert len(results[0].result.changes) == 1
+
+
+def _global_home(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("SFS_HOME", str(home))
+    set_global_exclusions(["Thumbs.db"])
+
+
+def test_global_exclusion_ignore_totally_hides_from_both_sides(tmp_path, monkeypatch):
+    _global_home(tmp_path, monkeypatch)
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    _write(left / "a.txt", "same", 100)
+    _write(right / "a.txt", "same", 100)
+    _write(left / "Thumbs.db", "junk", 200)
+    _write(right / "Thumbs.db", "other", 5)
+    profile = Profile(name="p", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR)
+    result = scan_profile(profile)
+    assert result.changes == []
+    assert result.left_files == 1
+    assert result.right_files == 1
+
+
+def test_global_exclusion_dont_copy_never_transfers(tmp_path, monkeypatch):
+    _global_home(tmp_path, monkeypatch)
+    set_global_exclusion_mode(ExclusionMode.DONT_COPY)
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    _write(left / "a.txt", "same", 100)
+    _write(right / "a.txt", "same", 100)
+    _write(left / "Thumbs.db", "junk", 200)
+    profile = Profile(name="p", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR)
+    assert scan_profile(profile).changes == []
+
+
+def test_global_exclusion_dont_copy_deletes_an_extra_on_the_destination(tmp_path, monkeypatch):
+    _global_home(tmp_path, monkeypatch)
+    set_global_exclusion_mode(ExclusionMode.DONT_COPY)
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    _write(left / "a.txt", "same", 100)
+    _write(right / "a.txt", "same", 100)
+    _write(right / "Thumbs.db", "extra", 5)
+    profile = Profile(name="p", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR)
+    changes = scan_profile(profile).changes
+    assert [(item.rel, item.action) for item in changes] == [("Thumbs.db", Action.DELETE_RIGHT)]

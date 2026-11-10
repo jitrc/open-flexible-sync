@@ -148,11 +148,19 @@ def _limits_on(profile: Profile) -> bool:
     return bool(profile.min_size or profile.max_size or profile.min_age_days or profile.max_age_days)
 
 
-def _hidden(rel: str, profile: Profile, session_masks: list[str], global_masks: list[str]) -> str | None:
+def _hidden(
+    rel: str,
+    profile: Profile,
+    session_masks: list[str],
+    global_masks: list[str],
+    global_mode: ExclusionMode = ExclusionMode.IGNORE_TOTALLY,
+) -> str | None:
     """ignore = drop from both sides. dont_copy = do not transfer, but Exact Mirror may delete the other side."""
 
-    if rel in _skip_names(profile) or any_match(rel, session_masks) or any_match(rel, global_masks):
+    if rel in _skip_names(profile) or any_match(rel, session_masks):
         return "ignore"
+    if any_match(rel, global_masks):
+        return "dont_copy" if global_mode == ExclusionMode.DONT_COPY else "ignore"
     if not included(rel, profile.include):
         return "ignore"
     if any_match(rel, profile.exclusions):
@@ -174,6 +182,7 @@ def build_plan(
     session_skips: set[str] | None = None,
     session_masks: list[str] | None = None,
     global_masks: list[str] | None = None,
+    global_mode: ExclusionMode = ExclusionMode.IGNORE_TOTALLY,
     now: float | None = None,
 ) -> list[Change]:
     skips = session_skips or set()
@@ -188,7 +197,7 @@ def build_plan(
             continue
         if rel in skips:
             continue
-        kind = _hidden(rel, profile, masks, globals_)
+        kind = _hidden(rel, profile, masks, globals_, global_mode)
         left_stat = left.get(rel)
         right_stat = right.get(rel)
         if kind == "ignore":

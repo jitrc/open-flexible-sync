@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sfs.legacy import import_cfg, merge_imported
+from sfs.legacy import import_cfg, import_global_masks, merge_imported
 from sfs.model import Direction, ExclusionMode, Profile, SyncMode, TimestampRules
 
 
@@ -139,3 +139,31 @@ def test_live_cfg_if_present():
     assert all(item.left.startswith("/") and item.right.startswith("/") for item in profiles)
     assert any(item.mode == SyncMode.EXACT_MIRROR for item in profiles)
     assert any(item.direction == Direction.RIGHT_TO_LEFT for item in profiles)
+
+
+def test_import_global_masks_reads_the_dialog_text(tmp_path):
+    cfg = tmp_path / "app.cfg"
+    cfg.write_bytes(
+        _blob("photos 2017", "/data/photos/2017", "/backup/photos/2017", ["*/$RECYCLE.BIN"], "(all)")
+        + b"\x01GlobalExcludeMasksIncoming ExtremeSync Packages\xa0*.DS_Store;Thumbs.db;*.$$$"
+        + b"\xa0*.ipynb_checkpoints;__pycache__;__pyc\xa0**.sock;*.lock;@eaDir\xa0-\xa0*"
+        + b"\x00"
+    )
+    assert import_global_masks(cfg) == [
+        "Incoming ExtremeSync Packages",
+        ".DS_Store",
+        "Thumbs.db",
+        "*.$$$",
+        ".ipynb_checkpoints",
+        "__pycache__",
+        "__pyc",
+        "*.sock",
+        "*.lock",
+        "@eaDir",
+    ]
+
+
+def test_import_global_masks_is_empty_without_the_section(tmp_path):
+    cfg = tmp_path / "app.cfg"
+    cfg.write_bytes(_blob("photos 2017", "/data/photos/2017", "/backup/photos/2017", ["*/$RECYCLE.BIN"], "(all)"))
+    assert import_global_masks(cfg) == []

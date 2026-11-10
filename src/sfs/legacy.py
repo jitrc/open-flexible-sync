@@ -55,6 +55,37 @@ def import_cfg(path: Path) -> list[Profile]:
     return profiles
 
 
+def import_global_masks(path: Path) -> list[str]:
+    """Masks from the cfg's GlobalExcludeMasks section, in dialog order. Empty when absent.
+
+    The section stores the dialog text: lines after the first begin with the
+    byte pair 0xA0 '*', and the section ends at 0xA0 '-' 0xA0. The mode radio
+    after the terminator is not decoded; the mode stays a Settings choice.
+    """
+
+    data = path.read_bytes()
+    index = data.find(b"GlobalExcludeMasks")
+    if index < 0:
+        return []
+    start = index + len(b"GlobalExcludeMasks")
+    rest = data[start : start + 4000]
+    end = rest.find(_SEP)
+    if end >= 0:
+        rest = rest[:end]
+    nul = rest.find(b"\x00")
+    if nul >= 0:
+        rest = rest[:nul]
+    text = rest.decode("latin1")
+    lines = text.replace("\xa0*", "\n").replace("\xa0", "\n").splitlines()
+    masks: list[str] = []
+    for line in lines:
+        for part in line.split(";"):
+            item = part.strip()
+            if item and item not in masks:
+                masks.append(item)
+    return masks
+
+
 def merge_imported(existing: Profile, incoming: Profile) -> Profile:
     """Fill mode, direction, and timestamp flags that are still at the defaults.
 

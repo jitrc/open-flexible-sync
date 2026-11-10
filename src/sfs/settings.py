@@ -6,6 +6,7 @@ import json
 import os
 
 from sfs.masks import split_masks
+from sfs.model import ExclusionMode
 from sfs.store import config_dir
 
 _COMPARE_DEFAULT = "meld"
@@ -62,6 +63,20 @@ def global_exclusions() -> list[str]:
 
 def set_global_exclusions(masks: list[str]) -> None:
     _save("global_exclusions", [mask.strip() for mask in masks if mask.strip()])
+
+
+def global_exclusion_mode() -> ExclusionMode:
+    """Ignore Totally keeps the pre-mode behavior: global matches vanish from the scan."""
+
+    raw = str(load_settings().get("global_exclusion_mode") or "").strip()
+    try:
+        return ExclusionMode(raw)
+    except ValueError:
+        return ExclusionMode.IGNORE_TOTALLY
+
+
+def set_global_exclusion_mode(mode: ExclusionMode) -> None:
+    _save("global_exclusion_mode", mode.value)
 
 
 def _save(key: str, value) -> None:
