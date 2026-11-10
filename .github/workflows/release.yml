@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install GTK 4
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-gi python3-gi-cairo gir1.2-gtk-4.0 python3-venv xvfb wget
+      - name: Run pytest
+        run: |
+          python3 -m venv --system-site-packages .venv
+          .venv/bin/pip install pytest
+          xvfb-run -a .venv/bin/python -m pytest -q
+      - name: Build
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: python3 scripts/build_release.py
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/OFS-${version}-x86_64.AppImage" \
+            "dist/OFS-${version}-linux-x86_64.tar.gz" \
+            --title "OFS ${version}" \
+            --notes-file dist/notes.md
