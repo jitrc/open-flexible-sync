@@ -1,0 +1,16 @@
+[project]
+name = "sfs"
+version = "0.1.0"
+description = "Local folder sync with profile groups, mask modes, and timestamp rules."
+requires-python = ">=3.11"
+readme = "README.md"
+
+[project.scripts]
+sfs = "sfs.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

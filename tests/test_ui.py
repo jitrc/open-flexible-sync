@@ -1,0 +1,461 @@
+import os
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+from gi.repository import GLib, Gtk
+
+from sfs.compare import Action
+from sfs.jobs import JobResult
+from sfs.model import Profile, SyncMode
+from sfs.scan import scan_profile
+from sfs.store import load_profiles, save_profile
+from sfs.ui import MainWindow, ScanWindow, SfsApplication
+
+
+def _group_titles(box) -> list[tuple[str, bool]]:
+    found = []
+    child = box.get_first_child()
+    while child is not None:
+        if isinstance(child, Gtk.Expander):
+            title = ""
+            heading = child.get_label_widget()
+            if heading is not None:
+                label = heading.get_first_child()
+                if isinstance(label, Gtk.Label):
+                    title = label.get_label()
+            found.append((title or child.get_label() or "", child.get_expanded()))
+        child = child.get_next_sibling()
+    return found
+
+
+def _buttons(widget) -> list[Gtk.Button]:
+    found = []
+    if isinstance(widget, Gtk.Button):
+        found.append(widget)
+    visited = []
+    child = widget.get_first_child()
+    while child is not None:
+        visited.append(child)
+        found.extend(_buttons(child))
+        child = child.get_next_sibling()
+    extra = widget.get_child() if hasattr(widget, "get_child") else None
+    if extra is not None and extra not in visited:
+        found.extend(_buttons(extra))
+    return found
+
+
+def _run_buttons_are_marked(widget) -> bool:
+    runs = [button for button in _buttons(widget) if button.get_label() in {"Run", "Run checked"}]
+    return bool(runs) and all("run" in button.get_css_classes() for button in runs)
+
+
+def _button_labels(widget) -> list[str]:
+    found = []
+    if isinstance(widget, Gtk.Button) and widget.get_label():
+        found.append(widget.get_label())
+    visited = []
+    child = widget.get_first_child()
+    while child is not None:
+        visited.append(child)
+        found.extend(_button_labels(child))
+        child = child.get_next_sibling()
+    extra = widget.get_child() if hasattr(widget, "get_child") else None
+    if extra is not None and extra not in visited:
+        found.extend(_button_labels(extra))
+    return found
+
+
+def test_overview_groups_and_preview_actions(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "notes.txt").write_text("new")
+    (right / "notes.txt").write_text("old")
+    (right / "extra.txt").write_text("extra")
+    os.utime(left / "notes.txt", (50, 50))
+    os.utime(right / "notes.txt", (10, 10))
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTest")
+    save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
+    save_profile(Profile(name="beta other", left=str(left), right=str(right)))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["groups"] = [title for title, _expanded in _group_titles(window.list_box)]
+            profile = next(item for item in window.profiles if item.name == "alpha notes")
+            result = scan_profile(profile)
+            preview = window._preview(JobResult(profile, result, None))
+            seen["actions"] = {(item.change.rel, item.change.action) for item in (preview.store.get_item(i) for i in range(preview.store.get_n_items()))}
+            row = preview.store.get_item(0)
+            preview._ignore(row, extension=False)
+            seen["skipped"] = set(window.session_skips["alpha notes"])
+            seen["masks_after_ignore"] = next(item.exclusions for item in load_profiles() if item.name == "alpha notes")
+            other = preview.store.get_item(0)
+            preview._add_exclusion(other)
+            seen["saved_masks"] = next(item.exclusions for item in load_profiles() if item.name == "alpha notes")
+            self.quit()
+
+    assert App().run(None) == 0
+    assert "alpha" in seen["groups"]
+    assert "beta" in seen["groups"]
+    assert ("notes.txt", Action.COPY_LEFT_TO_RIGHT) in seen["actions"]
+    assert ("extra.txt", Action.DELETE_RIGHT) in seen["actions"]
+    assert seen["masks_after_ignore"] == []
+    assert seen["skipped"]
+    assert seen["saved_masks"]
+
+
+def test_groups_start_collapsed_and_toggle_together(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestGroups")
+    save_profile(Profile(name="alpha notes", left=str(left), right=str(right)))
+    save_profile(Profile(name="beta other", left=str(left), right=str(right)))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["start"] = _group_titles(window.list_box)
+            window._set_groups(True)
+            seen["open"] = _group_titles(window.list_box)
+            window.search.set_text("zzz")
+            seen["search_miss"] = _group_titles(window.list_box)
+            window.search.set_text("alpha")
+            seen["search"] = _group_titles(window.list_box)
+            window._set_groups(False)
+            seen["closed"] = _group_titles(window.list_box)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["start"] == [("alpha", False), ("beta", False)]
+    assert seen["open"] == [("alpha", True), ("beta", True)]
+    assert seen["search_miss"] == []
+    assert seen["search"] == [("alpha", True)]
+    assert seen["closed"] == [("alpha", False)]
+
+
+def test_preview_filters_keep_the_plan_and_safety_window_opens(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "notes.txt").write_text("new")
+    (right / "notes.txt").write_text("old")
+    (left / "same.txt").write_text("same")
+    (right / "same.txt").write_text("same")
+    (right / "extra.txt").write_text("extra")
+    os.utime(left / "notes.txt", (50, 50))
+    os.utime(right / "notes.txt", (10, 10))
+    os.utime(left / "same.txt", (10, 10))
+    os.utime(right / "same.txt", (10, 10))
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestFilters")
+    save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            result = scan_profile(profile)
+            preview = window._preview(JobResult(profile, result, None))
+            shown = [preview.store.get_item(index).change.rel for index in range(preview.store.get_n_items())]
+            seen["default"] = shown
+            seen["right"] = preview.right_status.get_text()
+            seen["unchanged"] = any(row.change.action == Action.UNCHANGED for row in result.listing)
+            preview._set_filter(deletes="only")
+            seen["deletes"] = [preview.store.get_item(index).change.rel for index in range(preview.store.get_n_items())]
+            seen["still_planned"] = [change.rel for change in preview._planned()]
+            safety = preview._safety("Files to be deleted: 1", preview._planned())
+            seen["safety"] = _button_labels(safety)
+            safety.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["unchanged"]
+    assert "same.txt" not in seen["default"]
+    assert set(seen["default"]) == {"notes.txt", "extra.txt"}
+    assert "Copy: 1" in seen["right"]
+    assert "Delete: 1" in seen["right"]
+    assert seen["deletes"] == ["extra.txt"]
+    assert "notes.txt" in seen["still_planned"]
+    assert "Confirm Deletions" in seen["safety"]
+    assert "Continue Without Deletions" in seen["safety"]
+    assert "Do Not Continue" in seen["safety"]
+
+
+def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
+    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestScanCounts")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            scan = ScanWindow(window)
+            scan.update("job", "Left", "album", 4)
+            scan.update("job", "Left", "album/more", 40)
+            scan.update("job", "Right", "album", 3)
+            seen["counts"] = scan.count_label.get_text()
+            seen["place"] = scan.file_label.get_text()
+            seen["modal"] = scan.get_modal()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["counts"] == "Left files found: 40    Right files found: 3"
+    assert "Reading right" in seen["place"]
+    assert seen["modal"] is False
+
+
+def test_a_second_scan_waits_behind_the_one_already_running(tmp_path, monkeypatch):
+    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestScanQueue")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window._scan_active = True
+            window._scan_label = "Scanning alpha…"
+            window._run_names({"beta"})
+            window._run_names({"gamma", "delta"})
+            seen["waiting"] = [set(item) for item in window._scan_queue]
+            seen["status"] = window.status.get_text()
+            seen["run_enabled"] = window.run_button.get_sensitive()
+            window._scan_active = False
+            window._scan_queue.clear()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["waiting"] == [{"beta"}, {"gamma", "delta"}]
+    assert seen["status"] == "Scanning alpha…  2 scans waiting."
+    assert seen["run_enabled"] is True
+
+
+def test_folder_row_shows_size_and_can_be_ignored(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    (left / "2019").mkdir(parents=True)
+    right.mkdir()
+    (left / "2019" / "song.mp3").write_text("new")
+    (left / "keep.txt").write_text("stay")
+    os.utime(left / "2019" / "song.mp3", (50, 50))
+    os.utime(left / "keep.txt", (50, 50))
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestFolder")
+    save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, scan_profile(profile), None))
+            folder = preview.tree_store.get_iter_first()
+            seen["label"] = preview.tree_store.get_value(folder, 0)
+            seen["size"] = preview.tree_store.get_value(folder, 1)
+            preview._ignore_folder("2019")
+            seen["left"] = [item.change.rel for item in preview.rows]
+            seen["session"] = list(window.session_masks["alpha notes"])
+            seen["saved"] = list(load_profiles()[0].exclusions)
+            preview._save_exclusion("2019")
+            seen["saved_after"] = list(load_profiles()[0].exclusions)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["label"].startswith("2019")
+    assert seen["size"]
+    assert seen["size"] in seen["label"]
+    assert seen["left"] == ["keep.txt"]
+    assert seen["session"] == ["2019"]
+    assert seen["saved"] == []
+    assert seen["saved_after"] == ["2019"]
+
+
+def test_folder_direction_points_the_files_under_it(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    (left / "2019" / "nested").mkdir(parents=True)
+    right.mkdir()
+    (left / "2019" / "song.mp3").write_text("new")
+    (left / "2019" / "nested" / "more.mp3").write_text("more")
+    (left / "keep.txt").write_text("stay")
+    for path in (left / "2019" / "song.mp3", left / "2019" / "nested" / "more.mp3", left / "keep.txt"):
+        os.utime(path, (50, 50))
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestFolderDirection")
+    save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, scan_profile(profile), None))
+            folder = preview.tree_store.get_iter_first()
+            seen["arrow"] = preview.tree_store.get_value(folder, 2)
+
+            def check() -> bool:
+                seen["tries"] = seen.get("tries", 0) + 1
+                view = preview.view
+                path = Gtk.TreePath.new_first()
+                area = view.get_cell_area(path, view.get_column(0))
+                if area.height <= 0 and seen["tries"] < 40:
+                    return True
+                wx, wy = view.convert_bin_window_to_widget_coords(area.x + 8, area.y + area.height // 2)
+                seen["rel"] = preview._rel_at(wx, wy)
+                preview._set_folder_direction(seen["rel"], "left")
+                seen["actions"] = {item.change.rel: item.change.action for item in preview.rows}
+                preview._ignore_folder(seen["rel"])
+                seen["left"] = [item.change.rel for item in preview.rows]
+                seen["note"] = preview.detail.get_text()
+                self.quit()
+                return False
+
+            GLib.timeout_add(50, check)
+
+    assert App().run(None) == 0
+    assert seen["rel"] == "2019"
+    assert seen["arrow"].startswith("L ──▶ R")
+    assert seen["actions"]["2019/song.mp3"] == Action.COPY_RIGHT_TO_LEFT
+    assert seen["actions"]["2019/nested/more.mp3"] == Action.COPY_RIGHT_TO_LEFT
+    assert seen["actions"]["keep.txt"] == Action.COPY_LEFT_TO_RIGHT
+    assert seen["left"] == ["keep.txt"]
+    assert seen["note"] == "Ignored 2 files under 2019 for this run."
+
+
+def test_row_run_scans_that_profile_only(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    changed = tmp_path / "changed"
+    other = tmp_path / "other"
+    right = tmp_path / "right"
+    changed.mkdir()
+    other.mkdir()
+    right.mkdir()
+    (changed / "notes.txt").write_text("new")
+    (right / "notes.txt").write_text("old")
+    os.utime(changed / "notes.txt", (50, 50))
+    os.utime(right / "notes.txt", (10, 10))
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestRowRun")
+    save_profile(Profile(name="alpha notes", left=str(changed), right=str(right), mode=SyncMode.EXACT_MIRROR))
+    save_profile(Profile(name="beta quiet", left=str(other), right=str(other)))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["runs"] = _button_labels(window).count("Run")
+            seen["title"] = window.get_title()
+            seen["run_class"] = "run" in window.run_button.get_css_classes() and _run_buttons_are_marked(window)
+            window._run_one(None, "beta quiet")
+            ticks = {"n": 0}
+
+            def watch() -> bool:
+                ticks["n"] += 1
+                text = window.status.get_text()
+                if text.startswith("Scanned") or ticks["n"] > 150:
+                    seen["status"] = text
+                    self.quit()
+                    return False
+                return True
+
+            GLib.timeout_add(20, watch)
+
+    assert App().run(None) == 0
+    assert seen["runs"] == 2
+    assert seen["title"] == "OFS"
+    assert seen["run_class"]
+    assert seen["status"].startswith("Scanned 1.")
+    assert "0 files, 0 B to copy" in seen["status"]
+
+
+def test_row_actions_and_profile_delete(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    (left / "sub").mkdir(parents=True)
+    right.mkdir()
+    (left / "notes.txt").write_text("new")
+    (right / "notes.txt").write_text("old")
+    (left / "sub" / "clip.txt").write_text("only")
+    os.utime(left / "notes.txt", (50, 50))
+    os.utime(right / "notes.txt", (10, 10))
+    os.utime(left / "sub" / "clip.txt", (10, 10))
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestRows")
+    save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window._duplicate(None, "alpha notes")
+            profile = next(item for item in window.profiles if item.name == "alpha notes")
+            result = scan_profile(profile)
+            preview = window._preview(JobResult(profile, result, None))
+            notes = next(preview.store.get_item(index) for index in range(preview.store.get_n_items()) if preview.store.get_item(index).change.rel == "notes.txt")
+            preview._set_action(notes, Action.UNCHANGED)
+            seen["hidden"] = [change.rel for change in preview._planned()]
+            preview._set_action(notes, None)
+            restored = next(change for change in preview._planned() if change.rel == "notes.txt")
+            seen["restored"] = restored.action
+            clip = next(item for item in preview.rows if item.change.rel == "sub/clip.txt")
+            preview._compare(type("Row", (), {"change": clip.change})())
+            seen["compare"] = preview.detail.get_text()
+            preview._exclude_folder(type("Row", (), {"change": clip.change})())
+            seen["folder_mask"] = list(profile.exclusions)
+            seen["folder_gone"] = [item.change.rel for item in preview.rows]
+            window._remove_profile("alpha notes copy")
+            seen["names"] = [item.name for item in load_profiles()]
+            self.quit()
+
+    assert App().run(None) == 0
+    assert "notes.txt" not in seen["hidden"]
+    assert "sub/clip.txt" in seen["hidden"]
+    assert seen["restored"] == Action.COPY_LEFT_TO_RIGHT
+    assert seen["folder_mask"] == ["sub"]
+    assert "sub/clip.txt" not in seen["folder_gone"]
+    assert seen["compare"] == "Compare needs the file on both sides."
+    assert seen["names"] == ["alpha notes"]
+
+
+def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
+    from sfs.compare import FileStat
+    from sfs.history import database_path, save_history
+    from sfs.store import replace_in_paths
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestPaths")
+    profile = Profile(name="alpha one", left="/media/old/photos", right="/backup")
+    save_profile(profile)
+    save_history(profile, {"a.txt": FileStat(1, 1)}, {})
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            current = window.profiles[0]
+            replace_in_paths(current, "/media/old", "/media/new")
+            window._save_replaced_paths([current])
+            seen["left"] = next(item.left for item in load_profiles() if item.name == "alpha one")
+            seen["database"] = database_path(profile).exists()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["left"] == "/media/new/photos"
+    assert seen["database"] is False

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=OFS
+GenericName=File sync
+Comment=Local folder sync
+Exec=ofs
+Icon=ofs
+Terminal=false
+StartupWMClass=com.sfs.LocalSync
+Categories=Utility;FileTools;
+Keywords=sync;backup;folders;
