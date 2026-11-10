@@ -6,6 +6,7 @@ import os
 import shlex
 import subprocess
 import threading
+import time
 from pathlib import Path
 
 import gi
@@ -19,7 +20,7 @@ from sfs.apply import ApplyReport, RunControl, apply_plan
 from sfs.compare import Action, Change, format_bytes, plan_summary
 from sfs.jobs import JobResult, run_checked
 from sfs.history import delete_history
-from sfs.legacy import import_cfg
+from sfs.legacy import import_cfg, import_global_masks
 from sfs.masks import path_matches
 from sfs.model import Direction, ExclusionMode, Profile, SyncMode, parse_size
 from sfs.review import (
@@ -38,7 +39,14 @@ from sfs.review import (
     write_log,
 )
 from sfs.scan import remember
-from sfs.settings import compare_command, global_exclusions, set_compare_command, set_global_exclusions
+from sfs.settings import (
+    compare_command,
+    global_exclusion_mode,
+    global_exclusions,
+    set_compare_command,
+    set_global_exclusion_mode,
+    set_global_exclusions,
+)
 from sfs.store import config_dir, delete_profile, duplicate_profile, install_imported, load_profiles, replace_in_paths, save_profile
 
 _CFG = Path.home() / ".SuperFlexibleSynchronizer" / "SuperFlexibleSynchronizer.cfg"
@@ -262,10 +270,14 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text(f"No config at {_CFG}")
             return
         count = install_imported(import_cfg(_CFG))
+        masks = import_global_masks(_CFG)
+        if masks:
+            set_global_exclusions(sorted(set(global_exclusions()) | set(masks)))
         self.checked.clear()
         self.reload()
+        globals_note = f" Imported {len(masks)} global exclusion masks." if masks else ""
         self.status.set_text(
-            f"Imported {count} profiles. Filled direction, Exact Mirror, and timestamp rules that were still at the defaults."
+            f"Imported {count} profiles. Filled direction, Exact Mirror, and timestamp rules that were still at the defaults.{globals_note}"
         )
 
     def _new_profile(self, *_args) -> None:
@@ -420,8 +432,16 @@ class MainWindow(Gtk.ApplicationWindow):
         scroll = Gtk.ScrolledWindow(min_content_height=160, vexpand=True)
         scroll.set_child(masks)
         global_hint = Gtk.Label(xalign=0, wrap=True)
-        global_hint.set_text("Ignored on every profile: not copied, and not deleted. One mask per line. Saving an empty list turns the defaults off.")
+        global_hint.set_text(
+            "Applied to every profile. Ignore Totally: not copied and not deleted. "
+            "Don't Copy: never transferred, but Exact Mirror deletes an extra copy on the destination. "
+            "One mask per line. Saving an empty list turns the defaults off."
+        )
         global_hint.add_css_class("dim-label")
+        dont_copy = Gtk.CheckButton(label="Don't Copy")
+        ignore_totally = Gtk.CheckButton(label="Ignore Totally", group=dont_copy)
+        ignore_totally.set_active(global_exclusion_mode() == ExclusionMode.IGNORE_TOTALLY)
+        dont_copy.set_active(global_exclusion_mode() == ExclusionMode.DONT_COPY)
         save = Gtk.Button(label="Save")
 
         def on_save(*_args) -> None:
@@ -429,10 +449,13 @@ class MainWindow(Gtk.ApplicationWindow):
             buffer = masks.get_buffer()
             text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
             set_global_exclusions([line.strip() for line in text.splitlines() if line.strip()])
+            set_global_exclusion_mode(ExclusionMode.DONT_COPY if dont_copy.get_active() else ExclusionMode.IGNORE_TOTALLY)
             window.close()
 
         save.connect("clicked", on_save)
         box.append(scroll)
+        box.append(dont_copy)
+        box.append(ignore_totally)
         box.append(global_hint)
         box.append(save)
         window.set_child(box)
@@ -699,10 +722,10 @@ def _install_css() -> None:
     provider.load_from_string(
         "label.banner { background-color: alpha(@theme_selected_bg_color, 0.35); padding: 8px; }"
         "button.compact { min-height: 0; min-width: 0; padding: 0 8px; font-size: 0.85em; }"
-        "button.run { background-color: #2f9e44; color: white; }"
-        "button.run:hover { background-color: #37b24d; color: white; }"
-        "button.run:active { background-color: #2b8a3e; color: white; }"
-        "button.run:disabled { background-color: alpha(#2f9e44, 0.45); color: alpha(white, 0.8); }"
+        "button.run { background-color: #2f9e44; color: white; background-image: none; }"
+        "button.run:hover { background-color: #37b24d; color: white; background-image: none; }"
+        "button.run:active { background-color: #2b8a3e; color: white; background-image: none; }"
+        "button.run:disabled { background-color: alpha(#2f9e44, 0.45); color: alpha(white, 0.8); background-image: none; }"
         "label.group-name { font-weight: 800; font-size: 1.35em; }"
         "label.group-count {"
         " font-weight: 700;"
@@ -1177,7 +1200,8 @@ class Preview(Gtk.Window):
             return
         changes = self._planned()
         if not changes:
-            self.detail.set_text("Nothing to copy, move, or delete.")
+            self.detail.set_text("Nothing to copy, move, or delete. Recording the run.")
+            self._begin([], "empty run")
             return
         warning = safety_text(self.job.profile, self.rows)
         if warning is None:
@@ -1277,10 +1301,12 @@ class Preview(Gtk.Window):
                 remember(self.job.profile)
             except Exception as exc:
                 report.errors.append(f"history: {exc}")
-            try:
-                path = write_log(self.job.profile, log_body(self.job.profile, changes, report, choice=choice))
-            except Exception as exc:
-                report.errors.append(f"log: {exc}")
+            path = None
+            if changes:
+                try:
+                    path = write_log(self.job.profile, log_body(self.job.profile, changes, report, choice=choice))
+                except Exception as exc:
+                    report.errors.append(f"log: {exc}")
             GLib.idle_add(self._finished, progress, report, path)
 
         threading.Thread(target=work, daemon=True).start()
@@ -1289,7 +1315,7 @@ class Preview(Gtk.Window):
         progress.allow_close()
         self._running = False
         text = report.summary()
-        self.job.profile.last_result = text
+        self.job.profile.last_result = f"{time.strftime('%Y-%m-%d %H:%M')}  {text}"
         save_profile(self.job.profile)
         self.owner.reload()
         self.detail.set_text(text)
