@@ -2,10 +2,11 @@
 
 64-bit local sync app. Profiles, mask modes, and timestamp rules live in Python. The window is GTK 4.
 
-Import can read `~/.SuperFlexibleSynchronizer/SuperFlexibleSynchronizer.cfg` and does not modify that file or the 32-bit program in the parent folder. Requirements are in `PRD.md`.
+Import can read `~/.SuperFlexibleSynchronizer/SuperFlexibleSynchronizer.cfg` and does not modify that file. The behavior spec is in `docs/spec.md`.
+
+Needs Python 3.11 or newer, GTK 4, and PyGObject. From this directory:
 
 ```bash
-cd sfs
 python3 -m sfs
 python3 -m sfs import
 python3 -m sfs list
@@ -13,12 +14,10 @@ python3 -m sfs scan "profile name"
 python3 -m sfs run "profile name" --apply
 ```
 
-The GNOME menu name is OFS. `launch.sh` puts `src` on `PYTHONPATH` and starts the window. `com.sfs.LocalSync.desktop` is a sample entry with `Exec=ofs`. On a machine where the package is not installed, point that entry at `launch.sh` and at `icons/sfs.png`.
-
-Pytest is not installed for the system Python. From `sfs/`, with pytest available on `PYTHONPATH`:
+`launch.sh` puts `src` on `PYTHONPATH` and starts the window. The GNOME menu name is OFS. `com.sfs.LocalSync.desktop` is a sample entry with `Exec=ofs`. On a machine where the package is not installed, point that entry at `launch.sh` and at `icons/sfs.png`.
 
 ```bash
-PYTHONPATH=/tmp/sfs-pydeps python3 -m pytest -q
+python3 -m pytest -q
 ```
 
 `src` is already on the test path through `pyproject.toml`.
@@ -27,7 +26,7 @@ PYTHONPATH=/tmp/sfs-pydeps python3 -m pytest -q
 
 JSON files in `~/.config/sfs/profiles`, one file per name. `SFS_HOME` overrides `~/.config/sfs` for profiles, the file database, and logs.
 
-Import copies the name, both paths, and the masks, and it fills direction, Standard or Exact Mirror, and the four timestamp checkboxes from the old profile. In this config those jobs are Exact Mirror. Right to left is the `YN` pair; the usual direction is left to right. Exclusions stay Ignore Totally. Versioning is not in those bytes, so `Older` stays off. A second import does not change a profile again, and it does not replace a path, a mask, a note, or a last result you already have. The group is the first word of the name. The overview lists those groups as headings, collapsed until you open one. Expand all and Collapse all open or close every group. Search matches the name and the group, and opens the groups that match. A run scans only the checked profiles.
+Import copies the name, both paths, and the masks, and it fills direction, Standard or Exact Mirror, and the four timestamp checkboxes from the old profile. A mode digit of `1` is Exact Mirror and `0` is Standard. Right to left is the `YN` pair; the usual direction is left to right. Exclusions stay Ignore Totally. Versioning is not in those bytes, so `Older` stays off. A second import does not change a profile again, and it does not replace a path, a mask, a note, or a last result you already have. The group is the first word of the name. The overview lists those groups as headings, collapsed until you open one. Expand all and Collapse all open or close every group. Search matches the name and the group, and opens the groups that match. A run scans only the checked profiles.
 
 Edit can set direction, Standard or Exact Mirror, the exclusion mode, the timestamp rules, binary compare, `Older` for replaced files, and the file database. Min size, max size, min age, and max age leave a file out of the plan when it is outside those limits. Empty means that limit is off. A file outside the limits is listed as skipped: it is not copied and it is not deleted. The Skipped filter shows those rows. Don't Copy leaves the file visible, and Exact Mirror may delete the other side's copy. Ignore Totally hides the file from copy and from delete. In Exact Mirror, one file that exists only on the source and one file that exists only on the destination become a move when the timestamp rules call them the same file and the match is unique. Same-size duplicates stay a copy and a delete. That pairing does not use the file database. Standard copying still copies the new path and leaves the old one.
 

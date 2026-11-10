@@ -1,46 +1,45 @@
-# PRD: OFS
+# OFS
 
-OFS is a 64-bit desktop app for grouped local sync jobs. The requirements come from the jobs on this machine, from what FreeFileSync and Syncovery do not cover, and from profiles that can be imported from Super Flexible File Synchronizer 5.71.
+OFS is a 64-bit desktop app for grouped local sync jobs. The requirements come from running many local folder jobs, from what FreeFileSync and Syncovery do not cover, and from profiles that can be imported from Super Flexible File Synchronizer 5.71.
 
 OFS does not copy that program's binary, artwork, or profile-file format. Import reads `~/.SuperFlexibleSynchronizer/SuperFlexibleSynchronizer.cfg` and leaves the file unchanged.
 
 ## Problem
 
-Super Flexible 5.71, already installed beside OFS, is a 32-bit GTK2 program. On a current Linux desktop it needs a 32-bit library stack, a dialog-size workaround, and a font-DPI lock so fractional scaling does not paint the path on top of the profile name. It still runs the real jobs.
+Super Flexible File Synchronizer 5.71 is a 32-bit GTK2 program. On a current Linux desktop it needs a 32-bit library stack. Fractional display scaling can paint a path on top of the profile name. It can still run the jobs.
 
-FreeFileSync is already installed and is acceptable for a handful of jobs. It is not acceptable for this workload:
+FreeFileSync is acceptable for a handful of jobs. It is a poor fit for a large set of local jobs:
 
 - Filters are coarser. This app distinguishes masks that are not copied from masks that are ignored entirely.
 - Timestamp comparison cannot ignore small differences, one-hour shifts, seconds, or the timestamp itself.
-- There is no overview that groups on the order of 170 jobs by name and runs a checked subset.
+- There is no overview that groups a large set of jobs by name and runs a checked subset.
 - Scans feel slower. The check modes are narrower.
 - The preview is missing the right-click actions used on almost every run: open the file or folder, add an exclusion to the profile, and ignore an item only for this run.
 
-Syncovery, from the same author as Super Flexible, is a service with a browser UI at `localhost:8999` on Linux. The Windows and Mac builds still have a native window. The Linux web GUI is thinner, and it is not the desktop app this PRD describes.
+Syncovery, from the same author as Super Flexible, is a service with a browser UI at `localhost:8999` on Linux. The Windows and Mac builds still have a native window. The Linux web GUI is thinner, and it is not the desktop app this spec describes.
 
 ## User and current workload
 
-One person, many disks and mounted volumes, on the order of 170 profiles in a proprietary `SuperFlexibleSynchronizer.cfg`. The ini file only holds global preferences.
+One person, many disks and mounted volumes, and a large set of profiles in a proprietary `SuperFlexibleSynchronizer.cfg`. The ini section of that file holds global preferences.
 
 Profiles are grouped by the first word of the name. A few groups hold most of the jobs, and the rest are small.
 
-The config stores, per profile, a left path, a right path, an include mask (usually `(all)`), and exclusion masks. Typical exclusions are `System Volume Information`, `$RECYCLE.BIN`, `@eaDir`, `@tmp`, and `.Trash-1000`. Last-run text records copied, moved, folders moved, and deleted. The word `Older` appears throughout the file (versioning folder). Partial-update settings exist globally (minimum 512 KB, some extensions excluded from partial update). SMTP fields exist and are empty. No `ftp://`, `sftp://`, or `s3://` URLs are stored.
+The config stores, per profile, a left path, a right path, an include mask (usually `(all)`), and exclusion masks. Typical exclusions are `System Volume Information`, `$RECYCLE.BIN`, `@eaDir`, `@tmp`, and `.Trash-1000`. Last-run text records copied, moved, folders moved, and deleted. Versioning uses a folder named `Older`. Partial-update settings can exist globally: a minimum size, and extensions that are always copied whole. SMTP fields may be present and empty. The jobs this spec covers store no `ftp://`, `sftp://`, or `s3://` URLs.
 
-Global paths today:
+On a typical 5.71 install:
 
 - Logs: `~/.SuperFlexibleSynchronizer/Logs`
 - Database: `~/.SuperFlexibleSynchronizer/Database`
-- Memory cap 2047 MB, copy buffer 1024 KB
 
 ## Product goal
 
 A native 64-bit desktop app for this workload: pick a group, check the jobs, scan by size and time, then in the preview open a path, permanently ignore something, or skip it once.
 
-Internet protocols, ZIP packages, and the full SmartTracking database exist in Super Flexible 5.71. They are recorded below so they are not forgotten. They are not required for the first version that can run these jobs.
+Internet protocols, ZIP packages, and the full SmartTracking database exist in Super Flexible 5.71. They are recorded below so they are not forgotten. They are not required for the first version that can run local folder jobs.
 
-## Where `sfs/` stands
+## Where the app stands
 
-The 64-bit app lives in `sfs/`. Python 3.14 and GTK 4. Profiles are JSON under `~/.config/sfs` (`SFS_HOME` overrides that directory). How to run it is in `sfs/README.md`. Import reads the old `.cfg` and does not modify it or the 32-bit binary.
+The app is this repository. It needs Python 3.11 or newer, GTK 4, and PyGObject. Profiles are JSON under `~/.config/sfs` (`SFS_HOME` overrides that directory). How to run it is in `README.md`. Import reads the old `.cfg` and does not modify it.
 
 In the tree now:
 
@@ -54,11 +53,11 @@ In the tree now:
 - Optional left and right volume labels. A scan refuses a folder that is not on that disk and continues with the next checked profile. Replace paths asks, then rewrites the checked profiles and removes their file databases.
 - A GNOME launcher named OFS starts this app. It is separate from the 32-bit program and does not use that program's DPI lock.
 
-Still open, and still in the sections below: scheduler, unattended runs, multi-edit of one field across profiles, partial files, ZIP, internet protocols, and mail. Import now reads direction, Standard versus Exact Mirror, and the four timestamp checkboxes. Versioning bytes do not vary in this `.cfg`, so `Older` stays off. The comparison filters hide rows. Start still runs the whole remaining plan.
+Still open, and still in the sections below: scheduler, unattended runs, multi-edit of one field across profiles, partial files, ZIP, internet protocols, and mail. Import reads direction, Standard versus Exact Mirror, and the four timestamp checkboxes. Versioning on or off is not a varying per-profile flag in that `.cfg`, so `Older` stays off. The comparison filters hide rows. Start still runs the whole remaining plan.
 
 ## Requirements added after the first draft
 
-These were missing from the first write-up. They come from using the preview and the scan on the imported jobs, and they are required.
+These were missing from the first write-up. They come from using the preview and the scan, and they are required.
 
 - Groups are headings. They start collapsed. Expand all and Collapse all act on every group. Search opens each group that matches.
 - Run checked scans the checked profiles. A Run control on the profile row scans that profile only.
@@ -66,17 +65,17 @@ These were missing from the first write-up. They come from using the preview and
 - The comparison is a folder tree. Folders come before the files inside them. Each file row shows the name, the size, a direction arrow, and the reason. Each folder row shows that folder's total size beside the name and again in the size column. Its direction cell counts the arrows under it, for example `L ──▶ R  12`. Its status cell shows the bytes for each of those groups.
 - Direction is an arrow diagram. `L ──▶ R` copies onto the right. `L ◀── R` copies onto the left. `L ──✕ R` deletes on the right. `L ✕── R` deletes on the left. `L ──? R` is undecided. `L ─── R` is unchanged. `L ··· R` is skipped. A move uses the same arrow as a copy on that side. The action name (`copy_l2r` and the rest) stays in the log line, not in the direction column.
 - Right-click a folder to open the left folder, open the right folder, add that folder to the profile exclusions, or ignore it for this run. The same menu can point every planned file in that folder and below it with `L ──▶ R` or `L ◀── R`. A copy or an undecided file becomes a copy. A move stays a move. A delete stays a delete, on the side the arrow points at. Unchanged and skipped files stay. A file menu uses the same two arrows for that one file.
-- A lone `*` in an exclusion list matches no path. Super Flexible 5.71 stores that star between the junk-folder masks, including on the music profiles. An include list of `(all)` still includes every file. `*.tmp` matches that name in any folder. A mask that names a folder matches that folder and everything under it.
+- A lone `*` in an exclusion list matches no path. Super Flexible 5.71 stores that star between the junk-folder masks. An include list of `(all)` still includes every file. `*.tmp` matches that name in any folder. A mask that names a folder matches that folder and everything under it.
 - A log file is written when a confirmed Start begins copying, and when `run --apply` begins copying. Scanning, looking at the preview, canceling a scan, and choosing Do Not Continue do not write a log.
 - The desktop entry is named OFS and launches this app on its own. It does not launch the 32-bit program and it does not set that program's DPI lock.
 
 ## Users
 
-Primary user: the owner of these profiles. They edit exclusions during a preview more often than they edit a profile form. They run many jobs, not a few.
+The person who keeps the profiles edits exclusions during a preview more often than they edit a profile form. They run many jobs, not a few.
 
 ## P0 — required for the first usable version
 
-These are the requirements the user added, restated with the behavior found in the 5.71 UI.
+These are the requirements added after the first draft, restated with the behavior found in the 5.71 UI.
 
 ### Profile overview for many jobs
 
@@ -167,7 +166,7 @@ Above the list, each base folder shows how many files would be copied onto that 
 
 ### Speed
 
-A scan of a large tree is metadata only unless the profile turned on binary comparison. The UI stays usable with about 170 profiles loaded. Starting a checked subset does not scan the unchecked jobs.
+A scan of a large tree is metadata only unless the profile turned on binary comparison. The UI stays usable with a large profile list loaded. Starting a checked subset does not scan the unchecked jobs.
 
 ### Scan progress
 
@@ -187,11 +186,11 @@ Scanning has its own window, separate from the copying progress window.
 
 ## P1 — required for the jobs to behave as they do now
 
-Found in the program and in this config. Not called out by name in the later notes, but the stored jobs use them.
+Found in 5.71. Not called out by name in the later notes, but the stored jobs use them.
 
 ### Deletions and safety
 
-- Attended runs ask before deletions. Unattended runs follow the profile and do not stop for each file. The `sfs/` window is attended only.
+- Attended runs ask before deletions. Unattended runs follow the profile and do not stop for each file. The OFS window is attended only.
 - Exact Mirror can warn before overwriting a newer file with an older one, before deleting more than a set percentage of a folder, and before deleting every file in a folder.
 - Deleted files can be removed permanently, or moved into a specified folder.
 - Options: never delete files (folders only); remove folders that became empty; create empty folders; remove destination files that do not match the include masks or the filters.
@@ -220,7 +219,7 @@ The config uses an “Older” tree. The product must be able to keep replaced f
 
 - Move the previous file into a folder named `Older`, either as a subfolder of each folder or as one tree that recreates the relative path.
 - Cap how many older versions to keep, and prune past that cap.
-- Filename versioning is a second, later mechanism (timestamp in the name, `(2)` before the extension). The folder named `Older` is the one this config uses.
+- Filename versioning is a second, later mechanism (timestamp in the name, `(2)` before the extension). The folder named `Older` is the one OFS keeps.
 
 ### Scheduler
 
@@ -242,7 +241,7 @@ View Log opens that run's text file. A confirmed Start that begins copying write
 ### Volume presence
 
 - A side may require a volume label. If that volume is not mounted, or the folder is on a different disk, skip the job with "volume is not mounted" and continue with the next checked profile. Do not scan the wrong disk.
-- Paths in this config are local directories and mount points under `/media`, `/run/media`, and `/home`. Import copies each path as stored.
+- Import copies each local path as stored. A path may be a directory or a mount point.
 
 ### Profile editing
 
@@ -280,13 +279,13 @@ Recorded so a later version can add them without a new discovery pass. Nothing h
 
 ### Partial files, ZIP, encryption
 
-- Partial update of large files above a minimum size (this config: 512 KB), with an exclude list of extensions that are always copied whole.
+- Partial update of large files above a minimum size, with an exclude list of extensions that are always copied whole.
 - ZIP package as the destination, optional encryption phrase, max ZIP size, and masks that are never zipped.
 - Synthetic backup: partial update plus ZIP plus versioning, with checkpoints. Not used by the requirement for v1.
 
 ### Internet protocols
 
-Present in 5.71, absent from this config: FTP (two client stacks), FTPS, SFTP/SSH with keys, WebDAV, HTTP, Amazon S3, Google storage. Plus proxies, client certificates, upload timestamps, timezone detection, public-ACL flag, and resume with a temporary name. Size limits in this build: 5 GB on S3, 10 GB on Google.
+Present in 5.71, and not required for the local jobs this spec covers: FTP (two client stacks), FTPS, SFTP/SSH with keys, WebDAV, HTTP, Amazon S3, Google storage. Plus proxies, client certificates, upload timestamps, timezone detection, public-ACL flag, and resume with a temporary name. Size limits in that program: 5 GB on S3, 10 GB on Google.
 
 ### Other old features
 
@@ -294,7 +293,7 @@ Present in 5.71, absent from this config: FTP (two client stacks), FTPS, SFTP/SS
 - Symlink recorded as a symlink rather than followed.
 - Mac resource forks split into AppleDouble files.
 - Before and after external commands. A leading `&` skips the after-command. A leading `-` runs the after-command only on error. The old Linux build has a “waiting for external command not implemented” path; the new app should actually run the command.
-- SMTP mail: on error, on conflict, when nothing happened, or as a digest, with the log attached. Recipients, sender, server, port, SSL. This config has the fields and no recipients.
+- SMTP mail: on error, on conflict, when nothing happened, or as a digest, with the log attached. Recipients, sender, server, port, SSL. OFS does not send mail.
 - Restore wizard: pick a time, masks, size and time filters, then restore from `Older` or from the backup database.
 - Flat right side: collapse the source tree into one destination folder.
 - “Obsolete Files” folder as a destination for extras.
@@ -316,7 +315,7 @@ One-time read of `~/.SuperFlexibleSynchronizer/SuperFlexibleSynchronizer.cfg`:
 - Exclusion mask string, including a lone `*` where the old file stored one. That star matches no path.
 - Group, derived from the first word of the name
 
-The settings block is aligned on the ASCII size `1099511627776`. Import reads the mode digit (`0` Standard, `1` Exact Mirror), the direction pair (`NY` left to right, `YN` right to left), and the four timestamp letters at the comparison checkboxes (2 seconds, exact hour, ignore timestamp, ignore seconds). In this file the mode digit is `1` on every profile, and every 5.71 log says Exact Mirror. SmartTracking is not a mode in the new app. Don't Copy versus Ignore Totally, and versioning on or off, do not vary here, so exclusions stay Ignore Totally and `Older` stays off. A second import does not write over a profile that already received these flags, and it does not replace paths, masks, notes, or last results.
+The settings block is aligned on the ASCII size `1099511627776`. Import reads the mode digit (`0` Standard, `1` Exact Mirror), the direction pair (`NY` left to right, `YN` right to left), and the four timestamp letters at the comparison checkboxes (2 seconds, exact hour, ignore timestamp, ignore seconds). A profile whose mode digit is `1` imports as Exact Mirror. A profile whose mode digit is `0` imports as Standard. SmartTracking is not a mode in the new app. Don't Copy versus Ignore Totally, and versioning on or off, do not vary in that block, so exclusions stay Ignore Totally and `Older` stays off. A second import does not write over a profile that already received these flags, and it does not replace paths, masks, notes, or last results.
 
 Last-run summary text may be imported as a note. It must not be treated as a live file list.
 
@@ -351,7 +350,7 @@ Last-run summary text may be imported as a note. It must not be treated as a liv
 
 ## Open points
 
-- Versioning on or off is still not imported. Those bytes do not vary in this `.cfg`.
+- Versioning on or off is still not imported. Those bytes are not a per-profile flag OFS reads.
 - Whether v1 scheduling is a user systemd timer per checked profile, or a single process that sleeps until the next job. Either is fine if the overview still shows the next run.
 - The external compare command defaults to `meld`. Settings stores another command, and `SFS_COMPARE` overrides it for one launch.
 - Parallel runs: the old program can start checked profiles together. v1 can run them one at a time if the overview stays responsive.

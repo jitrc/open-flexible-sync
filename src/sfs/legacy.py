@@ -1,12 +1,11 @@
 """Read profiles from a Super Flexible 5.71 .cfg blob.
 
 Settings are aligned on the ASCII size ``1099511627776`` (1 TiB).
-The mode digit does not vary in this file. ``1`` is Exact Mirror, which
-matches every 5.71 log, and ``0`` is Standard. SmartTracking has no mode
-here. ``NY`` / ``YN`` at +35 is left-to-right / right-to-left. The four
-Y/N letters at +301 are the comparison checkboxes, in form order:
-2 seconds, exact hour, ignore timestamp, ignore seconds. Versioning and
-Don't Copy versus Ignore Totally do not vary, so those stay at the defaults.
+The mode digit at +16 is ``1`` for Exact Mirror and ``0`` for Standard.
+SmartTracking has no mode here. ``NY`` / ``YN`` at +35 is left-to-right /
+right-to-left. The four Y/N letters at +301 are the comparison checkboxes,
+in form order: 2 seconds, exact hour, ignore timestamp, ignore seconds.
+Versioning and Don't Copy versus Ignore Totally stay at the defaults.
 """
 
 from __future__ import annotations
