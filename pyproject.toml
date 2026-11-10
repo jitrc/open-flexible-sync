@@ -1,12 +1,12 @@
 [project]
-name = "sfs"
-version = "0.1.0"
+name = "ofs"
+version = "0.2.0"
 description = "Local folder sync with profile groups, mask modes, and timestamp rules."
 requires-python = ">=3.11"
 readme = "README.md"
 
 [project.scripts]
-sfs = "sfs.__main__:main"
+ofs = "ofs.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -5,15 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sfs.apply import files_identical
-from sfs.compare import Change, FileStat, build_plan, classify_time
-from sfs.history import adjust_plan, load_history, save_history
-from sfs.masks import any_match
-from sfs.model import ExclusionMode, Profile
-from sfs.review import Listed, build_listing
-from sfs.settings import global_exclusion_mode, global_exclusions
-from sfs.volume import ensure_volume
-from sfs.walk import WalkStopped, ensure_dir, walk
+from ofs.apply import files_identical
+from ofs.compare import Change, FileStat, build_plan, classify_time
+from ofs.history import adjust_plan, load_history, save_history
+from ofs.masks import any_match
+from ofs.model import ExclusionMode, Profile
+from ofs.review import Listed, build_listing
+from ofs.settings import global_exclusion_mode, global_exclusions
+from ofs.volume import ensure_volume
+from ofs.walk import WalkStopped, ensure_dir, walk
 
 
 @dataclass

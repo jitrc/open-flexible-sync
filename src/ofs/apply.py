@@ -8,8 +8,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from sfs.compare import Action, Change
-from sfs.model import Profile
+from ofs.compare import Action, Change
+from ofs.model import Profile
 
 
 class ApplyError(Exception):

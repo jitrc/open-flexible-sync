@@ -16,14 +16,14 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
-from sfs.apply import ApplyReport, RunControl, apply_plan
-from sfs.compare import Action, Change, format_bytes, plan_summary
-from sfs.jobs import JobResult, run_checked
-from sfs.history import delete_history
-from sfs.legacy import import_cfg, import_global_masks
-from sfs.masks import path_matches
-from sfs.model import Direction, ExclusionMode, Profile, SyncMode, parse_size
-from sfs.review import (
+from ofs.apply import ApplyReport, RunControl, apply_plan
+from ofs.compare import Action, Change, format_bytes, plan_summary
+from ofs.jobs import JobResult, run_checked
+from ofs.history import delete_history
+from ofs.legacy import import_cfg, import_global_masks
+from ofs.masks import path_matches
+from ofs.model import Direction, ExclusionMode, Profile, SyncMode, parse_size
+from ofs.review import (
     SAFETY_SECONDS,
     Listed,
     log_body,
@@ -38,8 +38,8 @@ from sfs.review import (
     without_deletes,
     write_log,
 )
-from sfs.scan import remember
-from sfs.settings import (
+from ofs.scan import remember
+from ofs.settings import (
     compare_command,
     global_exclusion_mode,
     global_exclusions,
@@ -47,7 +47,7 @@ from sfs.settings import (
     set_global_exclusion_mode,
     set_global_exclusions,
 )
-from sfs.store import config_dir, delete_profile, duplicate_profile, install_imported, load_profiles, replace_in_paths, save_profile
+from ofs.store import config_dir, delete_profile, duplicate_profile, install_imported, load_profiles, replace_in_paths, save_profile
 
 _CFG = Path.home() / ".SuperFlexibleSynchronizer" / "SuperFlexibleSynchronizer.cfg"
 
@@ -370,7 +370,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._save_replaced_paths(changed)
 
     def _save_replaced_paths(self, changed: list[Profile]) -> None:
-        from sfs.history import delete_history
+        from ofs.history import delete_history
 
         for profile in changed:
             save_profile(profile)
@@ -421,7 +421,7 @@ class MainWindow(Gtk.ApplicationWindow):
         box.append(Gtk.Label(label="Compare files with", xalign=0))
         entry = Gtk.Entry(text=compare_command())
         hint = Gtk.Label(xalign=0, wrap=True)
-        hint.set_text("The two file paths are added after this command. SFS_COMPARE overrides it for one launch.")
+        hint.set_text("The two file paths are added after this command. OFS_COMPARE overrides it for one launch.")
         hint.add_css_class("dim-label")
         box.append(entry)
         box.append(hint)
@@ -532,7 +532,7 @@ class MainWindow(Gtk.ApplicationWindow):
         grid.attach(save, 1, len(rows) + 1, 1, 1)
 
         def on_save(*_args) -> None:
-            from sfs.model import TimestampRules
+            from ofs.model import TimestampRules
 
             chosen = name.get_text().strip()
             if not chosen:
@@ -568,13 +568,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 imported_settings=False if existing is None else existing.imported_settings,
             )
             if existing is not None and existing.name != chosen:
-                from sfs.history import delete_history
-                from sfs.store import delete_profile
+                from ofs.history import delete_history
+                from ofs.store import delete_profile
 
                 delete_profile(existing.name)
                 delete_history(existing.name)
             elif existing is not None and (existing.left != updated.left or existing.right != updated.right):
-                from sfs.history import delete_history
+                from ofs.history import delete_history
 
                 delete_history(chosen)
             save_profile(updated)
@@ -1534,7 +1534,7 @@ class ResultsWindow(Gtk.Window):
 
 class SfsApplication(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id=os.environ.get("SFS_APP_ID", "com.sfs.LocalSync"))
+        super().__init__(application_id=os.environ.get("OFS_APP_ID") or os.environ.get("SFS_APP_ID") or "com.ofs.LocalSync")
 
     def do_activate(self) -> None:
         window = self.props.active_window

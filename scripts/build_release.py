@@ -38,7 +38,7 @@ except Exception:
         "Fedora: sudo dnf install python3-gobject gtk4"
     )
 ' || exit 1
-exec python3 -m sfs "$@"
+exec python3 -m ofs "$@"
 """
 
 APPRUN = LAUNCHER.replace('ROOT="$(dirname "$(readlink -f "$0")")"', 'ROOT="$(dirname "$(readlink -f "$0")")/usr"')
@@ -51,7 +51,7 @@ Comment=Local folder sync
 Exec=ofs
 Icon=ofs
 Terminal=false
-StartupWMClass=com.sfs.LocalSync
+StartupWMClass=com.ofs.LocalSync
 Categories=Utility;FileTools;
 """
 
@@ -69,9 +69,9 @@ def version() -> str:
 
 
 def copy_package(dest_src: Path) -> None:
-    package = dest_src / "sfs"
+    package = dest_src / "ofs"
     package.mkdir(parents=True)
-    for path in sorted((ROOT / "src" / "sfs").glob("*.py")):
+    for path in sorted((ROOT / "src" / "ofs").glob("*.py")):
         shutil.copy2(path, package / path.name)
 
 
@@ -145,8 +145,8 @@ def make_appimage(found: str, dist: Path) -> Path:
     appdir.mkdir(parents=True)
     write_executable(appdir / "AppRun", APPRUN)
     (appdir / "ofs.desktop").write_text(DESKTOP, encoding="utf-8")
-    shutil.copy2(ROOT / "icons" / "sfs.png", appdir / "ofs.png")
-    shutil.copy2(ROOT / "icons" / "sfs.svg", appdir / "ofs.svg")
+    shutil.copy2(ROOT / "icons" / "ofs.png", appdir / "ofs.png")
+    shutil.copy2(ROOT / "icons" / "ofs.svg", appdir / "ofs.svg")
     copy_package(appdir / "usr" / "src")
     output = dist / f"OFS-{found}-x86_64.AppImage"
     if output.exists():
@@ -162,8 +162,8 @@ def make_appimage(found: str, dist: Path) -> Path:
 
 def _env(home: str) -> dict[str, str]:
     env = os.environ.copy()
-    env["SFS_HOME"] = home
-    env["SFS_APP_ID"] = "com.sfs.BuildCheck"
+    env["OFS_HOME"] = home
+    env["OFS_APP_ID"] = "com.ofs.BuildCheck"
     env["APPIMAGE_EXTRACT_AND_RUN"] = "1"
     return env
 

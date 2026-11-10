@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import os
 
-from sfs.masks import split_masks
-from sfs.model import ExclusionMode
-from sfs.store import config_dir
+from ofs.masks import split_masks
+from ofs.model import ExclusionMode
+from ofs.store import config_dir
 
 _COMPARE_DEFAULT = "meld"
 DEFAULT_GLOBAL_EXCLUSIONS = [
@@ -34,9 +34,10 @@ def load_settings() -> dict:
 
 
 def compare_command() -> str:
-    """Program used by Compare files. `SFS_COMPARE` wins over the saved setting."""
+    """Program used by Compare files. `OFS_COMPARE` wins over the saved setting."""
 
-    override = os.environ.get("SFS_COMPARE", "").strip()
+    override = os.environ.get("OFS_COMPARE") or os.environ.get("SFS_COMPARE") or ""
+    override = override.strip()
     if override:
         return override
     saved = str(load_settings().get("compare_command") or "").strip()

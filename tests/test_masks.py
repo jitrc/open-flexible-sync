@@ -1,4 +1,4 @@
-from sfs.masks import any_match, included, path_matches, split_masks
+from ofs.masks import any_match, included, path_matches, split_masks
 
 
 def test_split_accepts_semicolons_and_lines():

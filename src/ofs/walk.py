@@ -7,7 +7,7 @@ import stat
 import time
 from pathlib import Path
 
-from sfs.compare import FileStat
+from ofs.compare import FileStat
 
 
 class MissingVolume(Exception):

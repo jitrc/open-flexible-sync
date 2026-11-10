@@ -13,7 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from sfs.model import Direction, ExclusionMode, Profile, SyncMode, TimestampRules
+from ofs.model import Direction, ExclusionMode, Profile, SyncMode, TimestampRules
 
 _SEP = b"\xa0-\xa0"
 _ANCHOR = b"1099511627776"

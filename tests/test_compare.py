@@ -1,5 +1,5 @@
-from sfs.compare import Action, FileStat, build_plan, classify_time, plan_summary
-from sfs.model import Direction, ExclusionMode, Profile, SizeConflict, SyncMode, TimestampRules
+from ofs.compare import Action, FileStat, build_plan, classify_time, plan_summary
+from ofs.model import Direction, ExclusionMode, Profile, SizeConflict, SyncMode, TimestampRules
 
 
 def rules(**kwargs) -> TimestampRules:

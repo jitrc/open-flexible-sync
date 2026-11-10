@@ -6,6 +6,6 @@ Comment=Local folder sync
 Exec=ofs
 Icon=ofs
 Terminal=false
-StartupWMClass=com.sfs.LocalSync
+StartupWMClass=com.ofs.LocalSync
 Categories=Utility;FileTools;
 Keywords=sync;backup;folders;

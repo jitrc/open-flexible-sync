@@ -1,11 +1,11 @@
-from sfs.model import Profile, parse_size
-from sfs.scan import scan_profile
-from sfs.settings import compare_command, global_exclusions, set_compare_command, set_global_exclusions
-from sfs.store import duplicate_profile, load_profiles, save_profile
+from ofs.model import Profile, parse_size
+from ofs.scan import scan_profile
+from ofs.settings import compare_command, global_exclusions, set_compare_command, set_global_exclusions
+from ofs.store import duplicate_profile, load_profiles, save_profile
 
 
 def test_duplicate_keeps_the_job_and_clears_the_last_result(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path))
     save_profile(Profile(name="alpha notes", left="/l", right="/r", exclusions=["*.tmp"], last_result="3 copied"))
     first = duplicate_profile(next(item for item in load_profiles() if item.name == "alpha notes"))
     second = duplicate_profile(next(item for item in load_profiles() if item.name == "alpha notes"))
@@ -25,7 +25,7 @@ def test_parse_size_accepts_units():
 
 
 def test_default_global_masks_hide_temp_files_until_settings_replace_them(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path))
     left = tmp_path / "left"
     right = tmp_path / "right"
     left.mkdir()
@@ -43,10 +43,10 @@ def test_default_global_masks_hide_temp_files_until_settings_replace_them(tmp_pa
 
 
 def test_compare_command_uses_the_setting_unless_the_environment_wins(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path))
-    monkeypatch.delenv("SFS_COMPARE", raising=False)
+    monkeypatch.setenv("OFS_HOME", str(tmp_path))
+    monkeypatch.delenv("OFS_COMPARE", raising=False)
     assert compare_command() == "meld"
     set_compare_command("kdiff3")
     assert compare_command() == "kdiff3"
-    monkeypatch.setenv("SFS_COMPARE", "nvim -d")
+    monkeypatch.setenv("OFS_COMPARE", "nvim -d")
     assert compare_command() == "nvim -d"

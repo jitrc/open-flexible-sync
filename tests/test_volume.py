@@ -1,8 +1,8 @@
-from sfs.model import Profile
-from sfs.scan import scan_profile
-from sfs.store import replace_in_paths, save_profile
-from sfs.volume import decode_udev_name, ensure_volume
-from sfs.walk import MissingVolume
+from ofs.model import Profile
+from ofs.scan import scan_profile
+from ofs.store import replace_in_paths, save_profile
+from ofs.volume import decode_udev_name, ensure_volume
+from ofs.walk import MissingVolume
 
 
 def test_udev_label_decodes_spaces():
@@ -31,7 +31,7 @@ def test_scan_stops_before_a_folder_on_the_wrong_volume(tmp_path, monkeypatch):
         if label:
             raise MissingVolume(f"{label} ({path})")
 
-    monkeypatch.setattr("sfs.scan.ensure_volume", refuse)
+    monkeypatch.setattr("ofs.scan.ensure_volume", refuse)
     profile = Profile(name="p", left=str(left), right=str(right), left_volume="DATA")
     try:
         scan_profile(profile)
@@ -42,7 +42,7 @@ def test_scan_stops_before_a_folder_on_the_wrong_volume(tmp_path, monkeypatch):
 
 
 def test_replace_in_paths_changes_only_matching_sides(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path))
     profile = Profile(name="p", left="/media/old/photos", right="/backup/old/photos")
     assert replace_in_paths(profile, "/media/old", "/media/new")
     assert profile.left == "/media/new/photos"

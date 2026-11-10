@@ -6,9 +6,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from sfs.compare import Action, Change, FileStat, format_bytes
-from sfs.model import Profile
-from sfs.store import config_dir
+from ofs.compare import Action, Change, FileStat, format_bytes
+from ofs.model import Profile
+from ofs.store import config_dir
 
 DELETE = {Action.DELETE_LEFT, Action.DELETE_RIGHT}
 MOVE = {Action.MOVE_ON_LEFT, Action.MOVE_ON_RIGHT}

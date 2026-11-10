@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sfs.model import Profile
-from sfs.scan import ScanResult, scan_profile
-from sfs.walk import MissingVolume, WalkStopped
+from ofs.model import Profile
+from ofs.scan import ScanResult, scan_profile
+from ofs.walk import MissingVolume, WalkStopped
 
 
 @dataclass

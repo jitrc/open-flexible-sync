@@ -3,13 +3,13 @@ import threading
 import time
 from pathlib import Path
 
-from sfs.apply import RunControl, apply_plan
-from sfs.compare import Action, Change
-from sfs.jobs import run_checked
-from sfs.model import ExclusionMode, Profile, SyncMode
-from sfs.scan import scan_profile
-from sfs.settings import set_global_exclusion_mode, set_global_exclusions
-from sfs.walk import MissingVolume, WalkStopped, walk
+from ofs.apply import RunControl, apply_plan
+from ofs.compare import Action, Change
+from ofs.jobs import run_checked
+from ofs.model import ExclusionMode, Profile, SyncMode
+from ofs.scan import scan_profile
+from ofs.settings import set_global_exclusion_mode, set_global_exclusions
+from ofs.walk import MissingVolume, WalkStopped, walk
 
 
 def _write(path: Path, text: str, mtime: float | None = None) -> None:
@@ -180,7 +180,7 @@ def test_apply_counts_sides_and_folders(tmp_path):
 
 
 def test_cancel_stops_before_the_announced_file(tmp_path):
-    from sfs.apply import RunControl
+    from ofs.apply import RunControl
 
     left = tmp_path / "left"
     right = tmp_path / "right"
@@ -216,7 +216,7 @@ def test_pause_holds_the_next_file_until_resume(tmp_path):
     import threading
     import time
 
-    from sfs.apply import RunControl
+    from ofs.apply import RunControl
 
     left = tmp_path / "left"
     right = tmp_path / "right"
@@ -253,7 +253,7 @@ def test_pause_holds_the_next_file_until_resume(tmp_path):
 
 
 def test_checked_subset_does_not_scan_the_other_job(tmp_path, monkeypatch):
-    from sfs import jobs
+    from ofs import jobs
 
     scanned: list[str] = []
     real = jobs.scan_profile
@@ -281,7 +281,7 @@ def test_checked_subset_does_not_scan_the_other_job(tmp_path, monkeypatch):
 def _global_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("SFS_HOME", str(home))
+    monkeypatch.setenv("OFS_HOME", str(home))
     set_global_exclusions(["Thumbs.db"])
 
 

@@ -5,12 +5,12 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk
 
-from sfs.compare import Action
-from sfs.jobs import JobResult
-from sfs.model import Profile, SyncMode
-from sfs.scan import scan_profile
-from sfs.store import load_profiles, save_profile
-from sfs.ui import MainWindow, ScanWindow, SfsApplication
+from ofs.compare import Action
+from ofs.jobs import JobResult
+from ofs.model import Profile, SyncMode
+from ofs.scan import scan_profile
+from ofs.store import load_profiles, save_profile
+from ofs.ui import MainWindow, ScanWindow, SfsApplication
 
 
 def _group_titles(box) -> list[tuple[str, bool]]:
@@ -77,8 +77,8 @@ def test_overview_groups_and_preview_actions(tmp_path, monkeypatch):
     (right / "extra.txt").write_text("extra")
     os.utime(left / "notes.txt", (50, 50))
     os.utime(right / "notes.txt", (10, 10))
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTest")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTest")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
     save_profile(Profile(name="beta other", left=str(left), right=str(right)))
     seen = {}
@@ -116,8 +116,8 @@ def test_groups_start_collapsed_and_toggle_together(tmp_path, monkeypatch):
     right = tmp_path / "right"
     left.mkdir()
     right.mkdir()
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestGroups")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestGroups")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right)))
     save_profile(Profile(name="beta other", left=str(left), right=str(right)))
     seen = {}
@@ -159,8 +159,8 @@ def test_preview_filters_keep_the_plan_and_safety_window_opens(tmp_path, monkeyp
     os.utime(right / "notes.txt", (10, 10))
     os.utime(left / "same.txt", (10, 10))
     os.utime(right / "same.txt", (10, 10))
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestFilters")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFilters")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
     seen = {}
 
@@ -196,8 +196,8 @@ def test_preview_filters_keep_the_plan_and_safety_window_opens(tmp_path, monkeyp
 
 
 def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestScanCounts")
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanCounts")
     seen = {}
 
     class App(SfsApplication):
@@ -219,8 +219,8 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
 
 
 def test_a_second_scan_waits_behind_the_one_already_running(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestScanQueue")
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanQueue")
     seen = {}
 
     class App(SfsApplication):
@@ -253,8 +253,8 @@ def test_folder_row_shows_size_and_can_be_ignored(tmp_path, monkeypatch):
     (left / "keep.txt").write_text("stay")
     os.utime(left / "2019" / "song.mp3", (50, 50))
     os.utime(left / "keep.txt", (50, 50))
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestFolder")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFolder")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
     seen = {}
 
@@ -295,8 +295,8 @@ def test_folder_direction_points_the_files_under_it(tmp_path, monkeypatch):
     (left / "keep.txt").write_text("stay")
     for path in (left / "2019" / "song.mp3", left / "2019" / "nested" / "more.mp3", left / "keep.txt"):
         os.utime(path, (50, 50))
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestFolderDirection")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFolderDirection")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
     seen = {}
 
@@ -349,8 +349,8 @@ def test_row_run_scans_that_profile_only(tmp_path, monkeypatch):
     (right / "notes.txt").write_text("old")
     os.utime(changed / "notes.txt", (50, 50))
     os.utime(right / "notes.txt", (10, 10))
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestRowRun")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestRowRun")
     save_profile(Profile(name="alpha notes", left=str(changed), right=str(right), mode=SyncMode.EXACT_MIRROR))
     save_profile(Profile(name="beta quiet", left=str(other), right=str(other)))
     seen = {}
@@ -395,8 +395,8 @@ def test_row_actions_and_profile_delete(tmp_path, monkeypatch):
     os.utime(left / "notes.txt", (50, 50))
     os.utime(right / "notes.txt", (10, 10))
     os.utime(left / "sub" / "clip.txt", (10, 10))
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestRows")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestRows")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
     seen = {}
 
@@ -434,13 +434,13 @@ def test_row_actions_and_profile_delete(tmp_path, monkeypatch):
 
 
 def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
-    from sfs.compare import FileStat
-    from sfs.history import database_path, save_history
-    from sfs.store import replace_in_paths
+    from ofs.compare import FileStat
+    from ofs.history import database_path, save_history
+    from ofs.store import replace_in_paths
 
     home = tmp_path / "home"
-    monkeypatch.setenv("SFS_HOME", str(home))
-    monkeypatch.setenv("SFS_APP_ID", "com.sfs.LocalSyncTestPaths")
+    monkeypatch.setenv("OFS_HOME", str(home))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestPaths")
     profile = Profile(name="alpha one", left="/media/old/photos", right="/backup")
     save_profile(profile)
     save_history(profile, {"a.txt": FileStat(1, 1)}, {})

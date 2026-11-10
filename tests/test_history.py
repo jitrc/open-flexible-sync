@@ -1,9 +1,9 @@
 import os
 
-from sfs.apply import apply_plan
-from sfs.compare import Action
-from sfs.model import Direction, Profile, SyncMode
-from sfs.scan import remember, scan_profile
+from ofs.apply import apply_plan
+from ofs.compare import Action
+from ofs.model import Direction, Profile, SyncMode
+from ofs.scan import remember, scan_profile
 
 
 def _write(path, text, mtime):
@@ -21,7 +21,7 @@ def _profile(tmp_path, **kwargs):
 
 
 def test_first_run_records_and_does_not_invent_a_deletion(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile, left, right = _profile(tmp_path)
     _write(left / "a.txt", "a", 10)
     _write(right / "a.txt", "a", 10)
@@ -35,7 +35,7 @@ def test_first_run_records_and_does_not_invent_a_deletion(tmp_path, monkeypatch)
 
 
 def test_rename_becomes_a_move(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile, left, right = _profile(tmp_path)
     _write(left / "a.txt", "same", 20)
     _write(right / "a.txt", "same", 20)
@@ -55,7 +55,7 @@ def test_rename_becomes_a_move(tmp_path, monkeypatch):
 
 
 def test_exact_mirror_database_does_not_list_the_same_move_twice(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile, left, right = _profile(tmp_path, mode=SyncMode.EXACT_MIRROR)
     _write(left / "old" / "song.mp3", "same", 20)
     _write(right / "old" / "song.mp3", "same", 20)
@@ -69,7 +69,7 @@ def test_exact_mirror_database_does_not_list_the_same_move_twice(tmp_path, monke
 
 
 def test_deletion_propagates_only_when_the_other_side_is_unchanged(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile, left, right = _profile(tmp_path)
     _write(left / "a.txt", "a", 30)
     _write(right / "a.txt", "a", 30)
@@ -86,7 +86,7 @@ def test_deletion_propagates_only_when_the_other_side_is_unchanged(tmp_path, mon
 
 
 def test_both_sides_changed_is_a_conflict(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile, left, right = _profile(tmp_path, direction=Direction.BOTH)
     _write(left / "a.txt", "a", 40)
     _write(right / "a.txt", "a", 40)
@@ -98,7 +98,7 @@ def test_both_sides_changed_is_a_conflict(tmp_path, monkeypatch):
 
 
 def test_database_for_other_folders_is_ignored(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile, left, right = _profile(tmp_path)
     _write(left / "a.txt", "a", 10)
     _write(right / "a.txt", "a", 10)

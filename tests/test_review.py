@@ -1,6 +1,6 @@
-from sfs.compare import Action, Change, FileStat, format_bytes
-from sfs.model import Profile
-from sfs.review import (
+from ofs.compare import Action, Change, FileStat, format_bytes
+from ofs.model import Profile
+from ofs.review import (
     Listed,
     build_listing,
     build_tree,
@@ -131,8 +131,8 @@ def test_safety_names_the_heavy_folder_and_the_share():
 
 
 def test_results_and_log(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path / "home"))
-    from sfs.apply import ApplyReport, SideStats
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    from ofs.apply import ApplyReport, SideStats
 
     report = ApplyReport(
         copied=1,

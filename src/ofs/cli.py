@@ -1,4 +1,4 @@
-"""Command line. `sfs` with no arguments opens the window."""
+"""Command line. `ofs` with no arguments opens the window."""
 
 from __future__ import annotations
 
@@ -6,16 +6,16 @@ import argparse
 import sys
 from pathlib import Path
 
-from sfs.compare import Action, plan_summary
-from sfs.jobs import run_checked
-from sfs.legacy import import_cfg
-from sfs.model import Profile
-from sfs.store import install_imported, load_profiles, save_profile
-from sfs.walk import MissingVolume
+from ofs.compare import Action, plan_summary
+from ofs.jobs import run_checked
+from ofs.legacy import import_cfg
+from ofs.model import Profile
+from ofs.store import install_imported, load_profiles, save_profile
+from ofs.walk import MissingVolume
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="sfs")
+    parser = argparse.ArgumentParser(prog="ofs")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     import_cmd = sub.add_parser("import", help="read a SuperFlexibleSynchronizer.cfg into the JSON profile folder")
@@ -103,18 +103,18 @@ def _scan(name: str, *, apply: bool) -> int:
         print(job.result.note)
     if not apply:
         return 0
-    from sfs.apply import apply_plan
+    from ofs.apply import apply_plan
 
     if any(change.action == Action.ASK for change in job.result.changes):
         print("unresolved size conflicts; nothing was applied", file=sys.stderr)
         return 1
-    from sfs.scan import remember
+    from ofs.scan import remember
 
     report = apply_plan(profile, job.result.changes)
     remember(profile)
     profile.last_result = report.summary()
     save_profile(profile)
-    from sfs.review import log_body, results_text, write_log
+    from ofs.review import log_body, results_text, write_log
 
     print(results_text(report))
     log_path = write_log(profile, log_body(profile, job.result.changes, report, choice="apply"))

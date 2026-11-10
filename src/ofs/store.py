@@ -1,4 +1,4 @@
-"""JSON profile directory. Default is ~/.config/sfs/profiles."""
+"""JSON profile directory. Default is ~/.config/open-flexible-sync/profiles."""
 
 from __future__ import annotations
 
@@ -7,14 +7,18 @@ import os
 from pathlib import Path
 from urllib.parse import quote
 
-from sfs.model import Profile
+from ofs.model import Profile
 
 
 def config_dir() -> Path:
-    override = os.environ.get("SFS_HOME")
+    override = os.environ.get("OFS_HOME") or os.environ.get("SFS_HOME")
     if override:
         return Path(override)
-    return Path.home() / ".config" / "sfs"
+    new = Path.home() / ".config" / "open-flexible-sync"
+    old = Path.home() / ".config" / "sfs"
+    if old.exists() and not new.exists():
+        old.rename(new)
+    return new
 
 
 def profiles_dir() -> Path:
@@ -30,7 +34,7 @@ def _path_for(name: str) -> Path:
 def install_imported(profiles: list[Profile]) -> int:
     """Save imported profiles. An existing job only gains flags still at the default."""
 
-    from sfs.legacy import merge_imported
+    from ofs.legacy import merge_imported
 
     have = {item.name: item for item in load_profiles()}
     for incoming in profiles:

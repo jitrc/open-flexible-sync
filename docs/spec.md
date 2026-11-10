@@ -39,7 +39,7 @@ Internet protocols, ZIP packages, and the full SmartTracking database exist in S
 
 ## Where the app stands
 
-The app is this repository. It needs Python 3.11 or newer, GTK 4, and PyGObject. Profiles are JSON under `~/.config/sfs` (`SFS_HOME` overrides that directory). How to run it is in `README.md`. Import reads the old `.cfg` and does not modify it.
+The app is this repository. It needs Python 3.11 or newer, GTK 4, and PyGObject. Profiles are JSON under `~/.config/open-flexible-sync` (`OFS_HOME` overrides that directory). How to run it is in `README.md`. Import reads the old `.cfg` and does not modify it.
 
 In the tree now:
 
@@ -49,7 +49,7 @@ In the tree now:
 - Global exclusions in Settings, ignored totally on every profile. The old defaults apply until that list is saved. Per-profile minimum and maximum size and age. Files outside those limits are skipped: listed under Skipped, not copied, and not deleted. `Older` keeps one replaced file, or the number set on the profile, and drops the oldest beyond that.
 - A scan window while the folders are read: which side is being read, files found on the left, files found on the right, pause, and cancel. A stopped scan does not open a partial comparison and does not write a log.
 - Comparison window: a folder tree with size and an arrow for direction, filters, per-side copy/move/delete totals, file and folder right-click, Start, the three-way deletion confirmation with a two-minute continue-without-deletions timeout, pause and cancel between files, the results window, and one log file per confirmed copy.
-- From a file: add that file name to the exclusions, type a mask, exclude the file's folder, ignore it for this run, compare the two sides, or point the action with `L ──▶ R` or `L ◀── R`, leave it unchanged, or revert. From a folder: open either side, add that folder to the exclusions, ignore it for this run, or point every planned file under it. Compare uses `meld` unless Settings or `SFS_COMPARE` names another command.
+- From a file: add that file name to the exclusions, type a mask, exclude the file's folder, ignore it for this run, compare the two sides, or point the action with `L ──▶ R` or `L ◀── R`, leave it unchanged, or revert. From a folder: open either side, add that folder to the exclusions, ignore it for this run, or point every planned file under it. Compare uses `meld` unless Settings or `OFS_COMPARE` names another command.
 - Optional left and right volume labels. A scan refuses a folder that is not on that disk and continues with the next checked profile. Replace paths asks, then rewrites the checked profiles and removes their file databases.
 - A GNOME launcher named OFS starts this app. It is separate from the 32-bit program and does not use that program's DPI lock.
 
@@ -352,7 +352,7 @@ Last-run summary text may be imported as a note. It must not be treated as a liv
 
 - Versioning on or off is still not imported. Those bytes are not a per-profile flag OFS reads.
 - Whether v1 scheduling is a user systemd timer per checked profile, or a single process that sleeps until the next job. Either is fine if the overview still shows the next run.
-- The external compare command defaults to `meld`. Settings stores another command, and `SFS_COMPARE` overrides it for one launch.
+- The external compare command defaults to `meld`. Settings stores another command, and `OFS_COMPARE` overrides it for one launch.
 - Parallel runs: the old program can start checked profiles together. v1 can run them one at a time if the overview stays responsive.
 - The deletion timeout is fixed at 120 seconds, and a folder is called out at one half of its listed files. Neither is a profile setting yet.
 - Adjust Them filters the move rows. It does not offer to perform the rename on the other side.

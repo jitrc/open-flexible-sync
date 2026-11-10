@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
 
-from sfs.masks import any_match, included
-from sfs.model import Direction, ExclusionMode, Profile, SizeConflict, SyncMode, TimestampRules
+from ofs.masks import any_match, included
+from ofs.model import Direction, ExclusionMode, Profile, SizeConflict, SyncMode, TimestampRules
 
 SMALL_SECONDS = 2.0
 HOUR_SECONDS = 3600.0

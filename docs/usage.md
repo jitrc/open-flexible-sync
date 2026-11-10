@@ -4,7 +4,7 @@ How the window behaves. Download and command lines are in the [README](../README
 
 ## Profiles
 
-JSON files in `~/.config/sfs/profiles`, one file per name. `SFS_HOME` overrides `~/.config/sfs` for profiles, the file database, and logs.
+JSON files in `~/.config/open-flexible-sync/profiles`, one file per name. `OFS_HOME` overrides `~/.config/open-flexible-sync` for profiles, the file database, and logs.
 
 Import copies the name, both paths, and the masks, and it fills direction, Standard or Exact Mirror, and the four timestamp checkboxes from the old profile. A mode digit of `1` is Exact Mirror and `0` is Standard. Right to left is the `YN` pair; the usual direction is left to right. Exclusions stay Ignore Totally. Versioning is not in those bytes, so `Older` stays off. A second import does not change a profile again, and it does not replace a path, a mask, a note, or a last result you already have. The group is the first word of the name. The overview lists those groups as headings, collapsed until you open one. Expand all and Collapse all open or close every group. Search matches the name and the group, and opens the groups that match. A run scans only the checked profiles.
 
@@ -40,7 +40,7 @@ Right-click also changes the plan:
 - Apply exclusion mask… asks for the mask first. `*.tmp` matches a name in any folder. A path such as `cache/tmp` matches that folder and everything under it. A lone `*` in an imported exclusion list does not hide the tree. 5.71 stores that star between the junk-folder masks.
 - Remove this folder from profile saves the parent folder as a mask. A file sitting directly in the profile folder is left for a name exclusion.
 - Ignore for this run, and ignore this extension for this run, drop rows without saving the profile.
-- Compare files runs the compare command with the left path and the right path. Both files have to exist. The command is `meld` until you change it in Settings. `SFS_COMPARE` overrides the saved command for one launch, and the two paths are added after whatever words you set (`nvim -d` works).
+- Compare files runs the compare command with the left path and the right path. Both files have to exist. The command is `meld` until you change it in Settings. `OFS_COMPARE` overrides the saved command for one launch, and the two paths are added after whatever words you set (`nvim -d` works).
 - `L ──▶ R` and `L ◀── R` on a file override that row. The same two arrows on a folder point every planned file in that folder and below it. A copy or an undecided file becomes a copy. A move stays a move. A delete stays a delete, on the side the arrow points at. Leave unchanged overrides one file. Revert to scanned action puts the scan's choice back. Leave unchanged takes the row out of Start.
 
 A saved exclusion is still there after you reopen the profile. An ignore for this run is not. Run on a row scans that profile. Run checked still scans only the checked rows. Duplicate on the overview copies the job to a new name and leaves the file database behind. Delete asks, then removes the profile and its database. The folders on disk stay.

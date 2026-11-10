@@ -11,10 +11,10 @@ import time
 from dataclasses import dataclass
 from urllib.parse import quote
 
-from sfs.compare import Action, Change, FileStat, classify_time, outside_filter
-from sfs.masks import any_match, included
-from sfs.model import Direction, ExclusionMode, Profile
-from sfs.store import config_dir
+from ofs.compare import Action, Change, FileStat, classify_time, outside_filter
+from ofs.masks import any_match, included
+from ofs.model import Direction, ExclusionMode, Profile
+from ofs.store import config_dir
 
 
 @dataclass

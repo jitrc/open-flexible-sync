@@ -6,7 +6,7 @@ import os
 import re
 from pathlib import Path
 
-from sfs.walk import MissingVolume
+from ofs.walk import MissingVolume
 
 _ESCAPE = re.compile(r"\\x([0-9A-Fa-f]{2})")
 

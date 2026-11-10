@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from sfs.legacy import import_cfg, import_global_masks, merge_imported
-from sfs.model import Direction, ExclusionMode, Profile, SyncMode, TimestampRules
+from ofs.legacy import import_cfg, import_global_masks, merge_imported
+from ofs.model import Direction, ExclusionMode, Profile, SyncMode, TimestampRules
 
 
 def _blob(name: str, left: str, right: str, masks: list[str], include: str) -> bytes:
@@ -87,8 +87,8 @@ def test_import_reads_direction_mirror_and_timestamp_flags(tmp_path):
 
 
 def test_merge_keeps_an_edited_profile(tmp_path, monkeypatch):
-    monkeypatch.setenv("SFS_HOME", str(tmp_path))
-    from sfs.store import install_imported, load_profiles, save_profile
+    monkeypatch.setenv("OFS_HOME", str(tmp_path))
+    from ofs.store import install_imported, load_profiles, save_profile
 
     save_profile(
         Profile(
