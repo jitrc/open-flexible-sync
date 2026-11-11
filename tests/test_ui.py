@@ -10,7 +10,7 @@ from ofs.jobs import JobResult
 from ofs.model import Profile, SyncMode
 from ofs.scan import scan_profile
 from ofs.store import load_profiles, save_profile
-from ofs.ui import MainWindow, ScanWindow, SfsApplication
+from ofs.ui import ExclusionEditor, MainWindow, ScanWindow, SfsApplication
 
 
 def _group_titles(box) -> list[tuple[str, bool]]:
@@ -66,6 +66,23 @@ def _button_labels(widget) -> list[str]:
     return found
 
 
+def _widgets(widget):
+    yield widget
+    children = []
+    child = widget.get_first_child()
+    while child is not None:
+        children.append(child)
+        yield from _widgets(child)
+        child = child.get_next_sibling()
+    extra = widget.get_child() if hasattr(widget, "get_child") else None
+    if extra is not None and extra not in children:
+        yield from _widgets(extra)
+
+
+def _profile_rows(box) -> list[str]:
+    return [item.get_label() for item in _widgets(box) if isinstance(item, Gtk.CheckButton)]
+
+
 def test_overview_groups_and_preview_actions(tmp_path, monkeypatch):
     home = tmp_path / "home"
     left = tmp_path / "left"
@@ -80,7 +97,9 @@ def test_overview_groups_and_preview_actions(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(home))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTest")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR))
+    save_profile(Profile(name="alpha more", left=str(left), right=str(right)))
     save_profile(Profile(name="beta other", left=str(left), right=str(right)))
+    save_profile(Profile(name="beta more", left=str(left), right=str(right)))
     seen = {}
 
     class App(SfsApplication):
@@ -119,7 +138,9 @@ def test_groups_start_collapsed_and_toggle_together(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(home))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestGroups")
     save_profile(Profile(name="alpha notes", left=str(left), right=str(right)))
+    save_profile(Profile(name="alpha more", left=str(left), right=str(right)))
     save_profile(Profile(name="beta other", left=str(left), right=str(right)))
+    save_profile(Profile(name="beta more", left=str(left), right=str(right)))
     seen = {}
 
     class App(SfsApplication):
@@ -142,6 +163,90 @@ def test_groups_start_collapsed_and_toggle_together(tmp_path, monkeypatch):
     assert seen["search_miss"] == []
     assert seen["search"] == [("alpha", True)]
     assert seen["closed"] == [("alpha", False)]
+
+
+def test_overview_status_availability_filters_columns_and_ungrouped_rows(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestOverviewFilters")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    missing = tmp_path / "missing"
+    save_profile(Profile(name="clean job", left=str(left), right=str(right), last_result="2026-11-11 10:00  2 copied"))
+    save_profile(Profile(name="pending job", left=str(left), right=str(right)))
+    save_profile(Profile(name="stopped job", left=str(left), right=str(right), last_result="2026-11-11 10:01  stopped, 1 copied"))
+    save_profile(Profile(name="broken job", left=str(missing), right=str(right), last_result="2026-11-11 10:02  1 copied, 2 errors"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["ungrouped"] = _group_titles(window.list_box)
+            seen["all"] = _profile_rows(window.list_box)
+            seen["headers"] = [item.get_text() for item in _widgets(window.column_headers) if isinstance(item, Gtk.Label)]
+            window.status_filter.set_selected(1)
+            seen["not_run"] = _profile_rows(window.list_box)
+            window.status_filter.set_selected(2)
+            seen["clean"] = _profile_rows(window.list_box)
+            window.status_filter.set_selected(3)
+            seen["stopped"] = _profile_rows(window.list_box)
+            window.status_filter.set_selected(4)
+            seen["errors"] = _profile_rows(window.list_box)
+            window.status_filter.set_selected(0)
+            window.available_only.set_active(True)
+            seen["available"] = _profile_rows(window.list_box)
+            seen["count"] = window.filter_count.get_text()
+            window.available_only.set_active(False)
+            window.checked.add("pending job")
+            window.status_filter.set_selected(5)
+            seen["selected"] = _profile_rows(window.list_box)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["ungrouped"] == []
+    assert set(seen["all"]) == {"clean job", "pending job", "stopped job", "broken job"}
+    assert seen["headers"] == ["Profile", "Last run", "Result", "Actions"]
+    assert seen["not_run"] == ["pending job"]
+    assert seen["clean"] == ["clean job"]
+    assert seen["stopped"] == ["stopped job"]
+    assert seen["errors"] == ["broken job"]
+    assert set(seen["available"]) == {"clean job", "pending job", "stopped job"}
+    assert seen["count"] == "3 of 4 shown · 0 checked"
+    assert seen["selected"] == ["pending job"]
+
+
+def test_exclusion_editor_splits_edits_removes_and_tests_rules(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestExclusionEditor")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            editor = ExclusionEditor([".venv", "*/node_modules", "/datasets/raw", "*"])
+            from ofs.ui import _mask_kind
+
+            seen["kinds"] = [_mask_kind(mask) for mask in editor.rules()]
+            editor.entry.set_text("cache/tmp;*.log")
+            editor._save_rule()
+            seen["added"] = editor.rules()
+            editor._edit_rule(0)
+            editor.entry.set_text(".pyenv")
+            editor._save_rule()
+            editor.test_entry.set_text("project/.pyenv/bin/python")
+            seen["excluded"] = editor.test_result.get_text()
+            editor._remove_rule(1)
+            editor.test_entry.set_text("project/node_modules/index.js")
+            seen["remaining"] = editor.rules()
+            seen["not_excluded"] = editor.test_result.get_text()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["kinds"] == ["Name anywhere", "Folder pattern", "Rooted path", "Legacy star"]
+    assert seen["added"][-2:] == ["cache/tmp", "*.log"]
+    assert seen["excluded"].startswith("Excluded by: .pyenv")
+    assert "*/node_modules" not in seen["remaining"]
+    assert seen["not_excluded"] == "Not excluded by these rules."
 
 
 def test_preview_filters_keep_the_plan_and_safety_window_opens(tmp_path, monkeypatch):

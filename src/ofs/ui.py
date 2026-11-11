@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 
 import gi
@@ -22,7 +23,7 @@ from ofs.compare import Action, Change, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
 from ofs.history import delete_history
 from ofs.legacy import import_cfg, import_global_masks
-from ofs.masks import path_matches
+from ofs.masks import path_matches, split_masks
 from ofs.model import Direction, ExclusionMode, Profile, SyncMode, parse_size
 from ofs.review import (
     SAFETY_SECONDS,
@@ -72,6 +73,11 @@ class PlanRow(GObject.Object):
         self.change = change
 
 
+_LAST_RUN_WIDTH = 142
+_RESULT_WIDTH = 250
+_ACTIONS_WIDTH = 260
+
+
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application):
         super().__init__(application=app, title="OFS")
@@ -86,6 +92,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._scan_active = False
         self._scan_queue: list[set[str]] = []
         self._scan_label = ""
+        self._path_available: dict[str, bool] = {}
+        self._visible_count = 0
 
         header = Gtk.HeaderBar()
         self.set_titlebar(header)
@@ -122,6 +130,22 @@ class MainWindow(Gtk.ApplicationWindow):
         tools.append(self.search)
         tools.append(expand_all)
         tools.append(collapse_all)
+        self.status_filter = Gtk.DropDown.new_from_strings(
+            ["All statuses", "Not run", "Clean", "Stopped", "Errors", "Selected"]
+        )
+        self.status_filter.set_selected(0)
+        self.status_filter.connect("notify::selected", lambda *_: self._rebuild())
+        self.available_only = Gtk.CheckButton(label="Available paths only")
+        self.available_only.set_tooltip_text("Show only profiles whose left and right folders exist now")
+        self.available_only.connect("toggled", lambda *_: self._rebuild())
+        self.filter_count = Gtk.Label(xalign=1, hexpand=True)
+        self.filter_count.add_css_class("dim-label")
+        filters = Gtk.Box(spacing=10)
+        filters.set_margin_start(12)
+        filters.set_margin_end(12)
+        filters.append(self.status_filter)
+        filters.append(self.available_only)
+        filters.append(self.filter_count)
         self.status = Gtk.Label(xalign=0)
         self.status.set_margin_start(12)
         self.status.set_margin_end(12)
@@ -134,6 +158,9 @@ class MainWindow(Gtk.ApplicationWindow):
         scrolled.set_child(self.list_box)
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         root.append(tools)
+        root.append(filters)
+        self.column_headers = self._column_headers()
+        root.append(self.column_headers)
         root.append(scrolled)
         root.append(self.status)
         self.set_child(root)
@@ -142,29 +169,75 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def reload(self) -> None:
         self.profiles = load_profiles()
+        self._path_available.clear()
         self._rebuild()
         folder = config_dir() / "profiles"
         self.status.set_text(f"{len(self.profiles)} profiles in {folder}")
+
+    def _column_headers(self) -> Gtk.Widget:
+        row = Gtk.Box(spacing=4)
+        row.add_css_class("column-header")
+        for text, width, expand in (
+            ("Profile", 0, True),
+            ("Last run", _LAST_RUN_WIDTH, False),
+            ("Result", _RESULT_WIDTH, False),
+            ("Actions", _ACTIONS_WIDTH, False),
+        ):
+            label = Gtk.Label(label=text, xalign=0, hexpand=expand)
+            label.add_css_class("column-heading")
+            if width:
+                label.set_size_request(width, -1)
+            row.append(label)
+        return row
+
+    def _available(self, profile: Profile) -> bool:
+        if profile.name not in self._path_available:
+            self._path_available[profile.name] = Path(profile.left).is_dir() and Path(profile.right).is_dir()
+        return self._path_available[profile.name]
+
+    def _shown(self, profile: Profile, query: str, status: str) -> bool:
+        if query not in profile.name.lower() and query not in profile.group.lower():
+            return False
+        if self.available_only.get_active() and not self._available(profile):
+            return False
+        if status == "selected":
+            return profile.name in self.checked
+        if status != "all":
+            return _result_status(profile.last_result) == status
+        return True
+
+    def _update_filter_count(self) -> None:
+        self.filter_count.set_text(f"{self._visible_count} of {len(self.profiles)} shown · {len(self.checked)} checked")
 
     def _rebuild(self) -> None:
         while child := self.list_box.get_first_child():
             self.list_box.remove(child)
         self._labels.clear()
         query = self.search.get_text().strip().lower()
-        shown = [profile for profile in self.profiles if query in profile.name.lower() or query in profile.group.lower()]
+        statuses = ["all", "not_run", "clean", "stopped", "errors", "selected"]
+        status = statuses[self.status_filter.get_selected()]
+        shown = [profile for profile in self.profiles if self._shown(profile, query, status)]
+        self._visible_count = len(shown)
+        self._update_filter_count()
         if not shown:
             text = "No profiles yet. Import reads SuperFlexibleSynchronizer.cfg and does not change it."
             if self.profiles:
                 text = "No profiles match."
             self.list_box.append(Gtk.Label(label=text, xalign=0))
             return
+        group_sizes = Counter(profile.group for profile in self.profiles)
+        ungrouped = [profile for profile in shown if group_sizes[profile.group] == 1]
         groups: dict[str, list[Profile]] = {}
         for profile in shown:
-            groups.setdefault(profile.group, []).append(profile)
+            if group_sizes[profile.group] > 1:
+                groups.setdefault(profile.group, []).append(profile)
+        for profile in ungrouped:
+            self.list_box.append(self._row(profile))
         self._applying_groups = True
         try:
-            for group, members in groups.items():
-                self.list_box.append(self._group(group, members))
+            for group in sorted(groups, key=str.lower):
+                members = groups[group]
+                self.list_box.append(self._group(group, members, group_sizes[group]))
         finally:
             self._applying_groups = False
 
@@ -186,11 +259,12 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._group_expanded[group] = expander.get_expanded()
 
-    def _group(self, group: str, members: list[Profile]) -> Gtk.Widget:
+    def _group(self, group: str, members: list[Profile], total: int) -> Gtk.Widget:
         count = len(members)
         name = Gtk.Label(label=group, xalign=0, hexpand=True)
         name.add_css_class("group-name")
-        tally = Gtk.Label(label=f"{count} profile" if count == 1 else f"{count} profiles")
+        amount = str(count) if count == total else f"{count}/{total}"
+        tally = Gtk.Label(label=f"{amount} profile" if total == 1 else f"{amount} profiles")
         tally.add_css_class("group-count")
         heading = Gtk.Box(spacing=12)
         heading.add_css_class("group-heading")
@@ -225,27 +299,25 @@ class MainWindow(Gtk.ApplicationWindow):
         paths.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         paths.add_css_class("dim-label")
         paths.set_text(f"{profile.left}    →    {profile.right}")
+        paths.set_tooltip_text(f"Left: {profile.left}\nRight: {profile.right}")
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         text.append(name_row)
         text.append(paths)
 
         when, body, tone = _result_parts(profile.last_result, profile.note)
-        stamp = Gtk.Label(xalign=0)
+        stamp = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER)
         stamp.add_css_class("monospace")
         stamp.add_css_class(tone)
-        stamp.set_text(when)
-        result = Gtk.Label(xalign=0)
+        stamp.set_size_request(_LAST_RUN_WIDTH, -1)
+        stamp.set_text(when or "Not run yet")
+        result = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER)
         result.set_ellipsize(Pango.EllipsizeMode.END)
         result.set_max_width_chars(40)
+        result.set_size_request(_RESULT_WIDTH, -1)
         result.set_tooltip_text(body)
         result.add_css_class(tone)
         result.set_text(body)
-        result.set_tooltip_text(body)
         self._labels[profile.name] = result
-        stats = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        stats.set_size_request(240, -1)
-        stats.append(stamp)
-        stats.append(result)
 
         run = Gtk.Button(label="Run")
         run.add_css_class("run")
@@ -261,19 +333,18 @@ class MainWindow(Gtk.ApplicationWindow):
         _compact(delete)
         delete.add_css_class("destructive-action")
         delete.connect("clicked", self._confirm_delete, profile.name)
-        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        text.append(name_row)
-        text.append(paths)
+        actions = Gtk.Box(spacing=4, valign=Gtk.Align.CENTER)
+        actions.set_size_request(_ACTIONS_WIDTH, -1)
+        for button in (run, edit, duplicate, delete):
+            actions.append(button)
         row = Gtk.Box(spacing=4)
         row.set_margin_top(2)
         row.set_margin_bottom(2)
         text.set_hexpand(True)
         row.append(text)
-        row.append(stats)
-        row.append(run)
-        row.append(edit)
-        row.append(duplicate)
-        row.append(delete)
+        row.append(stamp)
+        row.append(result)
+        row.append(actions)
         return row
 
     def _toggled(self, button: Gtk.CheckButton, name: str) -> None:
@@ -281,6 +352,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self.checked.add(name)
         else:
             self.checked.discard(name)
+        if self.status_filter.get_selected() == 5:
+            self._rebuild()
+        else:
+            self._update_filter_count()
 
     def _profile(self, name: str) -> Profile | None:
         for profile in self.profiles:
@@ -487,7 +562,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _editor(self, profile: Profile | None) -> None:
         existing = profile
         window = Gtk.Window(transient_for=self, modal=True, title="Profile")
-        window.set_default_size(680, 760)
+        window.set_default_size(780, 840)
         grid = Gtk.Grid(column_spacing=8, row_spacing=8)
         grid.set_margin_start(12)
         grid.set_margin_end(12)
@@ -517,13 +592,7 @@ class MainWindow(Gtk.ApplicationWindow):
         older_keep.set_value(1 if existing is None or existing.older_keep < 1 else existing.older_keep)
         binary = Gtk.CheckButton(label="Binary compare when size matches (reads file bytes)", active=bool(existing and existing.binary_compare))
         track = Gtk.CheckButton(label="Remember files and detect moves and deletions", active=bool(existing and existing.track))
-        masks = Gtk.TextView()
-        masks.set_monospace(True)
-        buffer = masks.get_buffer()
-        if existing is not None:
-            buffer.set_text("\n".join(existing.exclusions))
-        scroll = Gtk.ScrolledWindow(min_content_height=100)
-        scroll.set_child(masks)
+        exclusion_editor = ExclusionEditor([] if existing is None else existing.exclusions)
         min_size = Gtk.Entry(text="" if existing is None or not existing.min_size else str(existing.min_size))
         max_size = Gtk.Entry(text="" if existing is None or not existing.max_size else str(existing.max_size))
         min_age = Gtk.Entry(text="" if existing is None or not existing.min_age_days else str(existing.min_age_days))
@@ -537,7 +606,7 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Mode", mode),
             ("Direction", direction),
             ("Exclusions", exclusion),
-            ("Masks", scroll),
+            ("Exclusion rules", exclusion_editor),
             ("Min size", min_size),
             ("Max size", max_size),
             ("Min age (days)", min_age),
@@ -567,7 +636,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 left_volume=left_volume.get_text().strip(),
                 right_volume=right_volume.get_text().strip(),
                 include=["(all)"] if existing is None else list(existing.include),
-                exclusions=[line.strip() for line in buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True).splitlines() if line.strip()],
+                exclusions=exclusion_editor.rules(),
                 exclusion_mode=ExclusionMode.IGNORE_TOTALLY if exclusion.get_selected() == 0 else ExclusionMode.DONT_COPY,
                 direction=direction_values[direction.get_selected()],
                 mode=SyncMode.STANDARD if mode.get_selected() == 0 else SyncMode.EXACT_MIRROR,
@@ -605,7 +674,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.reload()
 
         save.connect("clicked", on_save)
-        window.set_child(grid)
+        editor_scroll = Gtk.ScrolledWindow(vexpand=True)
+        editor_scroll.set_child(grid)
+        window.set_child(editor_scroll)
         window.present()
 
     def _run_one(self, _button, name: str) -> None:
@@ -747,6 +818,13 @@ def _result_parts(last_result: str, note: str) -> tuple[str, str, str]:
     return when, body, tone
 
 
+def _result_status(last_result: str) -> str:
+    if not last_result.strip():
+        return "not_run"
+    tone = _result_parts(last_result, "")[2]
+    return {"result-error": "errors", "result-warn": "stopped"}.get(tone, "clean")
+
+
 def _status_icon(last_result: str) -> Gtk.Image | None:
     """5.71-style row status: green check ran clean, red for errors, orange for stopped, none for never run."""
 
@@ -758,6 +836,119 @@ def _status_icon(last_result: str) -> Gtk.Image | None:
     icon.set_pixel_size(16)
     icon.set_tooltip_text(body)
     return icon
+
+
+def _mask_kind(mask: str) -> str:
+    if mask == "*":
+        return "Legacy star"
+    normalized = mask.replace("\\", "/")
+    if normalized.startswith("/"):
+        return "Rooted path"
+    if "/" in normalized:
+        return "Folder pattern"
+    if "*" in normalized or "?" in normalized:
+        return "Name pattern"
+    return "Name anywhere"
+
+
+class ExclusionEditor(Gtk.Box):
+    """Editable rule list with immediate relative-path matching feedback."""
+
+    def __init__(self, masks: list[str]):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self._rules = list(masks)
+        self._editing: int | None = None
+        self.entry = Gtk.Entry(placeholder_text="Mask, for example .venv or */node_modules", hexpand=True)
+        self.entry.connect("activate", lambda *_: self._save_rule())
+        self.add_button = Gtk.Button(label="Add rule")
+        self.add_button.connect("clicked", lambda *_: self._save_rule())
+        self.cancel_button = Gtk.Button(label="Cancel edit")
+        self.cancel_button.set_sensitive(False)
+        self.cancel_button.connect("clicked", lambda *_: self._reset_entry())
+        editing = Gtk.Box(spacing=6)
+        editing.append(self.entry)
+        editing.append(self.add_button)
+        editing.append(self.cancel_button)
+        self.append(editing)
+        self.list = Gtk.ListBox()
+        self.list.add_css_class("boxed-list")
+        scroll = Gtk.ScrolledWindow(min_content_height=150, max_content_height=240, vexpand=True)
+        scroll.set_child(self.list)
+        self.append(scroll)
+        self.test_entry = Gtk.Entry(placeholder_text="Test a relative path, for example project/.venv/bin/python")
+        self.test_entry.connect("changed", lambda *_: self._update_test())
+        self.append(self.test_entry)
+        self.test_result = Gtk.Label(xalign=0, wrap=True)
+        self.test_result.add_css_class("dim-label")
+        self.append(self.test_result)
+        self._refresh()
+
+    def rules(self) -> list[str]:
+        return list(self._rules)
+
+    def _reset_entry(self) -> None:
+        self._editing = None
+        self.entry.set_text("")
+        self.add_button.set_label("Add rule")
+        self.cancel_button.set_sensitive(False)
+
+    def _save_rule(self) -> None:
+        additions = split_masks(self.entry.get_text())
+        if not additions:
+            return
+        if self._editing is None:
+            self._rules.extend(additions)
+        else:
+            self._rules[self._editing : self._editing + 1] = additions
+        self._reset_entry()
+        self._refresh()
+
+    def _edit_rule(self, index: int) -> None:
+        self._editing = index
+        self.entry.set_text(self._rules[index])
+        self.entry.grab_focus()
+        self.add_button.set_label("Save rule")
+        self.cancel_button.set_sensitive(True)
+
+    def _remove_rule(self, index: int) -> None:
+        del self._rules[index]
+        self._reset_entry()
+        self._refresh()
+
+    def _refresh(self) -> None:
+        while row := self.list.get_first_child():
+            self.list.remove(row)
+        for index, mask in enumerate(self._rules):
+            kind = Gtk.Label(label=_mask_kind(mask), xalign=0)
+            kind.add_css_class("dim-label")
+            kind.set_size_request(112, -1)
+            label = Gtk.Label(label=mask, xalign=0, hexpand=True, selectable=True)
+            label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            label.set_tooltip_text("Preserved 5.71 separator; matches nothing" if mask == "*" else mask)
+            edit = Gtk.Button(label="Edit")
+            _compact(edit)
+            edit.connect("clicked", lambda _button, item=index: self._edit_rule(item))
+            remove = Gtk.Button(label="Remove")
+            _compact(remove)
+            remove.connect("clicked", lambda _button, item=index: self._remove_rule(item))
+            line = Gtk.Box(spacing=6)
+            line.set_margin_start(6)
+            line.set_margin_end(6)
+            for widget in (kind, label, edit, remove):
+                line.append(widget)
+            self.list.append(line)
+        self._update_test()
+
+    def _update_test(self) -> None:
+        path = self.test_entry.get_text().strip()
+        if not path:
+            self.test_result.set_text(f"{len(self._rules)} rules. Test a path to see what would be excluded.")
+            return
+        matches = [mask for mask in self._rules if path_matches(path, mask)]
+        if matches:
+            self.test_result.set_text("Excluded by: " + "; ".join(matches))
+        else:
+            self.test_result.set_text("Not excluded by these rules.")
 
 
 _CSS_INSTALLED = False
@@ -792,6 +983,8 @@ def _install_css() -> None:
         " padding: 8px 12px;"
         " min-height: 40px;"
         "}"
+        ".column-header { margin: 6px 12px 2px 12px; padding-bottom: 4px; border-bottom: 1px solid alpha(@theme_fg_color, 0.18); }"
+        "label.column-heading { font-weight: 700; font-size: 0.9em; }"
         "label.result-ok { color: @success_color; }"
         "label.result-error { color: @error_color; }"
         "label.result-warn { color: @warning_color; }"
