@@ -32,3 +32,32 @@ def test_include_all_and_a_real_mask():
     assert included("a/b.txt", ["*.txt"])
     assert included("a/b.jpg", ["*.txt"]) is False
     assert any_match("a/b.tmp", ["(none)"]) is False
+
+
+def test_legacy_compound_exclusions_match_each_rule():
+    mask = "*/downloads\xa0**/.venv\xa0**/venv\xa0**/node_modules"
+    assert split_masks(mask) == ["*/downloads", "**/.venv", "**/venv", "**/node_modules"]
+    assert path_matches("project/.venv/bin/python", mask)
+    assert path_matches("project/node_modules/package/index.js", mask)
+    assert path_matches("project/src/app.py", mask) is False
+    assert path_matches("project/.venv/bin/python", "/datasets/raw;node_modules;.venv")
+    assert path_matches("project/node_modules/index.js", "/datasets/raw;node_modules;.venv")
+    assert any_match("project/logs/a.txt", ["(none)\xa0*/logs"])
+
+
+def test_globstar_also_matches_at_the_profile_root():
+    assert path_matches(".venv/bin/python", "**/.venv")
+    assert path_matches("project/.venv/bin/python", "**/.venv")
+    assert path_matches("Project/build/a", "**/Project/build")
+    assert path_matches("source/Project/build/a", "**/Project/build")
+
+
+def test_rooted_full_folder_path_matches_only_that_subtree():
+    mask = "/datasets/images/.ipynb_checkpoints"
+    assert path_matches("datasets/images/.ipynb_checkpoints/a", mask)
+    assert path_matches("other/datasets/images/.ipynb_checkpoints/a", mask) is False
+
+
+def test_trailing_slash_is_a_folder_mask_not_a_literal_slash():
+    assert path_matches("cache/package-store/package/index.js", "*/package-store/")
+    assert path_matches("cache/work-output/data/file", "*/work-output/")

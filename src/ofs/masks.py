@@ -12,6 +12,9 @@ import fnmatch
 
 
 def split_masks(text: str) -> list[str]:
+    # 5.71 stores text-list rows with NBSP separators as well as semicolons.
+    # Some rows use NBSP-hyphen-NBSP between the file and folder lists.
+    text = text.replace("\xa0-\xa0", "\n").replace("\xa0", "\n")
     parts: list[str] = []
     for chunk in text.replace(";", "\n").splitlines():
         item = chunk.strip()
@@ -26,7 +29,7 @@ def _normalize(mask: str) -> str:
         mask = mask[2:]
     if mask.startswith("/"):
         mask = mask[1:]
-    return mask
+    return mask.rstrip("/")
 
 
 def _has_glob(mask: str) -> bool:
@@ -46,6 +49,10 @@ def _escape_brackets(mask: str) -> str:
 
 
 def path_matches(rel: str, mask: str) -> bool:
+    return any(_path_matches(rel, item) for item in split_masks(mask))
+
+
+def _path_matches(rel: str, mask: str) -> bool:
     rel = rel.replace("\\", "/").strip("/")
     mask = _normalize(mask)
     if not rel or not mask:
@@ -68,7 +75,12 @@ def path_matches(rel: str, mask: str) -> bool:
     component_mask = "/" not in mask
     for prefix in prefixes:
         pattern = _escape_brackets(mask)
-        if fnmatch.fnmatch(prefix, pattern):
+        patterns = [pattern]
+        if mask.startswith("**/"):
+            # fnmatch's stars still require the slash, so **/.venv otherwise
+            # misses a .venv directly in the profile folder.
+            patterns.append(_escape_brackets(mask[3:]))
+        if any(fnmatch.fnmatch(prefix, item) for item in patterns):
             return True
         if component_mask and fnmatch.fnmatch(prefix.rsplit("/", 1)[-1], pattern):
             return True
@@ -80,7 +92,7 @@ def any_match(rel: str, masks: list[str]) -> bool:
 
 
 def included(rel: str, masks: list[str]) -> bool:
-    useful = [m for m in masks if m and m != "(none)"]
+    useful = [item for mask in masks for item in split_masks(mask) if item and item != "(none)"]
     if not useful or useful == ["(all)"] or useful == ["*"]:
         return True
     return any_match(rel, useful)

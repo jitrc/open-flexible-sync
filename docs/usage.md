@@ -37,7 +37,7 @@ The comparison is a folder tree. Each file row shows its size, a direction arrow
 Right-click also changes the plan:
 
 - Add this name to exclusions saves the file name on the profile and drops matching rows.
-- Apply exclusion mask… asks for the mask first. `*.tmp` matches a name in any folder. A path such as `cache/tmp` matches that folder and everything under it. A lone `*` in an imported exclusion list does not hide the tree. 5.71 stores that star between the junk-folder masks.
+- Apply exclusion mask… asks for the mask first. `*.tmp` matches a name in any folder. A path such as `cache/tmp` matches that folder and everything under it. Imported 5.71 semicolon and NBSP-separated lists are treated as separate masks. `**/.venv` matches both a root-level and a nested `.venv`; a trailing slash still means the whole folder. A lone `*` in an imported exclusion list does not hide the tree. 5.71 stores that star between the junk-folder masks.
 - Remove this folder from profile saves the parent folder as a mask. A file sitting directly in the profile folder is left for a name exclusion.
 - Ignore for this run, and ignore this extension for this run, drop rows without saving the profile.
 - Compare files runs the compare command with the left path and the right path. Both files have to exist. The command is `meld` until you change it in Settings. `OFS_COMPARE` overrides the saved command for one launch, and the two paths are added after whatever words you set (`nvim -d` works).

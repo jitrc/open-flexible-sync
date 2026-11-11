@@ -13,6 +13,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+from ofs.masks import split_masks
 from ofs.model import Direction, ExclusionMode, Profile, SyncMode, TimestampRules
 
 _SEP = b"\xa0-\xa0"
@@ -64,7 +65,8 @@ def import_global_masks(path: Path) -> list[str]:
     """
 
     data = path.read_bytes()
-    index = data.find(b"GlobalExcludeMasks")
+    # The schema names the field first; the populated value record comes last.
+    index = data.rfind(b"GlobalExcludeMasks")
     if index < 0:
         return []
     start = index + len(b"GlobalExcludeMasks")
@@ -217,7 +219,7 @@ def _mask_records(data: bytes, prefix: bytes, names: set[str]) -> dict[str, list
         rest = raw[len(name) :]
         cut = _end_of_masks(rest)
         text = rest[:cut].decode("latin1")
-        masks = [part.strip() for part in text.split("\xa0-\xa0") if part.strip()]
+        masks = split_masks(text)
         if masks:
             found[name] = masks
     return found

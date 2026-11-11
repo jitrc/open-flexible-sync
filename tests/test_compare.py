@@ -173,6 +173,24 @@ def test_global_masks_are_ignored_even_by_exact_mirror():
     assert [item.rel for item in plan] == ["keep.txt"]
 
 
+def test_legacy_compound_masks_hide_all_their_rules_from_the_plan():
+    profile = Profile(
+        name="p",
+        left="/l",
+        right="/r",
+        exclusions=["*/downloads\xa0**/.venv\xa0**/node_modules", "/datasets/raw;node_modules;.venv", "*/package-store/"],
+    )
+    files = {
+        ".venv/bin/python": FileStat(1, 1),
+        "project/.venv/bin/python": FileStat(1, 1),
+        "project/node_modules/package/index.js": FileStat(1, 1),
+        "datasets/raw/model.bin": FileStat(1, 1),
+        "cache/package-store/package/index.js": FileStat(1, 1),
+        "project/src/app.py": FileStat(1, 1),
+    }
+    assert [item.rel for item in build_plan(profile, files, {})] == ["project/src/app.py"]
+
+
 def test_size_and_age_limits_skip_instead_of_copying_or_deleting():
     profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR, min_size=100, max_age_days=2)
     now = 1_000_000.0

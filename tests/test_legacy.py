@@ -39,6 +39,27 @@ def test_import_reads_paths_masks_and_leaves_modes_safe(tmp_path):
     assert profiles[0].exclusions == []
 
 
+def test_import_splits_legacy_compound_exclusions(tmp_path):
+    cfg = tmp_path / "app.cfg"
+    cfg.write_bytes(
+        _blob(
+            "source code",
+            "/data/source",
+            "/backup/source",
+            ["/datasets/raw;node_modules;.venv", "*/downloads\xa0**/.venv\xa0**/node_modules"],
+            "(all)",
+        )
+    )
+    assert import_cfg(cfg)[0].exclusions == [
+        "/datasets/raw",
+        "node_modules",
+        ".venv",
+        "*/downloads",
+        "**/.venv",
+        "**/node_modules",
+    ]
+
+
 def _settings_block(mode: str, direction: bytes, times: bytes) -> bytes:
     block = bytearray(b" " * 310)
     block[0:13] = b"1099511627776"
@@ -145,6 +166,28 @@ def test_import_global_masks_reads_the_dialog_text(tmp_path):
     cfg = tmp_path / "app.cfg"
     cfg.write_bytes(
         _blob("photos 2017", "/data/photos/2017", "/backup/photos/2017", ["*/$RECYCLE.BIN"], "(all)")
+        + b"\x01GlobalExcludeMasksIncoming ExtremeSync Packages\xa0*.DS_Store;Thumbs.db;*.$$$"
+        + b"\xa0*.ipynb_checkpoints;__pycache__;__pyc\xa0**.sock;*.lock;@eaDir\xa0-\xa0*"
+        + b"\x00"
+    )
+    assert import_global_masks(cfg) == [
+        "Incoming ExtremeSync Packages",
+        ".DS_Store",
+        "Thumbs.db",
+        "*.$$$",
+        ".ipynb_checkpoints",
+        "__pycache__",
+        "__pyc",
+        "*.sock",
+        "*.lock",
+        "@eaDir",
+    ]
+
+
+def test_import_global_masks_uses_value_record_after_schema_name(tmp_path):
+    cfg = tmp_path / "app.cfg"
+    cfg.write_bytes(
+        b"GlobalExcludeMasks\x03\x02W\x15"
         + b"\x01GlobalExcludeMasksIncoming ExtremeSync Packages\xa0*.DS_Store;Thumbs.db;*.$$$"
         + b"\xa0*.ipynb_checkpoints;__pycache__;__pyc\xa0**.sock;*.lock;@eaDir\xa0-\xa0*"
         + b"\x00"
