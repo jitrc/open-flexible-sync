@@ -1,4 +1,5 @@
 import os
+import time
 
 import gi
 
@@ -216,6 +217,39 @@ def test_overview_status_availability_filters_columns_and_ungrouped_rows(tmp_pat
     assert seen["selected"] == ["pending job"]
 
 
+def test_not_run_in_days_filter_includes_unknown_and_old_runs(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestStale")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    now = time.time()
+    recent = time.strftime("%Y-%m-%d %H:%M", time.localtime(now - 86400))
+    old = time.strftime("%Y-%m-%d %H:%M", time.localtime(now - 10 * 86400))
+    save_profile(Profile(name="never job", left=str(left), right=str(right)))
+    save_profile(Profile(name="recent job", left=str(left), right=str(right), last_result=f"{recent}  1 copied"))
+    save_profile(Profile(name="old job", left=str(left), right=str(right), last_result=f"{old}  1 copied"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["days_initially_visible"] = window.stale_days.get_visible()
+            window.status_filter.set_selected(6)
+            seen["days_visible"] = window.stale_days.get_visible()
+            seen["seven"] = _profile_rows(window.list_box)
+            window.stale_days.set_value(30)
+            seen["thirty"] = _profile_rows(window.list_box)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["days_initially_visible"] is False
+    assert seen["days_visible"] is True
+    assert set(seen["seven"]) == {"never job", "old job"}
+    assert seen["thirty"] == ["never job"]
+
+
 def test_exclusion_editor_splits_edits_removes_and_tests_rules(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestExclusionEditor")
@@ -239,6 +273,17 @@ def test_exclusion_editor_splits_edits_removes_and_tests_rules(tmp_path, monkeyp
             editor.test_entry.set_text("project/node_modules/index.js")
             seen["remaining"] = editor.rules()
             seen["not_excluded"] = editor.test_result.get_text()
+            includes = ExclusionEditor(["(all)"], include=True)
+            includes.test_entry.set_text("photos/a.txt")
+            seen["include_all"] = includes.test_result.get_text()
+            includes._edit_rule(0)
+            includes.entry.set_text("*.jpg;*.png")
+            includes._save_rule()
+            includes.test_entry.set_text("photos/a.jpg")
+            seen["include_jpg"] = includes.test_result.get_text()
+            includes.test_entry.set_text("photos/a.txt")
+            seen["include_txt"] = includes.test_result.get_text()
+            seen["include_rules"] = includes.rules()
             self.quit()
 
     assert App().run(None) == 0
@@ -247,6 +292,40 @@ def test_exclusion_editor_splits_edits_removes_and_tests_rules(tmp_path, monkeyp
     assert seen["excluded"].startswith("Excluded by: .pyenv")
     assert "*/node_modules" not in seen["remaining"]
     assert seen["not_excluded"] == "Not excluded by these rules."
+    assert seen["include_all"] == "Included by: (all)"
+    assert seen["include_jpg"] == "Included by: *.jpg"
+    assert seen["include_txt"] == "Not included; this path is left out."
+    assert seen["include_rules"] == ["*.jpg", "*.png"]
+
+
+def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestIncludeSave")
+    save_profile(Profile(name="selection job", left="/left", right="/right", mode=SyncMode.EXACT_MIRROR))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            dialog = window._editor(window.profiles[0])
+            dropdowns = [item for item in _widgets(dialog) if isinstance(item, Gtk.DropDown)]
+            seen["original_mode"] = dropdowns[0].get_selected_item().get_string()
+            dropdowns[0].set_selected(0)
+            editors = [item for item in _widgets(dialog) if isinstance(item, ExclusionEditor)]
+            includes = next(item for item in editors if item.include_mode)
+            includes._edit_rule(0)
+            includes.entry.set_text("*.jpg;*.png")
+            includes._save_rule()
+            save = next(item for item in _widgets(dialog) if isinstance(item, Gtk.Button) and item.get_label() == "Save")
+            save.emit("clicked")
+            self.quit()
+
+    assert App().run(None) == 0
+    saved = load_profiles()[0]
+    assert seen["original_mode"] == "Exact Mirror (copy/move/delete)"
+    assert saved.mode == SyncMode.STANDARD
+    assert saved.include == ["*.jpg", "*.png"]
+    assert saved.name == "selection job"
 
 
 def test_preview_filters_keep_the_plan_and_safety_window_opens(tmp_path, monkeypatch):

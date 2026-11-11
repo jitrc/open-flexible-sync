@@ -23,7 +23,7 @@ from ofs.compare import Action, Change, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
 from ofs.history import delete_history
 from ofs.legacy import import_cfg, import_global_masks
-from ofs.masks import path_matches, split_masks
+from ofs.masks import included, path_matches, split_masks
 from ofs.model import Direction, ExclusionMode, Profile, SyncMode, parse_size
 from ofs.review import (
     SAFETY_SECONDS,
@@ -131,10 +131,15 @@ class MainWindow(Gtk.ApplicationWindow):
         tools.append(expand_all)
         tools.append(collapse_all)
         self.status_filter = Gtk.DropDown.new_from_strings(
-            ["All statuses", "Not run", "Clean", "Stopped", "Errors", "Selected"]
+            ["All statuses", "Never run in OFS", "Clean", "Stopped", "Errors", "Selected", "Not run in…"]
         )
         self.status_filter.set_selected(0)
-        self.status_filter.connect("notify::selected", lambda *_: self._rebuild())
+        self.status_filter.connect("notify::selected", self._status_filter_changed)
+        self.stale_days = Gtk.SpinButton.new_with_range(1, 3650, 1)
+        self.stale_days.set_value(7)
+        self.stale_days.set_tooltip_text("Include profiles never run or last run at least this many days ago")
+        self.stale_days.connect("value-changed", lambda *_: self._rebuild())
+        self.stale_days_label = Gtk.Label(label="days")
         self.available_only = Gtk.CheckButton(label="Available paths only")
         self.available_only.set_tooltip_text("Show only profiles whose left and right folders exist now")
         self.available_only.connect("toggled", lambda *_: self._rebuild())
@@ -144,8 +149,11 @@ class MainWindow(Gtk.ApplicationWindow):
         filters.set_margin_start(12)
         filters.set_margin_end(12)
         filters.append(self.status_filter)
+        filters.append(self.stale_days)
+        filters.append(self.stale_days_label)
         filters.append(self.available_only)
         filters.append(self.filter_count)
+        self._set_stale_visibility(False)
         self.status = Gtk.Label(xalign=0)
         self.status.set_margin_start(12)
         self.status.set_margin_end(12)
@@ -195,6 +203,14 @@ class MainWindow(Gtk.ApplicationWindow):
             self._path_available[profile.name] = Path(profile.left).is_dir() and Path(profile.right).is_dir()
         return self._path_available[profile.name]
 
+    def _set_stale_visibility(self, visible: bool) -> None:
+        self.stale_days.set_visible(visible)
+        self.stale_days_label.set_visible(visible)
+
+    def _status_filter_changed(self, *_args) -> None:
+        self._set_stale_visibility(self.status_filter.get_selected() == 6)
+        self._rebuild()
+
     def _shown(self, profile: Profile, query: str, status: str) -> bool:
         if query not in profile.name.lower() and query not in profile.group.lower():
             return False
@@ -202,6 +218,8 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
         if status == "selected":
             return profile.name in self.checked
+        if status == "stale":
+            return _not_run_since(profile.last_result, self.stale_days.get_value_as_int())
         if status != "all":
             return _result_status(profile.last_result) == status
         return True
@@ -214,7 +232,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.list_box.remove(child)
         self._labels.clear()
         query = self.search.get_text().strip().lower()
-        statuses = ["all", "not_run", "clean", "stopped", "errors", "selected"]
+        statuses = ["all", "not_run", "clean", "stopped", "errors", "selected", "stale"]
         status = statuses[self.status_filter.get_selected()]
         shown = [profile for profile in self.profiles if self._shown(profile, query, status)]
         self._visible_count = len(shown)
@@ -559,7 +577,7 @@ class MainWindow(Gtk.ApplicationWindow):
         window.set_child(box)
         window.present()
 
-    def _editor(self, profile: Profile | None) -> None:
+    def _editor(self, profile: Profile | None) -> Gtk.Window:
         existing = profile
         window = Gtk.Window(transient_for=self, modal=True, title="Profile")
         window.set_default_size(780, 840)
@@ -574,7 +592,7 @@ class MainWindow(Gtk.ApplicationWindow):
         right = Gtk.Entry(text="" if existing is None else existing.right)
         left_volume = Gtk.Entry(text="" if existing is None else existing.left_volume)
         right_volume = Gtk.Entry(text="" if existing is None else existing.right_volume)
-        mode = Gtk.DropDown.new_from_strings(["standard", "exact_mirror"])
+        mode = Gtk.DropDown.new_from_strings(["Copy only (no deletions)", "Exact Mirror (copy/move/delete)"])
         mode.set_selected(0 if existing is None or existing.mode == SyncMode.STANDARD else 1)
         direction = Gtk.DropDown.new_from_strings(["left_to_right", "right_to_left", "both"])
         direction_values = [Direction.LEFT_TO_RIGHT, Direction.RIGHT_TO_LEFT, Direction.BOTH]
@@ -592,6 +610,7 @@ class MainWindow(Gtk.ApplicationWindow):
         older_keep.set_value(1 if existing is None or existing.older_keep < 1 else existing.older_keep)
         binary = Gtk.CheckButton(label="Binary compare when size matches (reads file bytes)", active=bool(existing and existing.binary_compare))
         track = Gtk.CheckButton(label="Remember files and detect moves and deletions", active=bool(existing and existing.track))
+        include_editor = ExclusionEditor(["(all)"] if existing is None else existing.include, include=True)
         exclusion_editor = ExclusionEditor([] if existing is None else existing.exclusions)
         min_size = Gtk.Entry(text="" if existing is None or not existing.min_size else str(existing.min_size))
         max_size = Gtk.Entry(text="" if existing is None or not existing.max_size else str(existing.max_size))
@@ -605,6 +624,7 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Right volume", right_volume),
             ("Mode", mode),
             ("Direction", direction),
+            ("Include filters", include_editor),
             ("Exclusions", exclusion),
             ("Exclusion rules", exclusion_editor),
             ("Min size", min_size),
@@ -635,7 +655,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 right=right.get_text().strip(),
                 left_volume=left_volume.get_text().strip(),
                 right_volume=right_volume.get_text().strip(),
-                include=["(all)"] if existing is None else list(existing.include),
+                include=include_editor.rules(),
                 exclusions=exclusion_editor.rules(),
                 exclusion_mode=ExclusionMode.IGNORE_TOTALLY if exclusion.get_selected() == 0 else ExclusionMode.DONT_COPY,
                 direction=direction_values[direction.get_selected()],
@@ -678,6 +698,7 @@ class MainWindow(Gtk.ApplicationWindow):
         editor_scroll.set_child(grid)
         window.set_child(editor_scroll)
         window.present()
+        return window
 
     def _run_one(self, _button, name: str) -> None:
         self._run_names({name})
@@ -825,6 +846,20 @@ def _result_status(last_result: str) -> str:
     return {"result-error": "errors", "result-warn": "stopped"}.get(tone, "clean")
 
 
+def _not_run_since(last_result: str, days: int, now: float | None = None) -> bool:
+    """Never/undated runs need attention; dated runs are stale after N days."""
+
+    when = _result_parts(last_result, "")[0]
+    if not when:
+        return True
+    try:
+        run_at = time.mktime(time.strptime(when, "%Y-%m-%d %H:%M"))
+    except ValueError:
+        return True
+    current = time.time() if now is None else now
+    return current - run_at >= days * 86400
+
+
 def _status_icon(last_result: str) -> Gtk.Image | None:
     """5.71-style row status: green check ran clean, red for errors, orange for stopped, none for never run."""
 
@@ -839,6 +874,8 @@ def _status_icon(last_result: str) -> Gtk.Image | None:
 
 
 def _mask_kind(mask: str) -> str:
+    if mask == "(all)":
+        return "Include all"
     if mask == "*":
         return "Legacy star"
     normalized = mask.replace("\\", "/")
@@ -854,11 +891,13 @@ def _mask_kind(mask: str) -> str:
 class ExclusionEditor(Gtk.Box):
     """Editable rule list with immediate relative-path matching feedback."""
 
-    def __init__(self, masks: list[str]):
+    def __init__(self, masks: list[str], include: bool = False):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self._rules = list(masks)
+        self.include_mode = include
         self._editing: int | None = None
-        self.entry = Gtk.Entry(placeholder_text="Mask, for example .venv or */node_modules", hexpand=True)
+        placeholder = "Include mask, for example *.jpg (keep (all) for everything)" if include else "Mask, for example .venv or */node_modules"
+        self.entry = Gtk.Entry(placeholder_text=placeholder, hexpand=True)
         self.entry.connect("activate", lambda *_: self._save_rule())
         self.add_button = Gtk.Button(label="Add rule")
         self.add_button.connect("clicked", lambda *_: self._save_rule())
@@ -942,10 +981,18 @@ class ExclusionEditor(Gtk.Box):
     def _update_test(self) -> None:
         path = self.test_entry.get_text().strip()
         if not path:
-            self.test_result.set_text(f"{len(self._rules)} rules. Test a path to see what would be excluded.")
+            hint = "Only matching paths are included; (all) includes everything." if self.include_mode else "Test a path to see what would be excluded."
+            self.test_result.set_text(f"{len(self._rules)} rules. {hint}")
             return
         matches = [mask for mask in self._rules if path_matches(path, mask)]
-        if matches:
+        if self.include_mode:
+            if matches and included(path, self._rules):
+                self.test_result.set_text("Included by: " + "; ".join(matches))
+            elif included(path, self._rules):
+                self.test_result.set_text("Included: there is no restrictive include rule.")
+            else:
+                self.test_result.set_text("Not included; this path is left out.")
+        elif matches:
             self.test_result.set_text("Excluded by: " + "; ".join(matches))
         else:
             self.test_result.set_text("Not excluded by these rules.")

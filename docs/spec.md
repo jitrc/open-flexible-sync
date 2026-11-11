@@ -88,7 +88,7 @@ These are the requirements added after the first draft, restated with the behavi
 
 ### Filters
 
-- Include masks and exclusion masks for files and folders. Several masks, separated by semicolon or newline. A mask may point at a text file that holds more masks.
+- Include masks and exclusion masks for files and folders. Both are editable as typed rule lists with relative-path match tests. Keep `(all)` in includes for no restriction; replacing it makes nonmatching files invisible to copy and mirror deletion. Several masks may be separated by semicolon or newline. A mask may point at a text file that holds more masks.
 - A lone `*` in an exclusion list matches no path. The imported lists keep that star. `(all)` on an include list includes every file. `*.tmp` matches that name in any folder. A mask that names a folder matches that folder and everything under it.
 - Folder masks are separate from file masks.
 - Each exclusion is one of two modes:
