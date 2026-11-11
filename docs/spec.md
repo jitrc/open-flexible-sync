@@ -113,7 +113,8 @@ Per profile, any combination of:
 - Ignore the timestamp altogether.
 - If the size differs, treat the larger file as the newer one.
 - A rule for “same timestamp, different size” (copy, skip, or ask).
-- Optional binary comparison while building the file list. The old program labels this slow. It must be off unless the profile asks for it.
+- Optional binary comparison while building the file list. The old program labels this slow. It must be off unless the profile asks for it. OFS compares candidate file bytes directly without trusting cached size/time metadata. Equal bytes become an equal file without copying. This is whole-file binary comparison, not a stored SHA checksum, content-addressed dedupe, or automatic post-copy verification; those are possible later additions.
+- Cross-filesystem time comparison relies on filesystem-reported modification timestamps. The small-difference and exact-hour rules cover normal NTFS/FAT rounding and DST/timezone shifts. OFS does not auto-detect a remote server's clock offset or invent a timestamp when the filesystem does not provide one.
 - Optional compare of attributes and of permissions.
 - Optional “always copy even when the timestamp is unchanged”.
 
@@ -211,7 +212,11 @@ A row marked ask is skipped by the windowed run and reported as left undecided. 
 
 ### Progress
 
-Copying runs off the UI thread. The progress window shows the path about to be handled, how far the run has got, a bar, and the running copied, deleted, and moved counts. Pause holds the next file. Resume continues. Cancel stops before the next file. A file that has already started is finished. Closing the progress window is Cancel, and the window stays until the run has stopped.
+Copying runs off the UI thread. The progress window shows the current relative path, completed/total operations, byte-weighted copy totals, elapsed time, measured speed, estimated time remaining, a total bar, and a current-file bar. Operations that are moves or deletes use the operation count when there are no copy bytes. Pause and Resume operate between copy chunks, and paused wall time does not depress the measured active-run speed. Cancel can stop an in-progress copy; its temporary file is removed and the prior destination remains intact.
+
+Copying uses unique temporary siblings in the destination directory, preserves metadata, and atomically replaces the destination only after the complete file is written. It does not expose an interrupted partial file under the final filename. The global copy speed limit is in MiB/s; zero means unlimited. Copying stays serial in this iteration. A future bounded pool may parallelize independent small files, with 2–4 workers as a candidate NAS optimization, but must not reorder moves/deletes or bypass safety checks.
+
+A failed item is recorded without preventing unrelated later items. Results offer Retry Failed with confirmation, then rescan the current profile and present a fresh plan. They must never replay an old, potentially stale plan. Successful earlier operations are naturally omitted by the rescan. A Retry of a mirror destination follows the same deletion safety confirmation as a new run.
 
 ### Versions
 
@@ -221,12 +226,9 @@ The config uses an “Older” tree. The product must be able to keep replaced f
 - Cap how many older versions to keep, and prune past that cap.
 - Filename versioning is a second, later mechanism (timestamp in the name, `(2)` before the extension). The folder named `Older` is the one OFS keeps.
 
-### Scheduler
+### Scheduler — future scope
 
-- A profile can be unscheduled or run on a timer.
-- Background scheduler can start at login.
-- Run checked profiles on their schedule. Do not start a profile whose volume is missing; report that and continue with the next checked profile.
-- Log on, log off, and shutdown hooks exist in the old program. They are secondary to the interval timer.
+Scheduled regular synchronization is not implemented and is deliberately after the copy/progress work. When added, a profile can be unscheduled or run on a timer, while a Disabled profile never starts. Background scheduling can start at login. A scheduled run must skip and report unavailable paths, distinguish scan-only from unattended copying, and require an explicit deletion policy for Exact Mirror. Log on, log off, and shutdown hooks exist in the old program; they are secondary to the interval timer.
 
 ### Logs and results
 
@@ -245,7 +247,7 @@ View Log opens that run's text file. A confirmed Start that begins copying write
 
 ### Profile editing
 
-- Create, rename, delete, and duplicate a profile. Duplicate copies the job and leaves the file database behind. Delete asks, then removes the profile and its database. The folders on disk stay.
+- Create, rename, delete, disable, enable, and duplicate a profile. Disabled is persistent, visible in Overview, and blocks GUI/CLI runs without deleting the profile, its paths, history, or results. A future scheduler must honor it too. Duplicate copies the job and leaves the file database behind. Delete asks, then removes the profile and its database. The folders on disk stay.
 - Edit the same field across many selected profiles (the old Multi Edit).
 - Search and replace a path across the checked profiles. Ask before saving. Remove the file databases of the profiles that change, because those databases still describe the old folders.
 - Import and export the new profile format.
@@ -285,7 +287,7 @@ Recorded so a later version can add them without a new discovery pass. Nothing h
 
 ### Internet protocols
 
-Present in 5.71, and not required for the local jobs this spec covers: FTP (two client stacks), FTPS, SFTP/SSH with keys, WebDAV, HTTP, Amazon S3, Google storage. Plus proxies, client certificates, upload timestamps, timezone detection, public-ACL flag, and resume with a temporary name. Size limits in that program: 5 GB on S3, 10 GB on Google.
+Potential future scope, not required for the local jobs this spec covers: FTP (two client stacks), FTPS, SFTP/SSH with keys, WebDAV, HTTP, Amazon S3, Google Drive/storage, Dropbox, and other cloud APIs. Plus proxies, client certificates, upload timestamps, timezone detection, public-ACL flag, and resume with a temporary name. OS-mounted SMB/CIFS, NFS, SSHFS, rclone, NAS, and Drive/Dropbox folders remain supported as ordinary local paths, without OFS owning their network protocol or credentials.
 
 ### Other old features
 
