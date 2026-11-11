@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from ofs.model import Profile
 from ofs.scan import ScanResult, scan_profile
-from ofs.walk import MissingVolume, WalkStopped
+from ofs.walk import MissingVolume, WalkSkipped, WalkStopped
 
 
 @dataclass
@@ -24,6 +24,7 @@ def run_checked(
     session_masks: dict[str, list[str]] | None = None,
     control=None,
     on_progress=None,
+    on_stats=None,
 ) -> list[JobResult]:
     skips = session_skips or {}
     masks = session_masks or {}
@@ -36,6 +37,10 @@ def run_checked(
             if on_progress is not None:
                 on_progress(name, side, rel, count)
 
+        def report_stats(side: str, rel: str, values, name: str = profile.name) -> None:
+            if on_stats is not None:
+                on_stats(name, side, rel, values)
+
         try:
             result = scan_profile(
                 profile,
@@ -43,10 +48,16 @@ def run_checked(
                 session_masks=masks.get(profile.name),
                 control=control,
                 on_progress=report,
+                on_stats=report_stats,
             )
         except MissingVolume as exc:
             result = None
             error = f"volume is not mounted: {exc.path}"
+        except WalkSkipped:
+            results.append(JobResult(profile, None, "scan skipped"))
+            if control is not None:
+                control.clear_skip()
+            continue
         except WalkStopped:
             results.append(JobResult(profile, None, "scan stopped"))
             break

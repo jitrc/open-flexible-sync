@@ -308,18 +308,26 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
     class App(SfsApplication):
         def do_activate(self):
             window = MainWindow(self)
+            from ofs.walk import WalkStats
+
             scan = ScanWindow(window)
-            scan.update("job", "Left", "album", 4)
-            scan.update("job", "Left", "album/more", 40)
-            scan.update("job", "Right", "album", 3)
+            scan.update_stats("job", "Left", "album/more", WalkStats(45, 5, 40))
+            scan.update_stats("job", "Right", "album", WalkStats(4, 1, 3))
             seen["counts"] = scan.count_label.get_text()
             seen["place"] = scan.file_label.get_text()
+            scan._skip()
+            seen["skip"] = scan.file_label.get_text()
+            seen["skipping"] = scan.control.skipping
+            seen["skip_enabled"] = scan.skip_button.get_sensitive()
             seen["modal"] = scan.get_modal()
             self.quit()
 
     assert App().run(None) == 0
-    assert seen["counts"] == "Left files found: 40    Right files found: 3"
+    assert seen["counts"] == "Folders and files found: 49\nFiltered (ignored): 6\nAdded to file list: 43"
     assert "Reading right" in seen["place"]
+    assert seen["skip"].startswith("Skipping rest")
+    assert seen["skipping"] is True
+    assert seen["skip_enabled"] is False
     assert seen["modal"] is False
 
 

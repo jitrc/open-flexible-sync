@@ -50,12 +50,13 @@ class ApplyReport:
 
 
 class RunControl:
-    """Pause and cancel checked between files. Safe to call from the UI thread."""
+    """Pause, skip-current-scan, and cancel checked between files. UI-thread safe."""
 
     def __init__(self) -> None:
         self._running = threading.Event()
         self._running.set()
         self._stop = threading.Event()
+        self._skip = threading.Event()
 
     @property
     def paused(self) -> bool:
@@ -70,6 +71,18 @@ class RunControl:
     def stop(self) -> None:
         self._stop.set()
         self._running.set()
+
+    @property
+    def skipping(self) -> bool:
+        return self._skip.is_set()
+
+    def skip_current(self) -> None:
+        """Skip the current scan only, without cancelling later profiles."""
+        self._skip.set()
+        self._running.set()
+
+    def clear_skip(self) -> None:
+        self._skip.clear()
 
     def checkpoint(self) -> bool:
         """Wait while paused. Return False when the run should stop."""

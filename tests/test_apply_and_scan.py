@@ -44,6 +44,26 @@ def test_scan_does_not_read_bytes_unless_asked(tmp_path, monkeypatch):
     assert result.changes == []
 
 
+def test_walk_reports_discovered_filtered_and_added_counts(tmp_path):
+    from ofs.walk import WalkStats
+
+    root = tmp_path / "tree"
+    root.mkdir()
+    _write(root / "keep.txt", "keep")
+    _write(root / "skip.tmp", "skip")
+    _write(root / "ignored" / "nested" / "file.txt", "ignored")
+    _write(root / "visible" / "nested" / "file.txt", "visible")
+    reports: list[WalkStats] = []
+    found = walk(
+        root,
+        lambda rel: rel == "ignored",
+        skip_file=lambda rel: rel.endswith(".tmp"),
+        on_stats=lambda _rel, stats: reports.append(stats),
+    )
+    assert set(found) == {"keep.txt", "visible/nested/file.txt"}
+    assert reports[-1] == WalkStats(discovered=6, filtered=2, added=2)
+
+
 def test_walk_stop_and_pause(tmp_path):
     root = tmp_path / "tree"
     root.mkdir()
@@ -96,6 +116,34 @@ def test_stopped_scan_does_not_start_the_next_profile(tmp_path):
     assert [job.profile.name for job in results] == ["first"]
     assert results[0].error == "scan stopped"
     assert results[0].result is None
+
+
+def test_skip_rest_continues_with_the_next_profile(tmp_path):
+    first_left = tmp_path / "a" / "left"
+    second_left = tmp_path / "b" / "left"
+    second_left.mkdir(parents=True)
+    _write(first_left / "partial.txt", "not a usable plan")
+    _write(second_left / "complete.txt", "scanned fully")
+    right = tmp_path / "right"
+    right.mkdir()
+    first = Profile(name="first", left=str(first_left), right=str(right))
+    second = Profile(name="second", left=str(second_left), right=str(right))
+    control = RunControl()
+    skipped: list[str] = []
+
+    def skip_first(name: str, _side: str, _rel: str, _count: int) -> None:
+        if name == "first" and name not in skipped:
+            skipped.append(name)
+            control.skip_current()
+
+    results = run_checked([first, second], checked={"first", "second"}, control=control, on_progress=skip_first)
+    assert [job.profile.name for job in results] == ["first", "second"]
+    assert results[0].error == "scan skipped"
+    assert results[0].result is None
+    assert results[1].error is None
+    assert results[1].result is not None
+    assert [change.rel for change in results[1].result.changes] == ["complete.txt"]
+    assert control.skipping is False
 
 
 def test_missing_volume_raises(tmp_path):

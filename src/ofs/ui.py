@@ -723,8 +723,8 @@ class MainWindow(Gtk.ApplicationWindow):
         progress = ScanWindow(self, self._scan_label.removesuffix("…"))
         progress.present()
 
-        def on_progress(name: str, side: str, rel: str, count: int) -> None:
-            GLib.idle_add(progress.update, name, side, rel, count)
+        def on_stats(name: str, side: str, rel: str, values) -> None:
+            GLib.idle_add(progress.update_stats, name, side, rel, values)
 
         def work() -> None:
             try:
@@ -734,7 +734,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     session_skips=skips,
                     session_masks=masks,
                     control=progress.control,
-                    on_progress=on_progress,
+                    on_stats=on_stats,
                 )
             except Exception as exc:
                 failed = next(profile for profile in profiles if profile.name in chosen)
@@ -1572,27 +1572,33 @@ class Preview(Gtk.Window):
 
 
 class ScanWindow(Gtk.Window):
-    """Shown while folders are being read. Pause and Cancel act between files."""
+    """Live scan statistics, pause, per-profile skip, and whole-scan cancel."""
 
     def __init__(self, owner: Gtk.Window, title: str = "Scanning"):
         super().__init__(transient_for=owner, modal=False, title=title)
-        self.set_default_size(640, 180)
+        self.set_default_size(640, 260)
         self.control = RunControl()
         self._allow_close = False
         self._place = "Starting…"
+        self._name = ""
         self.left_found = 0
         self.right_found = 0
+        self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
         self.file_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.file_label.set_text(self._place)
         self.count_label = Gtk.Label(xalign=0)
-        self.count_label.set_text("Left files found: 0    Right files found: 0")
+        self._update_counts()
         self.bar = Gtk.ProgressBar()
         self.pause_button = Gtk.Button(label="Pause")
         self.pause_button.connect("clicked", self._toggle)
+        self.skip_button = Gtk.Button(label="Skip Rest")
+        self.skip_button.set_tooltip_text("Skip this profile's incomplete scan and continue with the next profile")
+        self.skip_button.connect("clicked", self._skip)
         self.cancel_button = Gtk.Button(label="Cancel")
         self.cancel_button.connect("clicked", self._cancel)
         buttons = Gtk.Box(spacing=8)
         buttons.append(self.pause_button)
+        buttons.append(self.skip_button)
         buttons.append(self.cancel_button)
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         root.set_margin_start(12)
@@ -1607,19 +1613,43 @@ class ScanWindow(Gtk.Window):
         self.connect("close-request", self._cancel_close)
         GLib.timeout_add(120, self._pulse)
 
-    def update(self, name: str, side: str, rel: str, count: int) -> bool:
-        if side == "Right":
-            self.right_found = count
-            reading = "Reading right"
-        else:
-            self.left_found = count
-            reading = "Reading left"
+    def _update_counts(self) -> None:
+        discovered = sum(values["discovered"] for values in self._stats.values())
+        filtered = sum(values["filtered"] for values in self._stats.values())
+        added = sum(values["added"] for values in self._stats.values())
+        self.count_label.set_text(
+            f"Folders and files found: {discovered}\nFiltered (ignored): {filtered}\nAdded to file list: {added}"
+        )
+
+    def _new_profile(self, name: str) -> None:
+        if name != self._name:
+            self._name = name
+            self.skip_button.set_sensitive(True)
+            self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
+
+    def _update_location(self, name: str, side: str, rel: str) -> None:
+        self._new_profile(name)
+        reading = "Reading right" if side == "Right" else "Reading left"
         self._place = f"{name}    {reading}    {rel or '.'}"
         if not self.control.paused:
             self.file_label.set_text(self._place)
-        self.count_label.set_text(
-            f"Left files found: {self.left_found}    Right files found: {self.right_found}"
-        )
+
+    def update(self, name: str, side: str, rel: str, count: int) -> bool:
+        self._update_location(name, side, rel)
+        values = self._stats[side]
+        values["discovered"] = count
+        values["added"] = count
+        self._update_counts()
+        return False
+
+    def update_stats(self, name: str, side: str, rel: str, values) -> bool:
+        self._update_location(name, side, rel)
+        self._stats[side] = {
+            "discovered": values.discovered,
+            "filtered": values.filtered,
+            "added": values.added,
+        }
+        self._update_counts()
         return False
 
     def _pulse(self) -> bool:
@@ -1638,10 +1668,16 @@ class ScanWindow(Gtk.Window):
             self.pause_button.set_label("Resume")
             self.file_label.set_text("Paused. " + self._place)
 
+    def _skip(self, *_args) -> None:
+        self.control.skip_current()
+        self.skip_button.set_sensitive(False)
+        self.file_label.set_text("Skipping rest of current profile…")
+
     def _cancel(self, *_args) -> None:
         self.control.stop()
         self.cancel_button.set_sensitive(False)
         self.pause_button.set_sensitive(False)
+        self.skip_button.set_sensitive(False)
         self.file_label.set_text("Canceling…")
 
     def allow_close(self) -> None:

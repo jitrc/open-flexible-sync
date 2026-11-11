@@ -13,7 +13,7 @@ from ofs.model import ExclusionMode, Profile
 from ofs.review import Listed, build_listing
 from ofs.settings import global_exclusion_mode, global_exclusions
 from ofs.volume import ensure_volume
-from ofs.walk import WalkStopped, ensure_dir, walk
+from ofs.walk import WalkSkipped, WalkStopped, ensure_dir, walk
 
 
 @dataclass
@@ -45,6 +45,18 @@ def _skip_dir(
     return profile.exclusion_mode == ExclusionMode.IGNORE_TOTALLY
 
 
+def _skip_file(
+    profile: Profile,
+    rel: str,
+    *,
+    global_masks: list[str],
+    global_mode: ExclusionMode,
+) -> bool:
+    if global_mode == ExclusionMode.IGNORE_TOTALLY and any_match(rel, global_masks):
+        return True
+    return profile.exclusion_mode == ExclusionMode.IGNORE_TOTALLY and any_match(rel, profile.exclusions)
+
+
 def _drop_global(
     files: dict[str, FileStat],
     global_masks: list[str],
@@ -62,6 +74,7 @@ def scan_profile(
     session_masks: list[str] | None = None,
     control=None,
     on_progress=None,
+    on_stats=None,
 ) -> ScanResult:
     masks = global_exclusions()
     mode = global_exclusion_mode()
@@ -77,12 +90,21 @@ def scan_profile(
 
         return report
 
+    def stats(side: str):
+        def report(rel: str, values) -> None:
+            if on_stats is not None:
+                on_stats(side, rel, values)
+
+        return report
+
     left = _drop_global(
         walk(
             left_root,
             lambda rel: _skip_dir(profile, rel, destination=False, global_masks=masks, global_mode=mode),
+            skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
             control=control,
             on_progress=progress("Left"),
+            on_stats=stats("Left"),
         ),
         masks,
         mode,
@@ -91,8 +113,10 @@ def scan_profile(
         walk(
             right_root,
             lambda rel: _skip_dir(profile, rel, destination=True, global_masks=masks, global_mode=mode),
+            skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
             control=control,
             on_progress=progress("Right"),
+            on_stats=stats("Right"),
         ),
         masks,
         mode,
@@ -162,8 +186,11 @@ def _equalize_identical(
 
     read = 0
     for rel in set(left) & set(right):
-        if control is not None and not control.checkpoint():
-            raise WalkStopped
+        if control is not None:
+            if not control.checkpoint():
+                raise WalkStopped
+            if control.skipping:
+                raise WalkSkipped
         state = classify_time(
             left[rel].mtime,
             right[rel].mtime,
