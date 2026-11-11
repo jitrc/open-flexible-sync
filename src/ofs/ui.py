@@ -215,6 +215,11 @@ class MainWindow(Gtk.ApplicationWindow):
         check = Gtk.CheckButton(label=profile.name)
         check.set_active(profile.name in self.checked)
         check.connect("toggled", self._toggled, profile.name)
+        name_row = Gtk.Box(spacing=6)
+        name_row.append(check)
+        status = _status_icon(profile.last_result)
+        if status is not None:
+            name_row.append(status)
         paths = Gtk.Label(xalign=0)
         paths.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         paths.add_css_class("dim-label")
@@ -238,7 +243,7 @@ class MainWindow(Gtk.ApplicationWindow):
         delete.add_css_class("destructive-action")
         delete.connect("clicked", self._confirm_delete, profile.name)
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        text.append(check)
+        text.append(name_row)
         text.append(paths)
         if result.get_text():
             text.append(result)
@@ -706,6 +711,25 @@ class MainWindow(Gtk.ApplicationWindow):
 
 def _compact(button: Gtk.Button) -> None:
     button.add_css_class("compact")
+
+
+def _status_icon(last_result: str) -> Gtk.Image | None:
+    """5.71-style row status: green check ran clean, red for errors, orange for stopped, none for never run."""
+
+    text = last_result.strip()
+    if not text:
+        return None
+    lowered = text.lower()
+    if "error" in lowered:
+        name = "dialog-error"
+    elif lowered.startswith("stopped"):
+        name = "dialog-warning"
+    else:
+        name = "emblem-ok"
+    icon = Gtk.Image.new_from_icon_name(name)
+    icon.set_pixel_size(16)
+    icon.set_tooltip_text(text)
+    return icon
 
 
 _CSS_INSTALLED = False

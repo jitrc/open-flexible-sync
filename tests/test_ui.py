@@ -459,3 +459,13 @@ def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
     assert App().run(None) == 0
     assert seen["left"] == "/media/new/photos"
     assert seen["database"] is False
+
+
+def test_status_icon_reflects_the_last_result():
+    from ofs.ui import _status_icon
+
+    assert _status_icon("") is None
+    assert _status_icon("   ") is None
+    assert _status_icon("2026-11-10 12:03  0 copied, 0 deleted, 0 moved").get_icon_name() == "emblem-ok"
+    assert _status_icon("2026-11-10 12:03  1 copied, 2 errors").get_icon_name() == "dialog-error"
+    assert _status_icon("stopped, 3 copied").get_icon_name() == "dialog-warning"
