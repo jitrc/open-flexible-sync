@@ -30,7 +30,7 @@ def run_checked(
     masks = session_masks or {}
     results: list[JobResult] = []
     for profile in profiles:
-        if profile.name not in checked:
+        if profile.name not in checked or profile.disabled:
             continue
 
         def report(side: str, rel: str, count: int, name: str = profile.name) -> None:

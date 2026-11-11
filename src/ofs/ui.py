@@ -131,7 +131,7 @@ class MainWindow(Gtk.ApplicationWindow):
         tools.append(expand_all)
         tools.append(collapse_all)
         self.status_filter = Gtk.DropDown.new_from_strings(
-            ["All statuses", "Never run in OFS", "Clean", "Stopped", "Errors", "Selected", "Not run in…"]
+            ["All statuses", "Never run in OFS", "Clean", "Stopped", "Errors", "Selected", "Not run in…", "Disabled"]
         )
         self.status_filter.set_selected(0)
         self.status_filter.connect("notify::selected", self._status_filter_changed)
@@ -218,6 +218,8 @@ class MainWindow(Gtk.ApplicationWindow):
             return False
         if status == "selected":
             return profile.name in self.checked
+        if status == "disabled":
+            return profile.disabled
         if status == "stale":
             return _not_run_since(profile.last_result, self.stale_days.get_value_as_int())
         if status != "all":
@@ -232,7 +234,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.list_box.remove(child)
         self._labels.clear()
         query = self.search.get_text().strip().lower()
-        statuses = ["all", "not_run", "clean", "stopped", "errors", "selected", "stale"]
+        statuses = ["all", "not_run", "clean", "stopped", "errors", "selected", "stale", "disabled"]
         status = statuses[self.status_filter.get_selected()]
         shown = [profile for profile in self.profiles if self._shown(profile, query, status)]
         self._visible_count = len(shown)
@@ -307,12 +309,17 @@ class MainWindow(Gtk.ApplicationWindow):
     def _row(self, profile: Profile) -> Gtk.Widget:
         check = Gtk.CheckButton(label=profile.name)
         check.set_active(profile.name in self.checked)
+        check.set_sensitive(not profile.disabled)
         check.connect("toggled", self._toggled, profile.name)
         name_row = Gtk.Box(spacing=6)
         name_row.append(check)
         status = _status_icon(profile.last_result)
         if status is not None:
             name_row.append(status)
+        if profile.disabled:
+            badge = Gtk.Label(label="Disabled")
+            badge.add_css_class("result-warn")
+            name_row.append(badge)
         paths = Gtk.Label(xalign=0)
         paths.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         paths.add_css_class("dim-label")
@@ -321,6 +328,8 @@ class MainWindow(Gtk.ApplicationWindow):
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         text.append(name_row)
         text.append(paths)
+        if profile.disabled:
+            text.add_css_class("profile-disabled")
 
         when, body, tone = _result_parts(profile.last_result, profile.note)
         stamp = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER)
@@ -339,6 +348,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         run = Gtk.Button(label="Run")
         run.add_css_class("run")
+        run.set_sensitive(not profile.disabled)
+        run.set_tooltip_text("Enable the profile in Edit before running it" if profile.disabled else None)
         _compact(run)
         run.connect("clicked", self._run_one, profile.name)
         edit = Gtk.Button(label="Edit")
@@ -610,6 +621,7 @@ class MainWindow(Gtk.ApplicationWindow):
         older_keep.set_value(1 if existing is None or existing.older_keep < 1 else existing.older_keep)
         binary = Gtk.CheckButton(label="Binary compare when size matches (reads file bytes)", active=bool(existing and existing.binary_compare))
         track = Gtk.CheckButton(label="Remember files and detect moves and deletions", active=bool(existing and existing.track))
+        disabled = Gtk.CheckButton(label="Disabled — keep this profile but do not run it", active=bool(existing and existing.disabled))
         include_editor = ExclusionEditor(["(all)"] if existing is None else existing.include, include=True)
         exclusion_editor = ExclusionEditor([] if existing is None else existing.exclusions)
         min_size = Gtk.Entry(text="" if existing is None or not existing.min_size else str(existing.min_size))
@@ -637,7 +649,7 @@ class MainWindow(Gtk.ApplicationWindow):
             grid.attach(Gtk.Label(label=label, xalign=1), 0, index, 1, 1)
             grid.attach(widget, 1, index, 1, 1)
         checks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for widget in (small, hour, seconds, ignore_time, larger, older, binary, track):
+        for widget in (small, hour, seconds, ignore_time, larger, older, binary, track, disabled):
             checks.append(widget)
         grid.attach(checks, 1, len(rows), 1, 1)
         save = Gtk.Button(label="Save")
@@ -675,6 +687,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 max_age_days=_days(max_age.get_text()),
                 binary_compare=binary.get_active(),
                 track=track.get_active(),
+                disabled=disabled.get_active(),
                 last_result="" if existing is None else existing.last_result,
                 note="" if existing is None else existing.note,
                 imported_settings=False if existing is None else existing.imported_settings,
@@ -690,6 +703,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
                 delete_history(chosen)
             save_profile(updated)
+            if updated.disabled:
+                self.checked.discard(updated.name)
             window.close()
             self.reload()
 
@@ -711,7 +726,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._run_names(chosen)
 
     def _run_names(self, chosen: set[str]) -> None:
+        chosen.difference_update(profile.name for profile in self.profiles if profile.disabled)
         if not chosen:
+            self.status.set_text("The selected profile is disabled. Enable it in Edit first.")
             return
         self._scan_queue.append(set(chosen))
         if self._scan_active:
@@ -1032,6 +1049,7 @@ def _install_css() -> None:
         "}"
         ".column-header { margin: 6px 12px 2px 12px; padding-bottom: 4px; border-bottom: 1px solid alpha(@theme_fg_color, 0.18); }"
         "label.column-heading { font-weight: 700; font-size: 0.9em; }"
+        ".profile-disabled { opacity: 0.55; }"
         "label.result-ok { color: @success_color; }"
         "label.result-error { color: @error_color; }"
         "label.result-warn { color: @warning_color; }"

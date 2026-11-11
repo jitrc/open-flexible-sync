@@ -17,6 +17,20 @@ def test_duplicate_keeps_the_job_and_clears_the_last_result(tmp_path, monkeypatc
     assert {item.name for item in load_profiles()} == {"alpha notes", "alpha notes copy", "alpha notes copy 2"}
 
 
+def test_disabled_profile_persists_and_cannot_run(tmp_path, monkeypatch, capsys):
+    from ofs.cli import main
+    from ofs.jobs import run_checked
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path))
+    save_profile(Profile(name="disabled job", left="/left", right="/right", disabled=True))
+    saved = load_profiles()[0]
+    assert saved.disabled is True
+    assert saved.left == "/left" and saved.right == "/right"
+    assert run_checked([saved], checked={saved.name}) == []
+    assert main(["run", "disabled job", "--apply"]) == 1
+    assert "profile is disabled" in capsys.readouterr().err
+
+
 def test_parse_size_accepts_units():
     assert parse_size("") == 0
     assert parse_size("512") == 512

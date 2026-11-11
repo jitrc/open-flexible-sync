@@ -316,8 +316,12 @@ def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatc
             includes._edit_rule(0)
             includes.entry.set_text("*.jpg;*.png")
             includes._save_rule()
+            disabled = next(item for item in _widgets(dialog) if isinstance(item, Gtk.CheckButton) and item.get_label().startswith("Disabled"))
+            disabled.set_active(True)
             save = next(item for item in _widgets(dialog) if isinstance(item, Gtk.Button) and item.get_label() == "Save")
             save.emit("clicked")
+            window.status_filter.set_selected(7)
+            seen["disabled_rows"] = _profile_rows(window.list_box)
             self.quit()
 
     assert App().run(None) == 0
@@ -325,6 +329,8 @@ def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatc
     assert seen["original_mode"] == "Exact Mirror (copy/move/delete)"
     assert saved.mode == SyncMode.STANDARD
     assert saved.include == ["*.jpg", "*.png"]
+    assert saved.disabled is True
+    assert seen["disabled_rows"] == ["selection job"]
     assert saved.name == "selection job"
 
 

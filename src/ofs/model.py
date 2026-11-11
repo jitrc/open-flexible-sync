@@ -78,6 +78,7 @@ class Profile:
     binary_compare: bool = False
     track: bool = False
     always_copy: bool = False
+    disabled: bool = False
     last_result: str = ""
     note: str = ""
     imported_settings: bool = False
@@ -112,6 +113,7 @@ class Profile:
             "binary_compare": self.binary_compare,
             "track": self.track,
             "always_copy": self.always_copy,
+            "disabled": self.disabled,
             "last_result": self.last_result,
             "note": self.note,
             "imported_settings": self.imported_settings,
@@ -141,6 +143,7 @@ class Profile:
             binary_compare=bool(data.get("binary_compare", False)),
             track=bool(data.get("track", False)),
             always_copy=bool(data.get("always_copy", False)),
+            disabled=bool(data.get("disabled", False)),
             last_result=data.get("last_result") or "",
             note=data.get("note") or "",
             imported_settings=bool(data.get("imported_settings", False)),

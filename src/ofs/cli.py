@@ -88,6 +88,9 @@ def _scan(name: str, *, apply: bool) -> int:
     except MissingVolume as exc:
         print(f"volume is not mounted: {exc.path}", file=sys.stderr)
         return 1
+    if not results:
+        print(f"profile is disabled: {name}", file=sys.stderr)
+        return 1
     job = results[0]
     if job.error:
         print(job.error, file=sys.stderr)
