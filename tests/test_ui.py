@@ -481,3 +481,19 @@ def test_result_parts_split_timestamp_and_tone():
     assert _result_parts("2026-11-10 12:03  stopped, 3 copied", "") == ("2026-11-10 12:03", "stopped, 3 copied", "result-warn")
     assert _result_parts("stopped, 3 copied", "") == ("", "stopped, 3 copied", "result-warn")
     assert _result_parts("2026-11-10 12:03  1 copied, 2 errors", "")[2] == "result-error"
+
+
+def test_results_close_request_also_closes_the_preview():
+    from ofs.ui import ResultsWindow
+
+    class Owner:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    owner = Owner()
+    window = ResultsWindow.__new__(ResultsWindow)
+    window.owner = owner
+    assert window._close_preview() is False
+    assert owner.closed

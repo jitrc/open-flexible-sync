@@ -1530,6 +1530,8 @@ class ResultsWindow(Gtk.Window):
     def __init__(self, owner: Preview, report: ApplyReport, log_path: Path | None):
         super().__init__(transient_for=owner, modal=True, title="Copying Results")
         _install_css()
+        self.owner = owner
+        self.connect("close-request", self._close_preview)
         self.set_default_size(640, 320)
         self.log_path = log_path
         headline = Gtk.Label(xalign=0)
@@ -1567,6 +1569,12 @@ class ResultsWindow(Gtk.Window):
             root.append(errors)
         root.append(buttons)
         self.set_child(root)
+
+    def _close_preview(self, *_args) -> bool:
+        """One close is enough: neither the preview nor the progress window stay behind."""
+
+        self.owner.close()
+        return False
 
     def _count(self, text: str) -> Gtk.Label:
         label = Gtk.Label(label=text, xalign=0)
