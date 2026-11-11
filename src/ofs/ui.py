@@ -740,30 +740,23 @@ def _result_parts(last_result: str, note: str) -> tuple[str, str, str]:
     text = last_result.strip()
     if not text:
         return "", note, "dim-label"
-    lowered = text.lower()
-    tone = "result-error" if "error" in lowered else "result-warn" if lowered.startswith("stopped") else "result-ok"
     match = _RUN_RESULT.match(text)
-    if match:
-        return match.group(1), match.group(2), tone
-    return "", text, tone
+    when, body = match.groups() if match else ("", text)
+    lowered = body.lower()
+    tone = "result-error" if "error" in lowered else "result-warn" if lowered.startswith("stopped") else "result-ok"
+    return when, body, tone
 
 
 def _status_icon(last_result: str) -> Gtk.Image | None:
     """5.71-style row status: green check ran clean, red for errors, orange for stopped, none for never run."""
 
-    text = last_result.strip()
-    if not text:
+    _when, body, tone = _result_parts(last_result, "")
+    if not body:
         return None
-    lowered = text.lower()
-    if "error" in lowered:
-        name = "dialog-error"
-    elif lowered.startswith("stopped"):
-        name = "dialog-warning"
-    else:
-        name = "emblem-ok"
+    name = {"result-error": "dialog-error", "result-warn": "dialog-warning"}.get(tone, "emblem-ok")
     icon = Gtk.Image.new_from_icon_name(name)
     icon.set_pixel_size(16)
-    icon.set_tooltip_text(text)
+    icon.set_tooltip_text(body)
     return icon
 
 
