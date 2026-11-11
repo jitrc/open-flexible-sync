@@ -6,12 +6,13 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk
 
+from ofs.apply import CopyProgress
 from ofs.compare import Action
 from ofs.jobs import JobResult
 from ofs.model import Profile, SyncMode
 from ofs.scan import scan_profile
 from ofs.store import load_profiles, save_profile
-from ofs.ui import ExclusionEditor, MainWindow, ScanWindow, SfsApplication
+from ofs.ui import ExclusionEditor, MainWindow, ProgressWindow, ResultsWindow, ScanWindow, SfsApplication
 
 
 def _group_titles(box) -> list[tuple[str, bool]]:
@@ -334,6 +335,82 @@ def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatc
     assert saved.name == "selection job"
 
 
+def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestCopyProgress")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            progress = ProgressWindow(window, "job")
+            progress.update(CopyProgress(1, 4, "large.bin", 50, 100, 150, 300, 1, 0, 0, 0))
+            seen["overall"] = progress.bar.get_fraction()
+            seen["current"] = progress.file_bar.get_fraction()
+            seen["counts"] = progress.count_label.get_text()
+            seen["timing"] = progress.timing_label.get_text()
+            progress._toggle()
+            seen["paused"] = progress.control.paused
+            seen["paused_label"] = progress.pause_button.get_label()
+            progress._toggle()
+            seen["resumed"] = not progress.control.paused
+            progress.update(CopyProgress(1, 2, "", 0, 0, 0, 0, 0, 1, 0, 0))
+            seen["delete_move_overall"] = progress.bar.get_fraction()
+            progress.allow_close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["overall"] == 0.5
+    assert seen["current"] == 0.5
+    assert "Operation 1 / 4" in seen["counts"]
+    assert "Processed 150 B / 300 B" in seen["counts"]
+    assert "Speed" in seen["timing"] and "Elapsed" in seen["timing"]
+    assert seen["paused"] is True
+    assert seen["paused_label"] == "Resume"
+    assert seen["resumed"] is True
+    assert seen["delete_move_overall"] == 0.5
+
+
+def test_retry_requires_confirmation_and_rescans_instead_of_replaying(tmp_path, monkeypatch):
+    from ofs.apply import ApplyReport
+    from ofs.scan import ScanResult
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestRetry")
+    left = tmp_path / "left"
+    left.mkdir()
+    right = tmp_path / "right"
+    right.mkdir()
+    save_profile(Profile(name="retry job", left=str(left), right=str(right)))
+    seen = {}
+
+    class Dialog:
+        def __init__(self, choice):
+            self.choice = choice
+
+        def choose_finish(self, _result):
+            return self.choice
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, ScanResult([]), None))
+            results = ResultsWindow(preview, ApplyReport(errors=["copy failed"]), None)
+            seen["retry"] = next(item for item in _buttons(results) if item.get_label() == "Retry Failed…").get_sensitive()
+            window._run_names = lambda names: seen.setdefault("runs", set(names))
+            results._retry_chosen(Dialog(0), None)
+            seen["cancelled"] = seen.get("runs")
+            results._retry_chosen(Dialog(1), None)
+            seen["accepted"] = seen.get("runs")
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["retry"] is True
+    assert seen["cancelled"] is None
+    assert seen["accepted"] == {"retry job"}
+
+
 def test_preview_filters_keep_the_plan_and_safety_window_opens(tmp_path, monkeypatch):
     home = tmp_path / "home"
     left = tmp_path / "left"
@@ -408,7 +485,13 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
             self.quit()
 
     assert App().run(None) == 0
-    assert seen["counts"] == "Folders and files found: 49\nFiltered (ignored): 6\nAdded to file list: 43"
+    assert seen["counts"].splitlines()[:3] == [
+        "Folders and files found: 49",
+        "Filtered (ignored): 6",
+        "Added to file list: 43",
+    ]
+    assert "entries/s" in seen["counts"]
+    assert "ETA unknown" in seen["counts"]
     assert "Reading right" in seen["place"]
     assert seen["skip"].startswith("Skipping rest")
     assert seen["skipping"] is True

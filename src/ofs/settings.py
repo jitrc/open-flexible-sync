@@ -80,6 +80,19 @@ def set_global_exclusion_mode(mode: ExclusionMode) -> None:
     _save("global_exclusion_mode", mode.value)
 
 
+def copy_speed_limit() -> int:
+    """Bytes per second across one copy run. Zero is unlimited."""
+
+    try:
+        return max(0, int(load_settings().get("copy_speed_limit") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_copy_speed_limit(bytes_per_second: float) -> None:
+    _save("copy_speed_limit", max(0, int(bytes_per_second)))
+
+
 def _save(key: str, value) -> None:
     folder = config_dir()
     folder.mkdir(parents=True, exist_ok=True)

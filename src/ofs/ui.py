@@ -18,7 +18,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
-from ofs.apply import ApplyReport, RunControl, apply_plan
+from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
 from ofs.compare import Action, Change, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
 from ofs.history import delete_history
@@ -45,7 +45,9 @@ from ofs.settings import (
     compare_command,
     global_exclusion_mode,
     global_exclusions,
+    copy_speed_limit,
     set_compare_command,
+    set_copy_speed_limit,
     set_global_exclusion_mode,
     set_global_exclusions,
 )
@@ -539,7 +541,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _settings(self, *_args) -> None:
         window = Gtk.Window(transient_for=self, modal=True, title="Settings")
-        window.set_default_size(560, 420)
+        window.set_default_size(560, 480)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
@@ -552,6 +554,11 @@ class MainWindow(Gtk.ApplicationWindow):
         hint.add_css_class("dim-label")
         box.append(entry)
         box.append(hint)
+        box.append(Gtk.Label(label="Copy speed limit (MiB/s; 0 = unlimited)", xalign=0))
+        speed = Gtk.SpinButton.new_with_range(0, 1024, 0.1)
+        speed.set_value(copy_speed_limit() / (1024 * 1024))
+        speed.set_tooltip_text("One shared limit for the whole copy run")
+        box.append(speed)
         box.append(Gtk.Label(label="Global exclusions", xalign=0))
         masks = Gtk.TextView()
         masks.set_monospace(True)
@@ -573,6 +580,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         def on_save(*_args) -> None:
             set_compare_command(entry.get_text())
+            set_copy_speed_limit(speed.get_value() * 1024 * 1024)
             buffer = masks.get_buffer()
             text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
             set_global_exclusions([line.strip() for line in text.splitlines() if line.strip()])
@@ -1604,9 +1612,8 @@ class Preview(Gtk.Window):
                     self.job.profile,
                     changes,
                     control=progress.control,
-                    on_progress=lambda index, total, rel, copied, deleted, moved: GLib.idle_add(
-                        progress.update, index, total, rel, copied, deleted, moved
-                    ),
+                    on_copy_progress=lambda update: GLib.idle_add(progress.update, update),
+                    bytes_per_second=copy_speed_limit(),
                 )
             except Exception as exc:
                 report.errors.append(str(exc))
@@ -1646,8 +1653,7 @@ class ScanWindow(Gtk.Window):
         self._allow_close = False
         self._place = "Starting…"
         self._name = ""
-        self.left_found = 0
-        self.right_found = 0
+        self._started = time.monotonic()
         self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
         self.file_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.file_label.set_text(self._place)
@@ -1682,8 +1688,11 @@ class ScanWindow(Gtk.Window):
         discovered = sum(values["discovered"] for values in self._stats.values())
         filtered = sum(values["filtered"] for values in self._stats.values())
         added = sum(values["added"] for values in self._stats.values())
+        elapsed = max(0.001, time.monotonic() - self._started)
+        speed = int(discovered / elapsed)
         self.count_label.set_text(
-            f"Folders and files found: {discovered}\nFiltered (ignored): {filtered}\nAdded to file list: {added}"
+            f"Folders and files found: {discovered}\nFiltered (ignored): {filtered}\nAdded to file list: {added}\n"
+            f"Elapsed {_duration(elapsed)} · {speed} entries/s · ETA unknown"
         )
 
     def _new_profile(self, name: str) -> None:
@@ -1721,6 +1730,7 @@ class ScanWindow(Gtk.Window):
         if self._allow_close:
             return False
         self.bar.pulse()
+        self._update_counts()
         return True
 
     def _toggle(self, *_args) -> None:
@@ -1756,16 +1766,31 @@ class ScanWindow(Gtk.Window):
         return True
 
 
+def _duration(seconds: float) -> str:
+    total = max(0, int(seconds))
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    return f"{hours}:{minutes:02}:{secs:02}" if hours else f"{minutes:02}:{secs:02}"
+
+
 class ProgressWindow(Gtk.Window):
     def __init__(self, owner: Preview, title: str):
         super().__init__(transient_for=owner, modal=True, title=f"Copying {title}")
-        self.set_default_size(640, 180)
+        self.set_default_size(680, 300)
         self.control = RunControl()
         self._allow_close = False
+        self._started = time.monotonic()
+        self._paused_at: float | None = None
+        self._paused_total = 0.0
+        self.latest: CopyProgress | None = None
         self.file_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.file_label.set_text("Starting…")
+        self.file_bar = Gtk.ProgressBar(show_text=True)
+        self.file_count = Gtk.Label(xalign=0)
         self.count_label = Gtk.Label(xalign=0)
-        self.bar = Gtk.ProgressBar()
+        self.bar = Gtk.ProgressBar(show_text=True)
+        self.timing_label = Gtk.Label(xalign=0)
+        self.timing_label.add_css_class("monospace")
         self.pause_button = Gtk.Button(label="Pause")
         self.pause_button.connect("clicked", self._toggle)
         self.cancel_button = Gtk.Button(label="Cancel")
@@ -1774,39 +1799,78 @@ class ProgressWindow(Gtk.Window):
         buttons.append(self.pause_button)
         buttons.append(self.cancel_button)
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        root.set_margin_start(12)
-        root.set_margin_end(12)
-        root.set_margin_top(12)
-        root.set_margin_bottom(12)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(root, f"set_margin_{side}")(12)
         root.append(self.file_label)
-        root.append(self.count_label)
+        root.append(self.file_bar)
+        root.append(self.file_count)
         root.append(self.bar)
+        root.append(self.count_label)
+        root.append(self.timing_label)
         root.append(buttons)
         self.set_child(root)
         self.connect("close-request", self._cancel_close)
+        self._show_timing()
+        GLib.timeout_add(250, self._tick)
 
-    def update(self, index: int, total: int, rel: str | None, copied: int, deleted: int, moved: int) -> bool:
-        fraction = 0.0 if not total else index / total
-        self.bar.set_fraction(min(1.0, fraction))
-        if rel:
-            self.file_label.set_text(rel)
-        elif not self.control.paused:
-            self.file_label.set_text("Finishing…")
-        self.count_label.set_text(f"{index} / {total}    copied {copied}    deleted {deleted}    moved {moved}")
+    def _elapsed(self) -> float:
+        now = self._paused_at if self._paused_at is not None else time.monotonic()
+        return max(0.0, now - self._started - self._paused_total)
+
+    def _tick(self) -> bool:
+        if self._allow_close:
+            return False
+        self._show_timing()
+        return True
+
+    def _show_timing(self) -> None:
+        elapsed = self._elapsed()
+        if self.latest is None:
+            self.timing_label.set_text(f"Elapsed {_duration(elapsed)} · Speed 0 B/s · ETA --:--")
+            return
+        speed = self.latest.bytes_done / elapsed if elapsed > 0 and self.latest.bytes_done else 0.0
+        remaining = max(0, self.latest.bytes_total - self.latest.bytes_done)
+        eta = f"ETA {_duration(remaining / speed)}" if speed > 0 and remaining else "ETA --:--"
+        state = "Paused · " if self.control.paused else ""
+        self.timing_label.set_text(
+            f"{state}Elapsed {_duration(elapsed)} · Speed {format_bytes(int(speed))}/s · {eta}"
+        )
+
+    def update(self, event: CopyProgress) -> bool:
+        self.latest = event
+        self.bar.set_fraction(event.overall_fraction)
+        self.file_bar.set_fraction(event.current_fraction)
+        prefix = "Paused. " if self.control.paused else ""
+        self.file_label.set_text(prefix + (event.rel or "Finishing…"))
+        self.bar.set_tooltip_text(f"Overall: {format_bytes(event.bytes_done)} / {format_bytes(event.bytes_total)}")
+        self.file_bar.set_tooltip_text(f"Current file: {format_bytes(event.current_bytes)} / {format_bytes(event.current_total)}")
+        self.file_count.set_text(f"Current file: {format_bytes(event.current_bytes)} / {format_bytes(event.current_total)}")
+        self.count_label.set_text(
+            f"Operation {event.completed} / {event.total} · Processed {format_bytes(event.bytes_done)} / {format_bytes(event.bytes_total)}\n"
+            f"Copied {event.copied} · Deleted {event.deleted} · Moved {event.moved} · Errors {event.errors}"
+        )
+        self._show_timing()
         return False
 
     def _toggle(self, *_args) -> None:
         if self.control.paused:
+            if self._paused_at is not None:
+                self._paused_total += time.monotonic() - self._paused_at
+            self._paused_at = None
             self.control.resume()
             self.pause_button.set_label("Pause")
         else:
+            self._paused_at = time.monotonic()
             self.control.pause()
             self.pause_button.set_label("Resume")
-            self.file_label.set_text("Paused. " + self.file_label.get_text())
+        if self.latest is not None:
+            self.update(self.latest)
+        self._show_timing()
 
     def _cancel(self, *_args) -> None:
         self.control.stop()
         self.cancel_button.set_sensitive(False)
+        self.pause_button.set_sensitive(False)
         self.file_label.set_text("Canceling…")
 
     def allow_close(self) -> None:
@@ -1825,6 +1889,7 @@ class ResultsWindow(Gtk.Window):
         super().__init__(transient_for=owner, modal=True, title="Copying Results")
         _install_css()
         self.owner = owner
+        self.profile_name = owner.job.profile.name
         self.connect("close-request", self._close_preview)
         self.set_default_size(640, 320)
         self.log_path = log_path
@@ -1847,8 +1912,13 @@ class ResultsWindow(Gtk.Window):
         view = Gtk.Button(label="View Log…")
         view.set_sensitive(log_path is not None and log_path.exists())
         view.connect("clicked", self._view_log)
+        retry = Gtk.Button(label="Retry Failed…")
+        retry.set_sensitive(bool(report.errors))
+        retry.set_tooltip_text("Confirm, rescan the current folders, and build a fresh preview")
+        retry.connect("clicked", self._retry)
         buttons = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
         buttons.append(ok)
+        buttons.append(retry)
         buttons.append(view)
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
         root.set_margin_start(16)
@@ -1869,6 +1939,30 @@ class ResultsWindow(Gtk.Window):
 
         self.owner.close()
         return False
+
+    def _retry(self, *_args) -> None:
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("Retry failed operations?")
+        dialog.set_detail(
+            f"OFS will rescan {self.profile_name} and show a fresh preview. "
+            "The previous plan is not replayed; already successful operations should disappear."
+        )
+        dialog.set_buttons(["Cancel", "Rescan and Retry"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+        dialog.choose(self, None, self._retry_chosen)
+
+    def _retry_chosen(self, dialog, result) -> None:
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if choice != 1:
+            return
+        owner = self.owner
+        preview_owner = owner.owner
+        self.close()
+        preview_owner._run_names({self.profile_name})
 
     def _count(self, text: str) -> Gtk.Label:
         label = Gtk.Label(label=text, xalign=0)

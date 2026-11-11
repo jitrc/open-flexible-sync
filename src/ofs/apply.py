@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import filecmp
+import os
 import shutil
+import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -49,6 +52,33 @@ class ApplyReport:
         return text
 
 
+@dataclass(frozen=True)
+class CopyProgress:
+    completed: int
+    total: int
+    rel: str
+    current_bytes: int
+    current_total: int
+    bytes_done: int
+    bytes_total: int
+    copied: int
+    deleted: int
+    moved: int
+    errors: int
+
+    @property
+    def overall_fraction(self) -> float:
+        if self.bytes_total:
+            return min(1.0, self.bytes_done / self.bytes_total)
+        return min(1.0, self.completed / self.total) if self.total else 0.0
+
+    @property
+    def current_fraction(self) -> float:
+        if not self.current_total:
+            return 1.0 if self.rel else 0.0
+        return min(1.0, self.current_bytes / self.current_total)
+
+
 class RunControl:
     """Pause, skip-current-scan, and cancel checked between files. UI-thread safe."""
 
@@ -91,6 +121,122 @@ class RunControl:
         return not self._stop.is_set()
 
 
+class _CopyStopped(Exception):
+    pass
+
+
+def _copy_checkpoint(control: RunControl | None) -> None:
+    if control is not None and not control.checkpoint():
+        raise _CopyStopped
+
+
+class _RateLimiter:
+    """One byte budget for the run, with pause/cancel-responsive sleeps."""
+
+    def __init__(self, bytes_per_second: int):
+        self.limit = max(0, int(bytes_per_second))
+        self.bytes = 0
+        self.started: float | None = None
+
+    def spend(self, count: int, control: RunControl | None) -> None:
+        if not self.limit:
+            return
+        if self.started is None:
+            self.started = time.monotonic()
+        self.bytes += count
+        while True:
+            if control is not None and control.paused:
+                paused_at = time.monotonic()
+                _copy_checkpoint(control)
+                self.started += time.monotonic() - paused_at
+            else:
+                _copy_checkpoint(control)
+            target = self.started + self.bytes / self.limit
+            delay = target - time.monotonic()
+            if delay <= 0:
+                return
+            time.sleep(min(0.05, delay))
+
+
+class _CopyProgressReporter:
+    """Legacy operation callbacks plus independent byte/chunk callbacks."""
+
+    def __init__(self, changes: list[Change], report: ApplyReport, on_progress, on_copy_progress):
+        self.report = report
+        self.on_progress = on_progress
+        self.on_copy_progress = on_copy_progress
+        self.total = len(changes)
+        self.total_bytes = sum(change.size for change in changes if _is_copy(change.action))
+        self.completed = 0
+        self.bytes_done = 0
+        self.rel = ""
+        self.current_size = 0
+        self.current_plan = 0
+        self.current_bytes = 0
+        self.last_emit = 0.0
+
+    def begin(self, index: int, change: Change) -> None:
+        self.completed = index
+        self.rel = change.rel
+        self.current_size = change.size if _is_copy(change.action) else 0
+        self.current_plan = change.size if _is_copy(change.action) else 0
+        self.current_bytes = 0
+        self._legacy(index, change.rel)
+        self.emit(force=True)
+
+    def chunk(self, done: int, size: int) -> None:
+        first = self.current_bytes == 0
+        self.current_size = size
+        self.current_bytes = min(done, size) if size else 0
+        self.emit(force=first or done == size)
+
+    def complete(self, index: int, change: Change) -> None:
+        self.completed = index + 1
+        if _is_copy(change.action):
+            actual = self.current_size
+            self.total_bytes += actual - change.size
+            self.current_plan = actual
+            self.current_bytes = actual
+            self.emit(force=True)
+            self.bytes_done += actual
+        else:
+            self.emit(force=True)
+
+    def finish(self) -> None:
+        self.rel = ""
+        self.current_bytes = 0
+        self.current_size = 0
+        self.current_plan = 0
+        self._legacy(self.completed, None)
+        self.emit(force=True)
+
+    def emit(self, force: bool = False) -> None:
+        if self.on_copy_progress is None:
+            return
+        now = time.monotonic()
+        if not force and now - self.last_emit < 0.05:
+            return
+        self.last_emit = now
+        current = self.current_bytes if self.rel else 0
+        self.on_copy_progress(CopyProgress(
+            self.completed,
+            self.total,
+            self.rel,
+            current,
+            self.current_size,
+            self.bytes_done + current,
+            max(0, self.total_bytes + self.current_size - self.current_plan),
+            self.report.copied,
+            self.report.deleted,
+            self.report.moved,
+            len(self.report.errors),
+        ))
+
+    def _legacy(self, index: int, rel: str | None) -> None:
+        if self.on_progress is not None:
+            self.on_progress(index, self.total, rel, self.report.copied, self.report.deleted, self.report.moved)
+
+
 def files_identical(left: Path, right: Path) -> bool:
     if not left.is_file() or not right.is_file():
         return False
@@ -113,29 +259,31 @@ def apply_plan(
     *,
     control: RunControl | None = None,
     on_progress=None,
+    on_copy_progress=None,
+    bytes_per_second: int = 0,
 ) -> ApplyReport:
-    """Apply changes. `on_progress(index, total, rel, copied, deleted, moved)` may run on this thread."""
+    """Apply a serial plan with legacy operation events and byte-level copy events."""
 
     left_root = Path(profile.left)
     right_root = Path(profile.right)
     report = ApplyReport()
     ordered = sorted(changes, key=_apply_order)
-    total = len(ordered)
-    completed = 0
+    progress = _CopyProgressReporter(ordered, report, on_progress, on_copy_progress)
+    limiter = _RateLimiter(bytes_per_second)
     for index, change in enumerate(ordered):
-        _emit(on_progress, index, total, change.rel, report)
+        progress.begin(index, change)
         if control is not None and not control.checkpoint():
             report.cancelled = True
             break
         if change.action == Action.ASK:
             report.skipped += 1
-            completed = index + 1
+            progress.complete(index, change)
             continue
         try:
             if change.action == Action.COPY_LEFT_TO_RIGHT:
-                _copy(profile, left_root, right_root, change.rel, report, "right")
+                _copy(profile, left_root, right_root, change.rel, report, "right", control, progress, limiter)
             elif change.action == Action.COPY_RIGHT_TO_LEFT:
-                _copy(profile, right_root, left_root, change.rel, report, "left")
+                _copy(profile, right_root, left_root, change.rel, report, "left", control, progress, limiter)
             elif change.action == Action.DELETE_RIGHT:
                 _delete(right_root, change.rel, report, "right")
             elif change.action == Action.DELETE_LEFT:
@@ -144,18 +292,18 @@ def apply_plan(
                 _move(right_root, change.rel, change.dest_rel, report, "right")
             elif change.action == Action.MOVE_ON_LEFT:
                 _move(left_root, change.rel, change.dest_rel, report, "left")
-            completed = index + 1
+        except _CopyStopped:
+            report.cancelled = True
+            break
         except (OSError, ApplyError) as exc:
             report.errors.append(f"{change.rel}: {exc}")
-            completed = index + 1
-    _emit(on_progress, completed, total, None, report)
+        progress.complete(index, change)
+    progress.finish()
     return report
 
 
-def _emit(on_progress, index: int, total: int, rel: str | None, report: ApplyReport) -> None:
-    if on_progress is None:
-        return
-    on_progress(index, total, rel, report.copied, report.deleted, report.moved)
+def _is_copy(action: Action) -> bool:
+    return action in (Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT)
 
 
 def _apply_order(change: Change) -> int:
@@ -229,17 +377,67 @@ def _move(root: Path, old_rel: str, new_rel: str, report: ApplyReport, side: str
     _prune_empty(root, parent, report)
 
 
-def _copy(profile: Profile, source_root: Path, dest_root: Path, rel: str, report: ApplyReport, side: str) -> None:
+def _copy(
+    profile: Profile,
+    source_root: Path,
+    dest_root: Path,
+    rel: str,
+    report: ApplyReport,
+    side: str,
+    control: RunControl | None = None,
+    progress: _CopyProgressReporter | None = None,
+    limiter: _RateLimiter | None = None,
+) -> None:
     source = _inside(source_root, rel)
     dest = _inside(dest_root, rel)
     if not source.is_file():
         raise ApplyError("source is missing")
     size = source.stat().st_size
+    if progress is not None:
+        progress.chunk(0, size)
     _mkdirs(dest_root, dest, report)
-    if dest.exists() and profile.keep_older:
-        _keep_older(profile, dest_root, dest, rel, report)
-    shutil.copy2(source, dest)
-    _count(report, side, "copy", size)
+    temporary: Path | None = None
+    try:
+        with source.open("rb") as reading:
+            descriptor, name = tempfile.mkstemp(prefix=".ofs-", suffix=".part", dir=dest.parent)
+            temporary = Path(name)
+            with os.fdopen(descriptor, "wb") as writing:
+                copied = 0
+                while True:
+                    _copy_checkpoint(control)
+                    block = reading.read(1024 * 1024)
+                    if not block:
+                        break
+                    writing.write(block)
+                    copied += len(block)
+                    if progress is not None:
+                        progress.chunk(copied, size)
+                    if limiter is not None:
+                        limiter.spend(len(block), control)
+            shutil.copystat(source, temporary)
+        # Once archiving starts, do not pause between it and the atomic replace.
+        _copy_checkpoint(control)
+        archived = bool(dest.exists() and profile.keep_older)
+        if archived:
+            _keep_older(profile, dest_root, dest, rel, report)
+        try:
+            os.replace(temporary, dest)
+        except OSError as exc:
+            if archived:
+                try:
+                    _restore_older(profile, dest_root, dest, rel)
+                except OSError as restore_error:
+                    raise ApplyError(f"{exc}; also could not restore the destination: {restore_error}") from exc
+            raise
+        temporary = None
+        _count(report, side, "copy", size)
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                # Never hide the copy/cancel error or fail a committed replace.
+                pass
 
 
 def _keep_older(profile: Profile, dest_root: Path, dest: Path, rel: str, report: ApplyReport) -> None:
@@ -267,6 +465,24 @@ def _keep_older(profile: Profile, dest_root: Path, dest: Path, rel: str, report:
                 target.unlink()
             source.rename(target)
     shutil.move(str(dest), str(archive))
+
+
+def _restore_older(profile: Profile, dest_root: Path, dest: Path, rel: str) -> None:
+    """Best-effort rollback after replace fails, preserving every surviving version."""
+
+    folder = profile.older_folder.strip("/") or "Older"
+    archive = _inside(dest_root, f"{folder}/{rel}")
+    if not archive.exists():
+        raise ApplyError("versioned destination backup is missing")
+    keep = profile.older_keep if profile.older_keep > 1 else 1
+    slots = [archive]
+    for index in range(1, keep):
+        slots.append(archive.with_name(f"{archive.name}.~{index}~"))
+    archive.replace(dest)
+    for index in range(len(slots) - 1):
+        source = slots[index + 1]
+        if source.exists():
+            source.replace(slots[index])
 
 
 def _delete(root: Path, rel: str, report: ApplyReport, side: str) -> None:

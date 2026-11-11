@@ -20,7 +20,7 @@ Replace paths, in the header, rewrites the left and right folders of the checked
 
 ## Scan
 
-The default scan compares name, size, and last-modified time. It reads file bytes only when Binary compare is checked, and only for pairs whose size matches and whose metadata differs. While the folders are read, a window shows the current path and combined live totals for folders and files discovered, excluded by Ignore Totally, and added to the file list. Those are discovery counts, not files to copy. The scan window stays in front of the overview without locking it, so you can start another profile. That scan waits and starts when the current one finishes. Pause holds the walk. Skip Rest abandons the current profile's incomplete scan and continues with the next checked profile. Cancel, or closing that window, stops the current checked batch. Neither a skipped nor a stopped scan opens a comparison of its partial tree, and the next waiting scan still starts. The bottom line of the comparison window is the plan summary: how many files and how many bytes would be copied, deleted, moved, or left to decide.
+The default scan compares name, size, and last-modified time. It reads file bytes only when Binary compare is checked, and only for pairs whose size matches and whose metadata differs. While the folders are read, a window shows the current path and combined live totals for folders and files discovered, excluded by Ignore Totally, and added to the file list. It also shows elapsed time, discovered entries per second, and ETA unknown because the tree size is not known in advance. Those are discovery counts, not files to copy. The scan window stays in front of the overview without locking it, so you can start another profile. That scan waits and starts when the current one finishes. Pause holds the walk. Skip Rest abandons the current profile's incomplete scan and continues with the next checked profile. Cancel, or closing that window, stops the current checked batch. Neither a skipped nor a stopped scan opens a comparison of its partial tree, and the next waiting scan still starts. The bottom line of the comparison window is the plan summary: how many files and how many bytes would be copied, deleted, moved, or left to decide.
 
 ## File database
 
@@ -73,13 +73,15 @@ A row marked ask is skipped and reported as left undecided. `run --apply` refuse
 
 ## Progress
 
-Copying runs off the UI thread. The progress window shows the path about to be handled, how far the run has got, a bar, and the running copied, deleted, and moved counts.
+Copying runs off the UI thread and stays serial. The progress window shows the current relative path, operation count, processed/planned copy bytes, copied/deleted/moved/error counts, elapsed time, active-run speed, ETA, an overall byte-weighted bar, and a current-file bar. Move/delete-only plans use operation count for the overall bar.
 
-Pause holds the next file. Resume continues. Cancel stops before the next file. A file that has already started is finished. Closing the progress window is Cancel, and the window stays until the run has stopped.
+Pause and Resume work between copy chunks, including inside a large file. Cancel can stop an in-progress copy. Each file is written to a unique temporary sibling and atomically replaces the destination only when complete, with metadata preserved. With Older enabled, the old destination is archived after the new copy succeeds. Cancellation removes the incomplete temporary file and leaves the prior destination intact. Closing the progress window is Cancel, and it stays until the run has stopped.
+
+Settings has a shared copy speed limit in MiB/s; zero is unlimited. It applies to GUI runs and `run --apply`.
 
 ## Results and logs
 
-Copying Results shows whether the run finished, finished with errors, or was stopped. Left and Right columns show files copied to that side, files moved on that side, and files deleted on that side, each as a count and a size. Folders created and folders removed are single totals. New parent folders for a copy, a move, or an `Older` archive count as created. Empty folders left behind by a delete or a move are removed. The profile folder itself stays.
+Copying Results shows whether the run finished, finished with errors, or was stopped. Failed runs offer Retry Failed with confirmation; OFS then rescans the current folders and builds a fresh preview instead of replaying stale operations. Retry follows the normal deletion safety checks. Left and Right columns show files copied to that side, files moved on that side, and files deleted on that side, each as a count and a size. Folders created and folders removed are single totals. New parent folders for a copy, a move, or an `Older` archive count as created. Empty folders left behind by a delete or a move are removed. The profile folder itself stays.
 
 View Log opens the text file for that run. Each run writes one file in `logs/` under the config directory:
 

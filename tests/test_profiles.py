@@ -56,6 +56,17 @@ def test_default_global_masks_hide_temp_files_until_settings_replace_them(tmp_pa
     assert {change.rel for change in again.changes} == {"notes.txt", "notes.tmp"}
 
 
+def test_copy_speed_limit_persists_in_bytes_per_second(tmp_path, monkeypatch):
+    from ofs.settings import copy_speed_limit, set_copy_speed_limit
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path))
+    assert copy_speed_limit() == 0
+    set_copy_speed_limit(1.25 * 1024 * 1024)
+    assert copy_speed_limit() == int(1.25 * 1024 * 1024)
+    set_copy_speed_limit(-10)
+    assert copy_speed_limit() == 0
+
+
 def test_compare_command_uses_the_setting_unless_the_environment_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path))
     monkeypatch.delenv("OFS_COMPARE", raising=False)

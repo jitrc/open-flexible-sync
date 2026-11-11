@@ -113,7 +113,9 @@ def _scan(name: str, *, apply: bool) -> int:
         return 1
     from ofs.scan import remember
 
-    report = apply_plan(profile, job.result.changes)
+    from ofs.settings import copy_speed_limit
+
+    report = apply_plan(profile, job.result.changes, bytes_per_second=copy_speed_limit())
     remember(profile)
     profile.last_result = report.summary()
     save_profile(profile)
