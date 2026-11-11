@@ -469,3 +469,13 @@ def test_status_icon_reflects_the_last_result():
     assert _status_icon("2026-11-10 12:03  0 copied, 0 deleted, 0 moved").get_icon_name() == "emblem-ok"
     assert _status_icon("2026-11-10 12:03  1 copied, 2 errors").get_icon_name() == "dialog-error"
     assert _status_icon("stopped, 3 copied").get_icon_name() == "dialog-warning"
+
+
+def test_result_parts_split_timestamp_and_tone():
+    from ofs.ui import _result_parts
+
+    assert _result_parts("", "Some note") == ("", "Some note", "dim-label")
+    when, body, tone = _result_parts("2026-11-10 12:03  0 copied, 0 deleted, 0 moved", "")
+    assert (when, body, tone) == ("2026-11-10 12:03", "0 copied, 0 deleted, 0 moved", "result-ok")
+    assert _result_parts("2026-11-10 12:03  stopped, 3 copied", "") == ("2026-11-10 12:03", "stopped, 3 copied", "result-warn")
+    assert _result_parts("2026-11-10 12:03  1 copied, 2 errors", "")[2] == "result-error"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import subprocess
 import threading
@@ -224,10 +225,28 @@ class MainWindow(Gtk.ApplicationWindow):
         paths.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         paths.add_css_class("dim-label")
         paths.set_text(f"{profile.left}    →    {profile.right}")
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        text.append(name_row)
+        text.append(paths)
+
+        when, body, tone = _result_parts(profile.last_result, profile.note)
+        stamp = Gtk.Label(xalign=0)
+        stamp.add_css_class("monospace")
+        stamp.add_css_class(tone)
+        stamp.set_text(when)
         result = Gtk.Label(xalign=0)
-        result.add_css_class("dim-label")
-        result.set_text(profile.last_result or profile.note)
+        result.set_ellipsize(Pango.EllipsizeMode.END)
+        result.set_max_width_chars(40)
+        result.set_tooltip_text(body)
+        result.add_css_class(tone)
+        result.set_text(body)
+        result.set_tooltip_text(body)
         self._labels[profile.name] = result
+        stats = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        stats.set_size_request(240, -1)
+        stats.append(stamp)
+        stats.append(result)
+
         run = Gtk.Button(label="Run")
         run.add_css_class("run")
         _compact(run)
@@ -245,13 +264,12 @@ class MainWindow(Gtk.ApplicationWindow):
         text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         text.append(name_row)
         text.append(paths)
-        if result.get_text():
-            text.append(result)
         row = Gtk.Box(spacing=4)
         row.set_margin_top(2)
         row.set_margin_bottom(2)
         text.set_hexpand(True)
         row.append(text)
+        row.append(stats)
         row.append(run)
         row.append(edit)
         row.append(duplicate)
@@ -713,6 +731,23 @@ def _compact(button: Gtk.Button) -> None:
     button.add_css_class("compact")
 
 
+_RUN_RESULT = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s+(.*)$")
+
+
+def _result_parts(last_result: str, note: str) -> tuple[str, str, str]:
+    """Timestamp, body, and CSS tone for the profile row. No result yet uses the note."""
+
+    text = last_result.strip()
+    if not text:
+        return "", note, "dim-label"
+    lowered = text.lower()
+    tone = "result-error" if "error" in lowered else "result-warn" if lowered.startswith("stopped") else "result-ok"
+    match = _RUN_RESULT.match(text)
+    if match:
+        return match.group(1), match.group(2), tone
+    return "", text, tone
+
+
 def _status_icon(last_result: str) -> Gtk.Image | None:
     """5.71-style row status: green check ran clean, red for errors, orange for stopped, none for never run."""
 
@@ -764,6 +799,9 @@ def _install_css() -> None:
         " padding: 8px 12px;"
         " min-height: 40px;"
         "}"
+        "label.result-ok { color: @success_color; }"
+        "label.result-error { color: @error_color; }"
+        "label.result-warn { color: @warning_color; }"
     )
     Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     _CSS_INSTALLED = True
