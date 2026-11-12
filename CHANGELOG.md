@@ -13,10 +13,11 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Live discovery now explicitly shows cache off, fresh discovery, uncached override, and actual cache reuse per destination side. Copy status shows when metadata has been invalidated.
 - Scan-result exclusions offer editable profile/global scope and full-relative-path/name matching. Global additions preserve existing rules and mode and are rechecked against displayed, queued, future, and final live rows.
 - Display-only minimum-size filtering supports files, folders, or both and whole-preview/selected-folder scope. Name and size sorting retain the directory hierarchy and plan.
+- Folder results can add eligible known files on a chosen side to a reviewed per-file deletion plan after explicit scope/count confirmation, retaining all existing deletion safeguards and Older recovery.
 
 ### Changed
 
-- Scan comparisons open maximized, with two-column Left/Right headers and side-by-side current-path/statistics. Restored windows keep Start, Close, counts, and power choices pinned while filters scroll independently.
+- Scan comparisons open maximized, with two-column Left/Right headers. Restored windows keep Start, Close, counts, and power choices pinned while filters scroll independently. Current paths are single-line and width-bounded, with statistics below.
 
 - Exact Mirror automatic move inference now requires the same filename. Different basenames remain explicit copy and delete operations.
 
@@ -28,6 +29,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Live rule sharing keeps the worker's final plan consistent with visible Ignore/Exclude actions; cached metadata and history-derived deletes are filtered appropriately.
 - Detached-overview copying retains profile lock/release and cross-window power safeguards; the common copy entry point directly refuses incomplete or partial scans.
 - Normal activation restores or creates the main OFS window rather than focusing an empty detached scan-control window.
+- Keep scan paths one line without resizing the path box from changing content, and keep context-menu action fonts consistent.
 
 ## [0.3.0] - 2026-11-12
 

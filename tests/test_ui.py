@@ -863,7 +863,7 @@ def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tm
     assert seen["delete_move_overall"] == 0.5
 
 
-def test_copy_path_uses_two_lines_without_resizing_the_window(tmp_path, monkeypatch):
+def test_copy_path_uses_one_bounded_line_without_resizing_the_window(tmp_path, monkeypatch):
     from gi.repository import Pango
 
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
@@ -890,7 +890,7 @@ def test_copy_path_uses_two_lines_without_resizing_the_window(tmp_path, monkeypa
     assert App().run(None) == 0
     assert seen["short"] == seen["long"]
     assert seen["path"] == seen["tooltip"] == long_path
-    assert seen["lines"] == 2
+    assert seen["lines"] == 1
     assert seen["ellipsize"] == Pango.EllipsizeMode.MIDDLE
 
 
@@ -1426,7 +1426,7 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
     assert "ETA after first completed scan" in seen["counts"]
     assert seen["place"] == "album"
     assert seen["reading"] == "Reading right"
-    assert seen["path_wrap"] is True
+    assert seen["path_wrap"] is False
     assert seen["skip"].startswith("Skipping rest")
     assert seen["skipping"] is True
     assert seen["skip_enabled"] is False
@@ -1470,7 +1470,7 @@ def test_scan_path_truncation_keeps_the_dialog_height_stable(tmp_path, monkeypat
     assert seen["short_height"] == seen["long_height"]
     assert seen["full_path"] == seen["tooltip"] == long_path
     assert seen["ellipsize"] == Pango.EllipsizeMode.MIDDLE
-    assert seen["lines"] == 2
+    assert seen["lines"] == 1
 
 
 def test_different_profiles_scan_in_parallel_but_same_profile_cannot_duplicate(tmp_path, monkeypatch):
@@ -1600,7 +1600,9 @@ def test_preview_actions_stay_visible_and_folder_controls_have_a_toolbar(tmp_pat
     assert 0 < seen["close_bottom"] <= seen["window_height"]
 
 
-def test_scan_totals_share_the_row_with_current_path(tmp_path, monkeypatch):
+def test_scan_path_is_one_line_fixed_width_with_stats_below(tmp_path, monkeypatch):
+    from ofs.walk import WalkStats
+
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanInfoLayout")
     seen = {}
@@ -1612,21 +1614,34 @@ def test_scan_totals_share_the_row_with_current_path(tmp_path, monkeypatch):
     class App(SfsApplication):
         def do_activate(self):
             owner = MainWindow(self)
-            scan = ScanWindow(owner)
+            scan = ScanWindow(owner, estimates={"activation": (50000, 20)})
+            scan.set_default_size(900, 400)
             scan.present()
-            settle()
-            seen["shared_row"] = scan.count_label.get_parent() is scan.scan_info
-            seen["path_shared"] = scan.file_label.get_parent().get_parent() is scan.scan_info
-            path_point = scan.file_label.translate_coordinates(scan, 0, 0)
+            path_box = scan.file_label.get_parent()
+            short = "short/file.txt"
+            long = "/".join(["an-extremely-long-directory-component"] * 90) + "/last-file-with-a-long-name.txt"
+            for marker, path, found in (("short", short, 23), ("long", long, 100000)):
+                scan.update_stats("activation", "Left", path, WalkStats(found, 18, found - 81))
+                settle()
+                seen[f"{marker}_width"] = path_box.get_width()
+                seen[f"{marker}_lines"] = scan.file_label.get_layout().get_line_count()
+                seen[f"{marker}_height"] = scan.file_label.get_height()
+            seen["no_wrap"] = not scan.file_label.get_wrap()
+            seen["bounded"] = scan.file_label.get_max_width_chars() <= 52
+            seen["ellipsized"] = scan.file_label.get_layout().is_ellipsized()
+            path_point = path_box.translate_coordinates(scan, 0, 0)
             count_point = scan.count_label.translate_coordinates(scan, 0, 0)
-            seen["totals_right"] = count_point[0] > path_point[0]
-            seen["totals_top"] = count_point[1] <= path_point[1]
+            seen["totals_below"] = count_point[1] >= path_point[1] + path_box.get_height()
             scan.allow_close()
             self.quit()
 
     assert App().run(None) == 0
-    assert seen["shared_row"] is True and seen["path_shared"] is True
-    assert seen["totals_right"] is True and seen["totals_top"] is True
+    assert seen["short_width"] == seen["long_width"]
+    assert seen["short_lines"] == seen["long_lines"] == 1
+    assert seen["short_height"] == seen["long_height"]
+    assert seen["no_wrap"] is True
+    assert seen["bounded"] is True and seen["ellipsized"] is True
+    assert seen["totals_below"] is True
 
 
 def test_exclusion_dialog_supports_editing_path_name_and_global_scope(tmp_path, monkeypatch):
@@ -1922,6 +1937,7 @@ def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, mon
             seen["guarded_copy"] = "copy_requested" not in seen
             preview._popup_folder("cache", 0, 0)
             seen["folder_actions"] = [button.get_label() for button in _buttons(preview._popover)]
+            seen["uniform_menu_font"] = all("monospace" not in button.get_css_classes() for button in _buttons(preview._popover))
             seen["rescan"] = None
             window._run_names = lambda names: seen.update(rescan=names)
             preview.start_button.emit("clicked")
@@ -1939,6 +1955,7 @@ def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, mon
     assert "Copy whole new folder…" not in seen["folder_actions"]
     assert "Add exclusion…" in seen["folder_actions"]
     assert "Filter sizes under this folder" in seen["folder_actions"]
+    assert seen["uniform_menu_font"] is True
     assert seen["rescan"] == {"partial job"}
 
 
@@ -2216,6 +2233,82 @@ def test_large_tree_updates_batches_and_retains_manual_collapse(tmp_path, monkey
     assert seen["ticks"] > 1
     assert seen["expanded_initially"] is True
     assert seen["collapsed_after"] is True
+
+
+def test_folder_delete_requires_scope_review_and_normal_deletion_safeguards(tmp_path, monkeypatch):
+    from ofs.review import Listed, deletion_violations, safety_text
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFolderDeleteReview")
+    profile = Profile(
+        name="folder delete review", left="/sample/left", right="/sample/right",
+        mode=SyncMode.EXACT_MIRROR, never_delete_files=True,
+    )
+    rows = [
+        Listed(Change("data/keep.txt", Action.UNCHANGED, "same", 100), True, True),
+        Listed(Change("data/copy.txt", Action.COPY_LEFT_TO_RIGHT, "new", 700), True, False),
+        Listed(Change("data/conflict.tmp", Action.ASK, "size conflict", 600), True, True),
+        Listed(Change("data/out-of-scope.tmp", Action.SKIPPED, "profile filter", 50), True, True),
+        Listed(Change("outside/keep.txt", Action.UNCHANGED, "same", 20), True, True),
+    ]
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult([item.change for item in rows], listing=rows), None))
+            original = [(row.change.rel, row.change.action) for row in preview.rows]
+            dialog = preview._ask_folder_delete("data", "right")
+            labels = [item.get_text() for item in _widgets(dialog) if isinstance(item, Gtk.Label)]
+            seen["confirmation"] = "\n".join(labels)
+            next(button for button in _buttons(dialog) if button.get_label() == "Cancel").emit("clicked")
+            seen["cancel_preserved"] = [(row.change.rel, row.change.action) for row in preview.rows] == original
+
+            dialog = preview._ask_folder_delete("data", "right")
+            dialog.folder_delete_confirm_button.emit("clicked")
+            planned = {row.change.rel: row.change.action for row in preview.rows}
+            seen["right_deletes"] = sorted(rel for rel, action in planned.items() if action == Action.DELETE_RIGHT)
+            seen["unrelated_action"] = planned["outside/keep.txt"]
+            seen["skipped_action"] = planned["data/out-of-scope.tmp"]
+            seen["other_side_copy"] = planned["data/copy.txt"]
+
+            seen["warning"] = safety_text(profile, preview.rows)
+            original_safety = preview._safety
+
+            def retain_safety(*args, **kwargs):
+                seen["safety_window"] = original_safety(*args, **kwargs)
+                return seen["safety_window"]
+
+            preview._safety = retain_safety
+            preview._start()
+            safety = seen.get("safety_window")
+            if safety is None:
+                self.quit()
+                return
+            confirm = next(button for button in _buttons(safety) if button.get_label() == "Confirm Deletions")
+            seen["guarded_confirmation"] = not confirm.get_sensitive()
+            seen["not_started"] = not preview._running
+            next(button for button in _buttons(safety) if button.get_label() == "Do Not Continue").emit("clicked")
+
+            dialog = preview._ask_folder_delete("data", "left")
+            dialog.folder_delete_confirm_button.emit("clicked")
+            seen["left_deletes"] = sorted(
+                row.change.rel for row in preview.rows if row.change.action == Action.DELETE_LEFT
+            )
+            self.quit()
+
+    assert App().run(None) == 0
+    assert "2 in-scope files (700 B)" in seen["confirmation"]
+    assert "under data on Right" in seen["confirmation"]
+    assert "Nothing is deleted now" in seen["confirmation"]
+    assert seen["cancel_preserved"] is True
+    assert seen["right_deletes"] == ["data/conflict.tmp", "data/keep.txt"]
+    assert seen["unrelated_action"] == Action.UNCHANGED
+    assert seen["skipped_action"] == Action.SKIPPED
+    assert seen["other_side_copy"] == Action.COPY_LEFT_TO_RIGHT
+    assert seen["guarded_confirmation"] is True
+    assert seen["not_started"] is True
+    assert seen["left_deletes"] == ["data/conflict.tmp", "data/copy.txt", "data/keep.txt"]
 
 
 def test_row_actions_and_profile_delete(tmp_path, monkeypatch):

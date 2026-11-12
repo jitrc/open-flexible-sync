@@ -94,10 +94,8 @@ def _group_parts(profile: Profile) -> tuple[str, ...]:
 
 
 def _fixed_path_label(text: str) -> Gtk.Label:
-    label = Gtk.Label(xalign=0, selectable=True, wrap=True, lines=2)
-    label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    label = Gtk.Label(xalign=0, selectable=True, wrap=False, lines=1, width_chars=52, max_width_chars=52)
     label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-    label.set_max_width_chars(76)
     label.set_tooltip_text(text)
     label.set_text(text)
     return label
@@ -2606,6 +2604,82 @@ class Preview(Gtk.Window):
             return
         self.owner._confirm_new_folder(self.job.profile, relative)
 
+    def _folder_delete_candidates(self, folder: str, side: str) -> list[Listed]:
+        prefix = folder.replace("\\", "/").strip().strip("/") + "/"
+        return [
+            item for item in self.rows
+            if item.change.rel.startswith(prefix)
+            and (item.on_left if side == "left" else item.on_right)
+            and item.change.action != Action.SKIPPED
+        ]
+
+    def _ask_folder_delete(self, folder: str, side: str) -> Gtk.Window | None:
+        if self.partial or self._scan_active or not self._scan_complete:
+            self.detail.set_text("Complete the scan before adding folder deletions to a reviewed plan.")
+            return None
+        if self._running:
+            self.detail.set_text("Wait for the current operation before changing folder deletions.")
+            return None
+        selected = self._folder_delete_candidates(folder, side)
+        target = side.capitalize()
+        window = Gtk.Window(transient_for=self, modal=True, title="Add Folder Deletions to Plan")
+        window.set_default_size(620, 250)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for edge in ("start", "end", "top", "bottom"):
+            getattr(box, f"set_margin_{edge}")(18)
+        count = len(selected)
+        message = (
+            f"Add {count} in-scope files ({format_bytes(sum(item.change.size for item in selected))}) "
+            f"under {folder} on {target} to the deletion plan?"
+        )
+        box.append(Gtk.Label(label=message, xalign=0, wrap=True))
+        warning = Gtk.Label(
+            xalign=0, wrap=True,
+            label="Nothing is deleted now. Review the changed rows, then Start opens the normal deletion confirmation. All Older recovery and deletion safeguards still apply.",
+        )
+        box.append(warning)
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_args: window.close())
+        confirm = Gtk.Button(label="Add Deletions to Plan", css_classes=["destructive-action"])
+        window.folder_delete_confirm_button = confirm
+        confirm.set_sensitive(bool(selected))
+
+        def add_to_plan(*_args) -> None:
+            if self._delete_folder_files(folder, side):
+                window.close()
+
+        confirm.connect("clicked", add_to_plan)
+        buttons.append(cancel)
+        buttons.append(confirm)
+        box.append(buttons)
+        window.set_child(box)
+        window.set_default_widget(cancel)
+        window.present()
+        return window
+
+    def _delete_folder_files(self, folder: str, side: str) -> bool:
+        if self.partial or self._scan_active or not self._scan_complete or self._running:
+            self.detail.set_text("A current, complete, idle preview is required before changing the folder-deletion plan.")
+            return False
+        selected = self._folder_delete_candidates(folder, side)
+        if not selected:
+            self.detail.set_text(f"No known in-scope files under {folder} on {side}; nothing was added to the plan.")
+            return False
+        action = Action.DELETE_LEFT if side == "left" else Action.DELETE_RIGHT
+        for item in selected:
+            item.change = Change(
+                item.change.rel,
+                action,
+                "chosen folder deletion in preview",
+                item.change.size,
+            )
+        count = len(selected)
+        total = sum(item.change.size for item in selected)
+        self._refill()
+        self.detail.set_text(f"Added {count} folder deletions ({format_bytes(total)}) on {side}. Review them, then Start for the normal deletion confirmation.")
+        return True
+
     def _popup_folder(self, rel: str, x: float, y: float) -> None:
         if self._popover is not None:
             self._popover.unparent()
@@ -2623,6 +2697,8 @@ class Preview(Gtk.Window):
         ]) + [
             ("L ──▶ R", "Copy this folder left to right", lambda: self._set_folder_direction(rel, "right")),
             ("L ◀── R", "Copy this folder right to left", lambda: self._set_folder_direction(rel, "left")),
+            ("Delete folder files on Right…", "Add known right-side files to the reviewed deletion plan; nothing is deleted now", lambda: self._ask_folder_delete(rel, "right")),
+            ("Delete folder files on Left…", "Add known left-side files to the reviewed deletion plan; nothing is deleted now", lambda: self._ask_folder_delete(rel, "left")),
             ("Open left folder", "", lambda: open_uri(Path(self.job.profile.left) / rel)),
             ("Open right folder", "", lambda: open_uri(Path(self.job.profile.right) / rel)),
             ("Add exclusion…", "Choose profile/global, a relative path or name, and edit the rule", lambda: self._ask_exclusion(rel, folder=True)),
@@ -2633,7 +2709,6 @@ class Preview(Gtk.Window):
             button = Gtk.Button(label=text)
             if tip:
                 button.set_tooltip_text(tip)
-                button.add_css_class("monospace")
             button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
             box.append(button)
         popover.set_child(box)
@@ -2673,7 +2748,6 @@ class Preview(Gtk.Window):
             button = Gtk.Button(label=text)
             if tip:
                 button.set_tooltip_text(tip)
-                button.add_css_class("monospace")
             button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
             box.append(button)
         popover.set_child(box)
@@ -3200,10 +3274,8 @@ class ScanWindow(Gtk.Window):
         for side in ("start", "end", "top", "bottom"):
             getattr(root, f"set_margin_{side}")(16)
         root.append(heading)
-        self.scan_info = Gtk.Box(spacing=16)
+        self.scan_info = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         path_box.set_hexpand(True)
-        self.count_label.set_hexpand(True)
-        self.count_label.set_valign(Gtk.Align.START)
         self.scan_info.append(path_box)
         self.scan_info.append(self.count_label)
         root.append(self.scan_info)
