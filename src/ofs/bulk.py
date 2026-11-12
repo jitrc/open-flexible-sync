@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from ofs.masks import split_masks
@@ -13,6 +14,7 @@ from ofs.model import (
     SymlinkMode,
     SyncMode,
     TimestampRules,
+    parse_size,
 )
 
 
@@ -31,7 +33,10 @@ FIELDS = (
     BulkField("direction", "Direction", "choice", (("Left to right", Direction.LEFT_TO_RIGHT), ("Right to left", Direction.RIGHT_TO_LEFT), ("Both directions", Direction.BOTH))),
     BulkField("mode", "Sync mode", "choice", (("Copy only (no deletions)", SyncMode.STANDARD), ("Exact Mirror", SyncMode.EXACT_MIRROR))),
     BulkField("exclusion_mode", "Exclusion mode", "choice", (("Ignore Totally", ExclusionMode.IGNORE_TOTALLY), ("Don't Copy", ExclusionMode.DONT_COPY))),
+    BulkField("cache_destination", "Destination metadata cache (5 minutes)", "choice", _ON_OFF),
     BulkField("group_override", "Custom group / subgroups", "text"),
+    BulkField("left_volume", "Left volume label", "text"),
+    BulkField("right_volume", "Right volume label", "text"),
     BulkField("disabled", "Disabled", "choice", _ON_OFF),
     BulkField("keep_older", "Keep replaced files under Older", "choice", _ON_OFF),
     BulkField("keep_deleted", "Recoverable deletions under Older", "choice", _ON_OFF),
@@ -45,8 +50,11 @@ FIELDS = (
     BulkField("preserve_ownership", "Preserve owner/group on copy/restore", "choice", _ON_OFF),
     BulkField("binary_compare", "Binary comparison", "choice", _ON_OFF),
     BulkField("track", "Remember files and detect moves/deletions", "choice", _ON_OFF),
-    BulkField("cache_destination", "Destination metadata cache (5 minutes)", "choice", _ON_OFF),
     BulkField("always_copy", "Always copy even when unchanged", "choice", _ON_OFF),
+    BulkField("min_size", "Minimum file size (0 = no limit)", "size"),
+    BulkField("max_size", "Maximum file size (0 = no limit)", "size"),
+    BulkField("min_age_days", "Minimum file age in days (0 = no limit)", "decimal", maximum=1_000_000),
+    BulkField("max_age_days", "Maximum file age in days (0 = no limit)", "decimal", maximum=1_000_000),
     BulkField("timestamps.ignore_small", "Ignore 2-second differences", "choice", _ON_OFF),
     BulkField("timestamps.ignore_exact_hour", "Ignore exact-hour differences", "choice", _ON_OFF),
     BulkField("timestamps.ignore_seconds", "Ignore seconds", "choice", _ON_OFF),
@@ -73,6 +81,18 @@ def prepare_bulk_edit(profiles: list[Profile], field: str, value, *, add_masks: 
             raise ValueError("enter a whole number") from exc
         if not definition.minimum <= value <= definition.maximum:
             raise ValueError(f"{definition.label} must be between {definition.minimum} and {definition.maximum}")
+    if definition.kind == "decimal":
+        try:
+            value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("enter a number of days") from exc
+        if not math.isfinite(value) or not definition.minimum <= value <= definition.maximum:
+            raise ValueError(f"{definition.label} must be between {definition.minimum} and {definition.maximum}")
+    if definition.kind == "size":
+        try:
+            value = parse_size(str(value))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("enter a size such as 512, 1.5 KB, or 2M") from exc
     if definition.kind == "text":
         value = str(value).strip()
     masks: list[str] = []

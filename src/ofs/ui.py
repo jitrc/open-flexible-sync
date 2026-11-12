@@ -3115,8 +3115,11 @@ class BulkEditWindow(Gtk.Window):
         self.mask_operation = None
         if definition.kind == "choice":
             self.value_widget = Gtk.DropDown.new_from_strings([label for label, _value in definition.options])
-        elif definition.kind == "number":
-            self.value_widget = Gtk.SpinButton.new_with_range(definition.minimum, definition.maximum, 1)
+        elif definition.kind in {"number", "decimal"}:
+            decimal = definition.kind == "decimal"
+            self.value_widget = Gtk.SpinButton.new_with_range(definition.minimum, definition.maximum, 0.1 if decimal else 1)
+            if decimal:
+                self.value_widget.set_digits(2)
             self.value_widget.set_value(definition.minimum)
         else:
             self.value_widget = Gtk.Entry(hexpand=True)
@@ -3124,8 +3127,12 @@ class BulkEditWindow(Gtk.Window):
                 self.value_widget.set_placeholder_text("One or several masks separated by ; or newline")
                 self.mask_operation = Gtk.DropDown.new_from_strings(["Add to existing masks", "Replace existing masks"])
                 self.value_box.append(self.mask_operation)
-            else:
+            elif definition.kind == "size":
+                self.value_widget.set_placeholder_text("512, 1.5 KB, 2M, or empty for no limit")
+            elif definition.key == "group_override":
                 self.value_widget.set_placeholder_text("Group / subgroup, or empty to use the name-derived group")
+            elif definition.key.endswith("_volume"):
+                self.value_widget.set_placeholder_text("Required disk volume label, or empty for no label check")
         self.value_box.append(self.value_widget)
 
     def _preview_changes(self, *_args) -> None:
@@ -3136,6 +3143,9 @@ class BulkEditWindow(Gtk.Window):
         elif definition.kind == "number":
             assert isinstance(self.value_widget, Gtk.SpinButton)
             value = self.value_widget.get_value_as_int()
+        elif definition.kind == "decimal":
+            assert isinstance(self.value_widget, Gtk.SpinButton)
+            value = self.value_widget.get_value()
         else:
             assert isinstance(self.value_widget, Gtk.Entry)
             value = self.value_widget.get_text()

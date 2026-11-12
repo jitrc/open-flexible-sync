@@ -1685,6 +1685,54 @@ def test_profile_menu_path_options_and_batch_rename_previews(tmp_path, monkeypat
     assert seen["checked"] == {"photos one", "photos two"}
 
 
+def test_multi_edit_cache_size_and_fractional_age_controls(tmp_path, monkeypatch):
+    from ofs.bulk import FIELDS
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestExpandedBulk")
+    save_profile(Profile(name="alpha one", left="/sample/left", right="/sample/right", imported_settings=True))
+    save_profile(Profile(name="alpha two", left="/other/left", right="/other/right", cache_destination=True))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window.checked = {"alpha one", "alpha two"}
+            editor = window._multi_edit()
+            window._confirm_bulk_edit = lambda changed, field, _editor: seen.update(changed=changed, field=field)
+
+            editor.field.set_selected(next(index for index, item in enumerate(FIELDS) if item.key == "cache_destination"))
+            editor.value_widget.set_selected(1)
+            editor.apply.emit("clicked")
+            seen["cache"] = seen["changed"]
+            seen["cache_field"] = seen["field"]
+            seen["before"] = [(profile.name, profile.cache_destination) for profile in load_profiles()]
+
+            editor.field.set_selected(next(index for index, item in enumerate(FIELDS) if item.key == "min_age_days"))
+            seen["age_digits"] = editor.value_widget.get_digits()
+            editor.value_widget.set_value(0.25)
+            editor.apply.emit("clicked")
+            seen["age"] = seen["changed"]
+
+            editor.field.set_selected(next(index for index, item in enumerate(FIELDS) if item.key == "min_size"))
+            seen["size_placeholder"] = editor.value_widget.get_placeholder_text()
+            editor.value_widget.set_text("1.5 KB")
+            editor.apply.emit("clicked")
+            seen["size"] = seen["changed"]
+            editor.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["cache_field"] == "cache_destination"
+    assert [profile.name for profile in seen["cache"]] == ["alpha one"]
+    assert seen["cache"][0].imported_settings is True
+    assert seen["before"] == [("alpha one", False), ("alpha two", True)]
+    assert seen["age_digits"] == 2
+    assert all(profile.min_age_days == 0.25 for profile in seen["age"])
+    assert "1.5 KB" in seen["size_placeholder"]
+    assert all(profile.min_size == 1536 for profile in seen["size"])
+
+
 def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
     from ofs.compare import FileStat
     from ofs.history import database_path, save_history

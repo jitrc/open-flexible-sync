@@ -26,7 +26,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - **New profile** is the first header action.
 - The expanded **Profiles** menu organizes original 5.71 import, OFS profile import/export, Multi Edit, path replacement, checked-profile renaming, and explicit known-new folder copying.
 - Profile Editor **Left** and **Right** entries have folder **Browse…** buttons for local/mounted folders. Choosing a folder updates the text field only; typed paths remain supported and the normal Save operation preserves imported flags/history behavior.
-- **Multi Edit** previews and confirms one field across checked profiles. Other fields remain unchanged. Masks can be added without duplicating existing rules or can replace the entire mask list.
+- **Multi Edit** previews and confirms one field across checked profiles. It includes cache Off/On, sync/exclusion modes, Older/deletion safeguards, symlink and metadata controls, timestamps, volume labels, size limits, and fractional-day age limits. Other fields remain unchanged. Masks can be added without duplicating existing rules or can replace the entire mask list.
 - **Replace paths in checked profiles…** handles changed mount points and moved folders:
   - Replace matching text in both paths, Left only, or Right only.
   - Use ordinary case-sensitive text replacement or complete-folder-prefix matching.
