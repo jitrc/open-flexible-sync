@@ -7,10 +7,10 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk
 
 from ofs.apply import CopyProgress
-from ofs.compare import Action
+from ofs.compare import Action, Change
 from ofs.jobs import JobResult
 from ofs.model import Profile, SyncMode
-from ofs.scan import scan_profile
+from ofs.scan import ScanResult, scan_profile
 from ofs.store import load_profiles, save_profile
 from ofs.ui import ExclusionEditor, MainWindow, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
 
@@ -1440,6 +1440,82 @@ def test_row_run_scans_that_profile_only(tmp_path, monkeypatch):
     assert seen["settings_icon"] == "emblem-system-symbolic"
     assert seen["status"].startswith("Scanned 1.")
     assert "0 files, 0 B to copy" in seen["status"]
+
+
+def test_exclusion_edit_preserves_individual_folder_collapse_state(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestTreeState")
+    changes = [Change(path, Action.COPY_LEFT_TO_RIGHT, "only on source", 1) for path in ("folder-one/a.txt", "folder-one/b.txt", "folder-two/c.txt")]
+    profile = Profile(name="tree state", left="/sample/left", right="/sample/right")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult(changes), None))
+            preview.view.collapse_row(Gtk.TreePath.new_from_string("0"))
+            seen["collapsed_before"] = not preview.view.row_expanded(Gtk.TreePath.new_from_string("0"))
+            preview._save_exclusion("folder-one/a.txt")
+            seen["collapsed_after"] = not preview.view.row_expanded(Gtk.TreePath.new_from_string("0"))
+            seen["other_expanded"] = preview.view.row_expanded(Gtk.TreePath.new_from_string("1"))
+            seen["remaining"] = [item.change.rel for item in preview.rows]
+            preview.collapse_all_button.emit("clicked")
+            preview._drop("folder-one/b.txt")
+            seen["all_collapsed"] = not preview.view.row_expanded(Gtk.TreePath.new_from_string("0"))
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["collapsed_before"] is True
+    assert seen["collapsed_after"] is True
+    assert seen["other_expanded"] is True
+    assert seen["remaining"] == ["folder-one/b.txt", "folder-two/c.txt"]
+    assert seen["all_collapsed"] is True
+
+
+def test_large_tree_updates_batches_and_retains_manual_collapse(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLargeTreeRefresh")
+    count = 1200
+    changes = [
+        Change(f"folder-{index // 400:03d}/nested/file-{index}.jpg", Action.COPY_LEFT_TO_RIGHT, "only on source", 1)
+        for index in range(count)
+    ]
+    profile = Profile(name="large tree", left="/sample/left", right="/sample/right")
+    seen = {"ticks": 0}
+    stage = {"value": 0}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult(changes), None))
+            preview.present()
+            seen["queued"] = bool(preview._pending_tree)
+
+            def watch() -> bool:
+                seen["ticks"] += 1
+                if preview._pending_tree:
+                    seen["saw_batch"] = True
+                    return True
+                if stage["value"] == 0 and preview.store.get_n_items() == count:
+                    seen["expanded_initially"] = preview.view.row_expanded(Gtk.TreePath.new_from_string("0"))
+                    preview.view.collapse_row(Gtk.TreePath.new_from_string("0"))
+                    preview._save_exclusion("folder-000/nested/file-0.jpg")
+                    stage["value"] = 1
+                    return True
+                if stage["value"] == 1 and preview.store.get_n_items() == count - 1:
+                    seen["collapsed_after"] = not preview.view.row_expanded(Gtk.TreePath.new_from_string("0"))
+                    self.quit()
+                    return False
+                return True
+
+            GLib.timeout_add(5, watch)
+
+    assert App().run(None) == 0
+    assert seen["queued"] is True
+    assert seen["saw_batch"] is True
+    assert seen["ticks"] > 1
+    assert seen["expanded_initially"] is True
+    assert seen["collapsed_after"] is True
 
 
 def test_row_actions_and_profile_delete(tmp_path, monkeypatch):

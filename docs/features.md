@@ -74,7 +74,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 
 ## Preview and one-run actions
 
-- The comparison is a folder tree with file sizes, `L ──▶ R` / `L ◀── R` direction diagrams, folder action counts, and per-side copy/move/delete byte totals. **Expand all / Collapse all** affect only the tree presentation, not filters or the plan.
+- The comparison is a folder tree with file sizes, `L ──▶ R` / `L ◀── R` direction diagrams, folder action counts, and per-side copy/move/delete byte totals. **Expand all / Collapse all** affect only the tree presentation, not filters or the plan. Individual folder expansion/collapse state is retained by relative path across exclusion/filter refreshes, and the global choice is retained for newly restored folders. Large comparisons (at least 1,000 rows) update GTK in cancelable 250-row batches, invalidating stale batches after another edit, with a visible updating indicator instead of blocking the event loop through a whole-tree rebuild.
 - State, existence, move, deletion, and adjust-side filters combine. Unchanged and skipped rows can be shown separately.
 - **Filters change visibility, not what Start applies.** Start runs the whole remaining reviewed plan, including hidden rows.
 - File and folder context menus can open paths, launch the configured external comparison command (Meld by default), add permanent exclusions, type a mask, or ignore an item only for this run.

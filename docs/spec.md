@@ -144,6 +144,9 @@ The preview lists files on the left, the right, or both. Right-click is part of 
 
 ### Comparison list
 
+Preserve user expansion/collapse per relative folder path across filter, exclusion, and in-place folder edits. Global Expand/Collapse provides an explicit default for restored rows and clears prior per-folder overrides. Avoid an all-at-once GTK rebuild of hundreds of thousands of entries: large comparisons update in 250-row batches on the UI idle loop, with a visible progress message. A newer filter/edit invalidates older pending batches. This is presentation-only; Start uses the current planned rows, not rendered visibility. Neither batching nor collapse changes the copy plan. Small known-fixed existing behavior remains synchronous.
+
+
 One scanned profile opens the comparison window. Several scanned profiles open a summary first, and each row can open the same window.
 
 The comparison is a folder tree of every file the scan saw, including files that would be left unchanged. Folders are listed before the files inside them. Each file row has a name, a size, a direction arrow, and a reason. Each folder row shows that folder's total size beside the name and in the size column, the arrow counts of the files under it, and the bytes for each arrow group. Filters on the left only hide rows. Start still runs the whole remaining plan, including rows the filter is hiding. Removing a row for this run, or saving an exclusion, takes that file out of the plan and out of the totals.

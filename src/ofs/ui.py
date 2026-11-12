@@ -134,6 +134,8 @@ _ACTIONS_WIDTH = 260
 _UNGROUPED = "(ungrouped)"
 _UNGROUPED_PROFILE_MINIMUM = 12
 _UNGROUPED_GROUP_MINIMUM = 3
+_PREVIEW_BATCH_SIZE = 250
+_PREVIEW_ASYNC_THRESHOLD = 1000
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -1758,6 +1760,14 @@ class Preview(Gtk.Window):
         self.store = Gio.ListStore.new(PlanRow)
         self._running = False
         self._popover: Gtk.Popover | None = None
+        self._fill_generation = 0
+        self._pending_tree = []
+        self._replace_tree_model = False
+        self._visible_changes = {}
+        self._tree_default_expanded = True
+        self._tree_state_overrides: dict[str, bool] = {}
+        self._folder_iters = {}
+        self._record_tree_state = True
         self.partial = bool(job.result.partial_sides)
         if self.partial:
             self.set_title(f"{job.profile.name} — Partial scan (review only)")
@@ -1774,10 +1784,10 @@ class Preview(Gtk.Window):
         tree_controls = Gtk.Box(spacing=6)
         self.expand_all_button = Gtk.Button(label="Expand all")
         self.expand_all_button.set_tooltip_text("Show every nested folder and file")
-        self.expand_all_button.connect("clicked", lambda *_: self.view.expand_all())
+        self.expand_all_button.connect("clicked", self._set_tree_expanded, True)
         self.collapse_all_button = Gtk.Button(label="Collapse all")
         self.collapse_all_button.set_tooltip_text("Show only top-level folders and files; the copy plan does not change")
-        self.collapse_all_button.connect("clicked", lambda *_: self.view.collapse_all())
+        self.collapse_all_button.connect("clicked", self._set_tree_expanded, False)
         for button in (self.expand_all_button, self.collapse_all_button):
             _compact(button)
             tree_controls.append(button)
@@ -1852,6 +1862,8 @@ class Preview(Gtk.Window):
         self.view.set_enable_tree_lines(True)
         self.view.set_enable_search(True)
         self.view.set_search_column(0)
+        self.view.connect("row-expanded", self._remember_tree_state, True)
+        self.view.connect("row-collapsed", self._remember_tree_state, False)
         for index, title, width in (
             (0, "Name", 380),
             (1, "Size", 100),
@@ -1907,6 +1919,36 @@ class Preview(Gtk.Window):
         box.append(status)
         return box
 
+    def _set_tree_expanded(self, _button, expanded: bool) -> None:
+        self._tree_default_expanded = expanded
+        self._tree_state_overrides.clear()
+        self._refresh_tree_layout()
+
+    def _remember_tree_state(self, _view, tree_iter, _path, expanded: bool) -> None:
+        if self._record_tree_state:
+            rel = self.tree_store.get_value(tree_iter, 4)
+            if rel:
+                self._tree_state_overrides[rel] = expanded
+
+    def _refresh_tree_layout(self) -> None:
+        self._record_tree_state = False
+        try:
+            if self._tree_default_expanded:
+                self.view.expand_all()
+            else:
+                self.view.collapse_all()
+            for rel, expanded in self._tree_state_overrides.items():
+                tree_iter = self._folder_iters.get(rel)
+                if tree_iter is None:
+                    continue
+                path = self.tree_store.get_path(tree_iter)
+                if expanded:
+                    self.view.expand_to_path(path)
+                else:
+                    self.view.collapse_row(path)
+        finally:
+            self._record_tree_state = True
+
     def _radios(self, title: str, key: str, options: list[tuple[str, str]]) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         heading = Gtk.Label(xalign=0)
@@ -1934,30 +1976,67 @@ class Preview(Gtk.Window):
         self._refill()
 
     def _refill(self) -> None:
-        while self.store.get_n_items():
-            self.store.remove(0)
-        visible = []
-        for row in self.rows:
-            if matches(row, **self.filters):
-                visible.append(row)
-                self.store.append(PlanRow(row.change))
+        self._fill_generation += 1
+        visible = [row for row in self.rows if matches(row, **self.filters)]
+        if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD:
+            # Keep planning cheap, and yield GTK after each small render batch.
+            self._pending_tree = [(None, node) for node in reversed(build_tree(visible))]
+            self._visible_changes = {row.change.rel: row.change for row in visible}
+            self._replace_tree_model = True
+            self._refresh_detail()
+            self.shown.set_text(f"Updating visible list: {len(visible)} files…")
+            GLib.idle_add(self._fill_some, self._fill_generation)
+            return
+        self.store = Gio.ListStore.new(PlanRow)
+        for row in visible:
+            self.store.append(PlanRow(row.change))
         self._fill_tree(visible)
         self._refresh_detail()
 
+    def _reset_tree_model(self) -> None:
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str])
+        # Replace only the GTK model. Exclusion/filter helpers own the flat store.
+        self.view.set_model(self.tree_store)
+        self._folder_iters = {}
+
     def _fill_tree(self, visible: list[Listed]) -> None:
-        self.tree_store.clear()
+        self._reset_tree_model()
 
         def add(parent, node) -> None:
             label = node.name if node.is_file else f"{node.name}    {node.size_text}"
             current = self.tree_store.append(
                 parent, [label, node.size_text, node.direction, node.status, node.rel]
             )
+            if not node.is_file:
+                self._folder_iters[node.rel] = current
             for child in node.children:
                 add(current, child)
 
         for node in build_tree(visible):
             add(None, node)
-        self.view.expand_all()
+        self._refresh_tree_layout()
+
+    def _fill_some(self, generation: int) -> bool:
+        if generation != self._fill_generation:
+            return False
+        if self._replace_tree_model:
+            self._reset_tree_model()
+            self.store = Gio.ListStore.new(PlanRow)
+            self._replace_tree_model = False
+        for _ in range(min(_PREVIEW_BATCH_SIZE, len(self._pending_tree))):
+            parent, node = self._pending_tree.pop()
+            label = node.name if node.is_file else f"{node.name}    {node.size_text}"
+            current = self.tree_store.append(parent, [label, node.size_text, node.direction, node.status, node.rel])
+            if node.is_file:
+                self.store.append(PlanRow(self._visible_changes[node.rel]))
+            else:
+                self._folder_iters[node.rel] = current
+            self._pending_tree.extend((current, child) for child in reversed(node.children))
+        if self._pending_tree:
+            return True
+        self._refresh_tree_layout()
+        self._refresh_detail()
+        return False
 
     def _rel_at(self, x: float, y: float) -> str | None:
         # Gesture coordinates include the column header. The tree hit test
