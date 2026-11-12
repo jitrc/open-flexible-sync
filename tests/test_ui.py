@@ -790,13 +790,51 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
     assert "ETA after first completed scan" in seen["counts"]
     assert seen["place"] == "album"
     assert seen["reading"] == "Reading right"
-    assert seen["path_wrap"] is True
+    assert seen["path_wrap"] is False
     assert seen["skip"].startswith("Skipping rest")
     assert seen["skipping"] is True
     assert seen["skip_enabled"] is False
     assert seen["modal"] is False
     assert "ETA ~" in seen["estimated"]
     assert "ETA after first" not in seen["estimated"]
+
+
+def test_scan_path_truncation_keeps_the_dialog_height_stable(tmp_path, monkeypatch):
+    from gi.repository import Pango
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestStableScanPath")
+    seen = {}
+    long_path = (
+        "Library with a deliberately long folder name / Archived collections / "
+        "Several nested levels / A document with a descriptive name that should be truncated at a fixed width.txt"
+    )
+
+    class App(SfsApplication):
+        def do_activate(self):
+            from ofs.walk import WalkStats
+
+            owner = MainWindow(self)
+            scan = ScanWindow(owner)
+            scan.present()
+            while GLib.MainContext.default().pending():
+                GLib.MainContext.default().iteration(False)
+            scan.update_stats("demo archive", "Left", "short/path.txt", WalkStats(5, 1, 4))
+            seen["short_height"] = scan.get_height()
+            scan.update_stats("demo archive", "Left", long_path, WalkStats(5, 1, 4))
+            seen["long_height"] = scan.get_height()
+            seen["full_path"] = scan.file_label.get_text()
+            seen["tooltip"] = scan.file_label.get_tooltip_text()
+            seen["ellipsize"] = scan.file_label.get_ellipsize()
+            seen["lines"] = scan.file_label.get_lines()
+            scan.allow_close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["short_height"] == seen["long_height"]
+    assert seen["full_path"] == seen["tooltip"] == long_path
+    assert seen["ellipsize"] == Pango.EllipsizeMode.MIDDLE
+    assert seen["lines"] == 1
 
 
 def test_a_second_scan_waits_behind_the_one_already_running(tmp_path, monkeypatch):

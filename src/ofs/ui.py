@@ -2024,7 +2024,7 @@ class ScanWindow(Gtk.Window):
 
     def __init__(self, owner: Gtk.Window, title: str = "Scanning", *, estimates: dict[str, tuple[int, float]] | None = None):
         super().__init__(transient_for=owner, modal=False, title=title)
-        self.set_default_size(700, -1)
+        self.set_default_size(700, 280)
         self.control = RunControl()
         self._allow_close = False
         self._place = "Waiting for the first entry…"
@@ -2042,9 +2042,9 @@ class ScanWindow(Gtk.Window):
         heading = Gtk.Box(spacing=12)
         heading.append(self.profile_label)
         heading.append(self.side_label)
-        self.file_label = Gtk.Label(xalign=0, selectable=True, wrap=True)
-        self.file_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.file_label = Gtk.Label(xalign=0, selectable=True, wrap=False, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.file_label.set_max_width_chars(76)
+        self.file_label.set_lines(1)
         self.file_label.set_text(self._place)
         path_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         path_box.add_css_class("scan-path")
@@ -2111,6 +2111,7 @@ class ScanWindow(Gtk.Window):
         self.profile_label.set_text(name)
         self.side_label.set_text(reading)
         self._place = rel or "."
+        self.file_label.set_tooltip_text(self._place)
         if not self.control.paused:
             self.file_label.set_text(self._place)
 
