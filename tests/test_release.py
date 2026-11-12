@@ -1,4 +1,6 @@
+import configparser
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -26,3 +28,15 @@ def test_staged_release_lists_no_profiles(tmp_path):
         text=True,
     )
     assert result.stdout.strip() == "no profiles"
+
+
+def test_source_and_release_desktop_entries_have_new_window_action():
+    desktop = (ROOT / "com.ofs.LocalSync.desktop").read_text(encoding="utf-8")
+    release = runpy.run_path(str(ROOT / "scripts" / "build_release.py"))["DESKTOP"]
+    for text in (desktop, release):
+        config = configparser.ConfigParser(interpolation=None)
+        config.optionxform = str
+        config.read_string(text)
+        assert config["Desktop Entry"]["Actions"] == "NewWindow;"
+        assert config["Desktop Action NewWindow"]["Name"] == "New Window"
+        assert config["Desktop Action NewWindow"]["Exec"] == "ofs --new-window"

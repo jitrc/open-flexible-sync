@@ -53,6 +53,12 @@ Icon=ofs
 Terminal=false
 StartupWMClass=com.ofs.LocalSync
 Categories=Utility;FileTools;
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=New Window
+Exec=ofs --new-window
+Icon=ofs
 """
 
 

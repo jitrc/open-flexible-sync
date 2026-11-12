@@ -24,7 +24,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 ## Profile management and migration
 
 - **New profile** is the first header action.
-- The expanded **Profiles** menu organizes original 5.71 import, OFS profile import/export, Multi Edit, path replacement, checked-profile renaming, and explicit known-new folder copying.
+- **Profiles → New window**, or the desktop launcher's **New Window** action, opens an independent main view in the same OFS process. Selections, filters, scrolling, and dialogs are per window. Shared per-profile operation locks reject duplicate scans, whole-folder copies, and comparison-plan copies across windows; different profiles can proceed independently. Existing serial/chunked behavior within each copy is unchanged.
 - Profile Editor **Left** and **Right** entries have folder **Browse…** buttons for local/mounted folders. Choosing a folder updates the text field only; typed paths remain supported and the normal Save operation preserves imported flags/history behavior.
 - **Multi Edit** previews and confirms one field across checked profiles. It includes cache Off/On, sync/exclusion modes, Older/deletion safeguards, symlink and metadata controls, timestamps, volume labels, size limits, and fractional-day age limits. Other fields remain unchanged. Masks can be added without duplicating existing rules or can replace the entire mask list.
 - **Replace paths in checked profiles…** handles changed mount points and moved folders:

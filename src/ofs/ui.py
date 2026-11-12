@@ -175,6 +175,10 @@ class MainWindow(Gtk.ApplicationWindow):
         choices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
         for side in ("start", "end", "top", "bottom"):
             getattr(choices, f"set_margin_{side}")(8)
+        new_window = Gtk.Button(label="New window")
+        new_window.connect("clicked", lambda _button: (popover.popdown(), self._new_window()))
+        choices.append(new_window)
+        choices.append(Gtk.Separator())
         choices.append(Gtk.Label(label="Import / export", xalign=0, css_classes=["dim-label"]))
         for label, callback in (
             ("Import 5.71 profiles…", self._import),
@@ -560,7 +564,10 @@ class MainWindow(Gtk.ApplicationWindow):
             text.add_css_class("profile-disabled")
 
         when, body, tone = _result_parts(profile.last_result, profile.note)
-        scanning = profile.name in self._scan_running
+        local_scan = profile.name in self._scan_running
+        app = self.get_application()
+        active_elsewhere = isinstance(app, SfsApplication) and app.profile_is_active(profile.name)
+        scanning = local_scan or active_elsewhere
         stamp = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER)
         stamp.add_css_class("monospace")
         stamp.add_css_class(tone)
@@ -571,8 +578,8 @@ class MainWindow(Gtk.ApplicationWindow):
         result.set_max_width_chars(40)
         result.set_size_request(_RESULT_WIDTH, -1)
         result.add_css_class("result-running" if scanning else tone)
-        result.set_text("Scanning…" if scanning else body)
-        result.set_tooltip_text("This profile is already scanning. Run will be available when it finishes." if scanning else body)
+        result.set_text("Scanning…" if local_scan else "Running…" if active_elsewhere else body)
+        result.set_tooltip_text("This profile is active in an OFS window. Run will be available when it finishes." if scanning else body)
         self._labels[profile.name] = result
 
         run = Gtk.Button(label="Running" if scanning else "Run")
@@ -755,6 +762,10 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text("Check the profile whose Older files should be restored. Disabled profiles can be restored from Edit.")
             return
         RestoreWindow(self, profile).present()
+
+    def _new_window(self, *_args) -> MainWindow | None:
+        app = self.get_application()
+        return app.open_new_window() if isinstance(app, SfsApplication) else None
 
     def _new_profile(self, *_args) -> None:
         self._editor(None)
@@ -1214,7 +1225,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if profile.direction == Direction.BOTH:
             self.status.set_text("Copy new folder needs a one-way profile, so the destination is unambiguous.")
             return None
-        if profile.name in self._scan_running or profile.name in self._folder_copy_running:
+        app = self.get_application()
+        if profile.name in self._scan_running or profile.name in self._folder_copy_running or (isinstance(app, SfsApplication) and app.profile_is_active(profile.name)):
             self.status.set_text("This profile is already scanning or copying a new folder. Wait for it to finish first.")
             return None
         source_root = Path(profile.left if profile.direction == Direction.LEFT_TO_RIGHT else profile.right)
@@ -1278,7 +1290,8 @@ class MainWindow(Gtk.ApplicationWindow):
             return None
         if choice != 1:
             return None
-        if profile.name in self._scan_running or profile.name in self._folder_copy_running:
+        app = self.get_application()
+        if profile.name in self._scan_running or profile.name in self._folder_copy_running or (isinstance(app, SfsApplication) and app.profile_is_active(profile.name)):
             self.status.set_text("The profile became active before this confirmation. Wait for the other operation to finish.")
             return None
         current = self._profile(profile.name)
@@ -1287,6 +1300,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return None
         if current.left != profile.left or current.right != profile.right or current.direction != profile.direction:
             self.status.set_text("The profile paths or direction changed after this confirmation. Nothing was copied; confirm the new folder again.")
+            return None
+        if isinstance(app, SfsApplication) and not app.claim_profile(profile.name):
+            self.status.set_text("This profile is active in another OFS window. Nothing was copied.")
             return None
         self._folder_copy_running.add(profile.name)
         progress = WholeFolderWindow(self, current, relative)
@@ -1324,6 +1340,9 @@ class MainWindow(Gtk.ApplicationWindow):
     def _whole_folder_finished(self, progress: WholeFolderWindow, outcome: FolderCopyOutcome, path: Path | None) -> bool:
         progress.allow_close()
         self._folder_copy_running.discard(progress.profile_name)
+        app = self.get_application()
+        if isinstance(app, SfsApplication):
+            app.release_profile(progress.profile_name)
         progress.job.profile.last_result = f"{time.strftime('%Y-%m-%d %H:%M')}  {outcome.report.summary()}"
         save_profile(progress.job.profile)
         self.reload()
@@ -1349,12 +1368,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self._run_names(chosen, uncached=True)
 
     def _run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
-        profiles = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
-        already_running = {profile.name for profile in profiles} & self._scan_running
-        profiles = [profile for profile in profiles if profile.name not in already_running]
+        selected = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
+        profiles = []
+        already_running: set[str] = set()
+        app = self.get_application()
+        for profile in selected:
+            locally_running = profile.name in self._scan_running
+            globally_busy = isinstance(app, SfsApplication) and (app.profile_is_active(profile.name) or not app.claim_profile(profile.name))
+            if locally_running:
+                already_running.add(profile.name)
+            elif globally_busy:
+                already_running.add(profile.name)
+            else:
+                profiles.append(profile)
         if not profiles:
             if already_running:
-                self.status.set_text("This profile is already scanning; no duplicate was started." if len(already_running) == 1 else "These profiles are already scanning; no duplicates were started.")
+                self.status.set_text("This profile is already scanning or active in an OFS window; no duplicate was started." if len(already_running) == 1 else "These profiles are already scanning or active in OFS windows; no duplicates were started.")
             else:
                 self.status.set_text("The selected profile is disabled. Enable it in Edit first.")
             return
@@ -1410,6 +1439,9 @@ class MainWindow(Gtk.ApplicationWindow):
         batch = self._scan_batches.get(batch_id)
         progress.allow_close()
         self._scan_running.discard(name)
+        app = self.get_application()
+        if isinstance(app, SfsApplication):
+            app.release_profile(name)
         self._rebuild()
         if batch is None:
             return False
@@ -2407,6 +2439,10 @@ class Preview(Gtk.Window):
         return window
 
     def _begin(self, changes: list[Change], choice: str) -> None:
+        app = self.owner.get_application()
+        if isinstance(app, SfsApplication) and not app.claim_profile(self.job.profile.name):
+            self.detail.set_text("This profile is already scanning or copying in another OFS window. Wait for that operation to finish.")
+            return
         self._running = True
         self.start_button.set_sensitive(False)
         progress = ProgressWindow(self, self.job.profile.name)
@@ -2447,6 +2483,9 @@ class Preview(Gtk.Window):
 
     def _finished(self, progress: ProgressWindow, report: ApplyReport, path: Path | None) -> bool:
         progress.allow_close()
+        app = self.owner.get_application()
+        if isinstance(app, SfsApplication):
+            app.release_profile(self.job.profile.name)
         self._running = False
         text = report.summary()
         self.job.profile.last_result = f"{time.strftime('%Y-%m-%d %H:%M')}  {text}"
@@ -3231,7 +3270,35 @@ class RestoreWindow(Gtk.Window):
 
 class SfsApplication(Gtk.Application):
     def __init__(self):
-        super().__init__(application_id=os.environ.get("OFS_APP_ID") or os.environ.get("SFS_APP_ID") or "com.ofs.LocalSync")
+        super().__init__(
+            application_id=os.environ.get("OFS_APP_ID") or os.environ.get("SFS_APP_ID") or "com.ofs.LocalSync",
+            flags=Gio.ApplicationFlags.HANDLES_COMMAND_LINE,
+        )
+        self._active_profiles: set[str] = set()
+        self._profile_operation_lock = threading.Lock()
+
+    def open_new_window(self) -> MainWindow:
+        apply_appearance(theme())
+        window = MainWindow(self)
+        window.present()
+        return window
+
+    def profile_is_active(self, name: str) -> bool:
+        with self._profile_operation_lock:
+            return name in self._active_profiles
+
+    def claim_profile(self, name: str) -> bool:
+        """Prevent duplicate scans/copies across every main window in this app."""
+
+        with self._profile_operation_lock:
+            if name in self._active_profiles:
+                return False
+            self._active_profiles.add(name)
+            return True
+
+    def release_profile(self, name: str) -> None:
+        with self._profile_operation_lock:
+            self._active_profiles.discard(name)
 
     def do_activate(self) -> None:
         apply_appearance(theme())
@@ -3240,7 +3307,18 @@ class SfsApplication(Gtk.Application):
             window = MainWindow(self)
         window.present()
 
+    def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:
+        arguments = command_line.get_arguments()
+        if arguments[1:] == ["--new-window"]:
+            self.open_new_window()
+            return 0
+        if arguments[1:]:
+            command_line.printerr("Usage: ofs [--new-window]\n")
+            return 2
+        self.activate()
+        return 0
 
-def main() -> int:
+
+def main(arguments: list[str] | None = None) -> int:
     app = SfsApplication()
-    return app.run(None)
+    return app.run(arguments)

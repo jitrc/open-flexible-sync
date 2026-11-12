@@ -1733,6 +1733,75 @@ def test_multi_edit_cache_size_and_fractional_age_controls(tmp_path, monkeypatch
     assert all(profile.min_size == 1536 for profile in seen["size"])
 
 
+def test_new_windows_share_profile_locks_but_keep_independent_state(tmp_path, monkeypatch):
+    from ofs.scan import ScanResult
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestMultipleWindows")
+    for name in ("alpha", "beta"):
+        save_profile(Profile(name=name, left=f"/sample/{name}", right=f"/backup/{name}"))
+    seen = {}
+
+    class CommandLine:
+        def __init__(self, arguments):
+            self.arguments = arguments
+            self.errors = []
+
+        def get_arguments(self):
+            return self.arguments
+
+        def printerr(self, text):
+            self.errors.append(text)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            first = MainWindow(self)
+            first.checked = {"alpha"}
+            second = first._new_window()
+            second.checked = {"beta"}
+            seen["first_checked"] = set(first.checked)
+            seen["second_checked"] = set(second.checked)
+            seen["same_profiles"] = [profile.name for profile in second.profiles]
+            seen["main_window_count"] = len([window for window in self.get_windows() if isinstance(window, MainWindow)])
+            seen["menu_has_new_window"] = "New window" in _button_labels(first.profiles_menu.get_popover())
+
+            assert self.claim_profile("alpha") is True
+            assert self.claim_profile("beta") is True
+            second._run_names({"alpha"})
+            seen["duplicate_status"] = second.status.get_text()
+            seen["scan_claimed_beta"] = self.profile_is_active("beta")
+            seen["profile_claim_blocks_copy"] = self.claim_profile("alpha") is False
+            job = JobResult(next(profile for profile in second.profiles if profile.name == "alpha"), ScanResult(changes=[]), None)
+            preview = second._preview(job)
+            preview._begin([], "cross-window test")
+            seen["copy_blocked"] = not preview._running and "another OFS window" in preview.detail.get_text()
+            preview.close()
+            self.release_profile("alpha")
+            seen["release_allows_other_window"] = self.claim_profile("alpha") is True
+            self.release_profile("alpha")
+            self.release_profile("beta")
+
+            command = CommandLine(["ofs", "--new-window"])
+            seen["command_status"] = self.do_command_line(command)
+            seen["command_errors"] = command.errors
+            seen["command_window_count"] = len([window for window in self.get_windows() if isinstance(window, MainWindow)])
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["first_checked"] == {"alpha"}
+    assert seen["second_checked"] == {"beta"}
+    assert seen["same_profiles"] == ["alpha", "beta"]
+    assert seen["main_window_count"] == 2
+    assert seen["menu_has_new_window"] is True
+    assert "already scanning or active" in seen["duplicate_status"]
+    assert seen["scan_claimed_beta"] is True
+    assert seen["profile_claim_blocks_copy"] is True
+    assert seen["copy_blocked"] is True
+    assert seen["release_allows_other_window"] is True
+    assert seen["command_status"] == 0 and seen["command_errors"] == []
+    assert seen["command_window_count"] == 3
+
+
 def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
     from ofs.compare import FileStat
     from ofs.history import database_path, save_history
