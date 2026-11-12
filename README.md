@@ -56,7 +56,8 @@ OFS is a GTK 4 desktop application for synchronizing local and OS-mounted folder
 - Optional binary comparison directly compares candidate file bytes. This is not a stored SHA checksum database or automatic post-copy verification.
 - Optional per-profile SQLite history first records the trees, then helps identify later renames, moves, and deletions. Changed-on-both-sides and undecided rows remain explicit decisions rather than automatic overwrites.
 - Exact Mirror can pair a unique source addition and destination deletion as a move, even without the file database. Ambiguous or different-type pairs remain separate operations.
-- Scan progress shows the current profile/side/path, discovered/filtered/added counts, elapsed time, and entries per second.
+- Scan progress separates the current profile, reading side, and path into distinct rows. The full path wraps in a selectable, theme-aware panel instead of competing for one truncated line. Consistent spacing separates statistics, progress, and scan controls.
+- Scan progress includes discovered/filtered/added counts, elapsed time, and entries per second.
 - The first completed scan has no ETA. Later scans show an approximate history-based `~` ETA, refined using current discovery pace and expected remaining entries. Paused time is excluded, and skipped or canceled scans do not replace a previous estimate.
 - **Pause** holds discovery between entries. **Skip Rest** skips only the current incomplete scan and continues with the next checked profile. **Cancel** stops the checked batch. Neither action opens a partial comparison or writes a copy log.
 - Additional requested scans wait in order rather than concurrently scanning the same trees and making the GUI unresponsive.

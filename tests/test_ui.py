@@ -767,6 +767,8 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
             scan.update_stats("job", "Right", "album", WalkStats(4, 1, 3))
             seen["counts"] = scan.count_label.get_text()
             seen["place"] = scan.file_label.get_text()
+            seen["reading"] = scan.side_label.get_text()
+            seen["path_wrap"] = scan.file_label.get_wrap()
             scan._skip()
             seen["skip"] = scan.file_label.get_text()
             seen["skipping"] = scan.control.skipping
@@ -786,7 +788,9 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
     ]
     assert "entries/s" in seen["counts"]
     assert "ETA after first completed scan" in seen["counts"]
-    assert "Reading right" in seen["place"]
+    assert seen["place"] == "album"
+    assert seen["reading"] == "Reading right"
+    assert seen["path_wrap"] is True
     assert seen["skip"].startswith("Skipping rest")
     assert seen["skipping"] is True
     assert seen["skip_enabled"] is False

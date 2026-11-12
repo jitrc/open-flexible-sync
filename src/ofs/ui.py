@@ -1429,6 +1429,7 @@ def _install_css() -> None:
         "box.profile-row { padding: 7px 10px; border-bottom: 1px solid alpha(@theme_fg_color, 0.12); border-radius: 6px; }"
         "box.profile-row-alt { background-color: alpha(@theme_fg_color, 0.035); }"
         "box.profile-row:hover { background-color: alpha(@theme_selected_bg_color, 0.12); }"
+        "box.scan-path { padding: 10px; border-radius: 8px; border: 1px solid alpha(@theme_fg_color, 0.12); background-color: alpha(@theme_fg_color, 0.035); }"
         "label.result-ok { color: @success_color; }"
         "label.result-error { color: @error_color; }"
         "label.result-warn { color: @warning_color; }"
@@ -2023,10 +2024,10 @@ class ScanWindow(Gtk.Window):
 
     def __init__(self, owner: Gtk.Window, title: str = "Scanning", *, estimates: dict[str, tuple[int, float]] | None = None):
         super().__init__(transient_for=owner, modal=False, title=title)
-        self.set_default_size(640, 260)
+        self.set_default_size(700, -1)
         self.control = RunControl()
         self._allow_close = False
-        self._place = "Starting…"
+        self._place = "Waiting for the first entry…"
         self._name = ""
         self._started = time.monotonic()
         self._paused_at: float | None = None
@@ -2034,11 +2035,26 @@ class ScanWindow(Gtk.Window):
         self._estimates = estimates or {}
         self._estimate = (0, 0.0)
         self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
-        self.file_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
+        self.profile_label = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END)
+        self.profile_label.add_css_class("heading")
+        self.side_label = Gtk.Label(xalign=0, label="Reading left")
+        self.side_label.add_css_class("dim-label")
+        heading = Gtk.Box(spacing=12)
+        heading.append(self.profile_label)
+        heading.append(self.side_label)
+        self.file_label = Gtk.Label(xalign=0, selectable=True, wrap=True)
+        self.file_label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        self.file_label.set_max_width_chars(76)
         self.file_label.set_text(self._place)
-        self.count_label = Gtk.Label(xalign=0)
+        path_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        path_box.add_css_class("scan-path")
+        path_caption = Gtk.Label(xalign=0, label="Current path")
+        path_caption.add_css_class("dim-label")
+        path_box.append(path_caption)
+        path_box.append(self.file_label)
+        self.count_label = Gtk.Label(xalign=0, wrap=True)
         self._update_counts()
-        self.bar = Gtk.ProgressBar()
+        self.bar = Gtk.ProgressBar(hexpand=True)
         self.pause_button = Gtk.Button(label="Pause")
         self.pause_button.connect("clicked", self._toggle)
         self.skip_button = Gtk.Button(label="Skip Rest")
@@ -2046,16 +2062,15 @@ class ScanWindow(Gtk.Window):
         self.skip_button.connect("clicked", self._skip)
         self.cancel_button = Gtk.Button(label="Cancel")
         self.cancel_button.connect("clicked", self._cancel)
-        buttons = Gtk.Box(spacing=8)
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.START)
         buttons.append(self.pause_button)
         buttons.append(self.skip_button)
         buttons.append(self.cancel_button)
-        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        root.set_margin_start(12)
-        root.set_margin_end(12)
-        root.set_margin_top(12)
-        root.set_margin_bottom(12)
-        root.append(self.file_label)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(root, f"set_margin_{side}")(16)
+        root.append(heading)
+        root.append(path_box)
         root.append(self.count_label)
         root.append(self.bar)
         root.append(buttons)
@@ -2093,7 +2108,9 @@ class ScanWindow(Gtk.Window):
     def _update_location(self, name: str, side: str, rel: str) -> None:
         self._new_profile(name)
         reading = "Reading right" if side == "Right" else "Reading left"
-        self._place = f"{name}    {reading}    {rel or '.'}"
+        self.profile_label.set_text(name)
+        self.side_label.set_text(reading)
+        self._place = rel or "."
         if not self.control.paused:
             self.file_label.set_text(self._place)
 
