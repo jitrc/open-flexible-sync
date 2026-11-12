@@ -14,6 +14,7 @@ OFS is a GTK 4 desktop application for synchronizing local and OS-mounted folder
 - Group heading checkboxes are tri-state. Parents select or clear visible enabled descendants, including nested subgroups; filtered-out members retain their selection, and Disabled profiles are never selected.
 - Search can match custom group/subgroup names and opens each required ancestor. **Expand all** and **Collapse all** also apply to subgroups.
 - Profile rows have subtle separators and alternate theme-derived surfaces, including during Light/Dark switching. Row checks immediately refresh the parent group's partial-selection state.
+- With at least 12 profiles and three real groups, ordinary ungrouped profiles are placed in a collapsed **(ungrouped)** section at the top. It supports the same visible-enabled tri-state selection and expands with search/Expand all. Small catalogs keep plain ungrouped rows, and no profile receives a virtual group setting.
 - Filter by status, never-run state, clean/stopped/error result, current selection, disabled state, minimum days since the last OFS result, or currently available paths. Filtering does not silently change the checked set.
 - A persistent **Disabled** setting blocks GUI, CLI, and batch execution without deleting the profile, its paths, history, exclusions, or last results.
 

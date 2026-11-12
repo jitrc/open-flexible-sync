@@ -104,6 +104,9 @@ class PlanRow(GObject.Object):
 _LAST_RUN_WIDTH = 142
 _RESULT_WIDTH = 250
 _ACTIONS_WIDTH = 260
+_UNGROUPED = "(ungrouped)"
+_UNGROUPED_PROFILE_MINIMUM = 12
+_UNGROUPED_GROUP_MINIMUM = 3
 
 
 class MainWindow(Gtk.ApplicationWindow):
@@ -115,6 +118,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.session_skips: dict[str, set[str]] = {}
         self.session_masks: dict[str, list[str]] = {}
         self._labels: dict[str, Gtk.Label] = {}
+        self._group_sizes: Counter = Counter()
         self._group_expanded: dict[str, bool] = {}
         self._applying_groups = False
         self._scan_active = False
@@ -274,9 +278,24 @@ class MainWindow(Gtk.ApplicationWindow):
         self._set_stale_visibility(self.status_filter.get_selected() == 6)
         self._rebuild()
 
+    def _is_grouped(self, profile: Profile) -> bool:
+        return bool(profile.group_override.strip()) or self._group_sizes[profile.group] > 1
+
+    def _ungrouped_enabled(self) -> bool:
+        real_groups = {
+            _group_parts(profile)[0]
+            for profile in self.profiles
+            if _group_parts(profile) and self._is_grouped(profile)
+        }
+        return (
+            len(self.profiles) >= _UNGROUPED_PROFILE_MINIMUM
+            and len(real_groups) >= _UNGROUPED_GROUP_MINIMUM
+        )
+
     def _shown(self, profile: Profile, query: str, status: str) -> bool:
         group_text = " ".join(_group_parts(profile)).lower()
-        if query not in profile.name.lower() and query not in profile.group.lower() and query not in group_text:
+        unmatched_group = self._ungrouped_enabled() and not self._is_grouped(profile) and query in _UNGROUPED
+        if query not in profile.name.lower() and query not in profile.group.lower() and query not in group_text and not unmatched_group:
             return False
         if self.available_only.get_active() and not self._available(profile):
             return False
@@ -297,6 +316,7 @@ class MainWindow(Gtk.ApplicationWindow):
         while child := self.list_box.get_first_child():
             self.list_box.remove(child)
         self._labels.clear()
+        self._group_sizes = Counter(profile.group for profile in self.profiles)
         query = self.search.get_text().strip().lower()
         statuses = ["all", "not_run", "clean", "stopped", "errors", "selected", "stale", "disabled"]
         status = statuses[self.status_filter.get_selected()]
@@ -309,10 +329,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 text = "No profiles match."
             self.list_box.append(Gtk.Label(label=text, xalign=0))
             return
-        group_sizes = Counter(profile.group for profile in self.profiles)
-
         def grouped(profile: Profile) -> bool:
-            return bool(profile.group_override.strip()) or group_sizes[profile.group] > 1
+            return self._is_grouped(profile)
 
         ungrouped = [profile for profile in shown if not _group_parts(profile) or not grouped(profile)]
         root_sizes = Counter(
@@ -333,8 +351,18 @@ class MainWindow(Gtk.ApplicationWindow):
             for part in parts[1:]:
                 node = node["children"].setdefault(part, new_node())
             node["profiles"].append(profile)
-        for profile in ungrouped:
-            self.list_box.append(self._row(profile))
+        if ungrouped and self._ungrouped_enabled():
+            self.list_box.append(
+                self._group(
+                    _UNGROUPED,
+                    ungrouped,
+                    len(ungrouped),
+                    group_key=_UNGROUPED,
+                )
+            )
+        else:
+            for profile in ungrouped:
+                self.list_box.append(self._row(profile))
 
         def descendants(node: dict) -> list[Profile]:
             members = list(node["profiles"])
@@ -366,14 +394,19 @@ class MainWindow(Gtk.ApplicationWindow):
     def _on_search(self) -> None:
         query = self.search.get_text().strip().lower()
         if query:
+            if self._ungrouped_enabled() and query in _UNGROUPED:
+                self._group_expanded[_UNGROUPED] = True
             for profile in self.profiles:
                 if query in profile.name.lower() or query in profile.group.lower() or query in " ".join(_group_parts(profile)).lower():
                     parts = _group_parts(profile)
+                    if self._ungrouped_enabled() and not self._is_grouped(profile):
+                        self._group_expanded[_UNGROUPED] = True
                     for index in range(1, len(parts) + 1):
                         self._group_expanded["/".join(parts[:index])] = True
         self._rebuild()
 
     def _set_groups(self, expanded: bool) -> None:
+        self._group_expanded[_UNGROUPED] = expanded
         for profile in self.profiles:
             parts = _group_parts(profile)
             for index in range(1, len(parts) + 1):

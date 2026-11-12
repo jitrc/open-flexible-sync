@@ -149,6 +149,53 @@ def test_profile_rows_have_theme_aware_separators_and_alternating_surfaces(tmp_p
     assert seen["classes"] == [True, False, True]
 
 
+def test_ungrouped_section_is_collapsible_only_for_larger_catalogs(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "small"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestSmallUngrouped")
+    for name in ("alpha one", "beta two", "gamma three"):
+        save_profile(Profile(name=name, left="l", right="r"))
+    seen = {}
+
+    class SmallApp(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["small_expanders"] = [item for item in _widgets(window.list_box) if isinstance(item, Gtk.Expander)]
+            self.quit()
+
+    assert SmallApp().run(None) == 0
+    assert seen["small_expanders"] == []
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "large"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLargeUngrouped")
+    for prefix in ("alpha", "beta", "gamma"):
+        for suffix in ("first", "second"):
+            save_profile(Profile(name=f"{prefix} {suffix}", left="l", right="r"))
+    for index in range(8):
+        save_profile(Profile(name=f"site{index} older", left="l", right="r", disabled=index == 7))
+
+    class LargeApp(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            section = _named_group(window, "(ungrouped)")
+            seen["collapsed"] = not section.get_expanded()
+            window._set_groups(True)
+            section = _named_group(window, "(ungrouped)")
+            seen["expanded"] = section.get_expanded()
+            section.get_label_widget().get_first_child().set_active(True)
+            seen["selected"] = set(window.checked)
+            seen["stored_groups"] = [item.group_override for item in load_profiles()]
+            window.search.set_text("(ungrouped)")
+            seen["search_expanded"] = _named_group(window, "(ungrouped)").get_expanded()
+            self.quit()
+
+    assert LargeApp().run(None) == 0
+    assert seen["collapsed"] is True
+    assert seen["expanded"] is True
+    assert seen["selected"] == {f"site{index} older" for index in range(7)}
+    assert set(seen["stored_groups"]) == {""}
+    assert seen["search_expanded"] is True
+
+
 def test_group_bulk_and_json_transfer_validation(tmp_path, monkeypatch):
     from ofs.transfer import export_profiles, read_profile_bundle
 
