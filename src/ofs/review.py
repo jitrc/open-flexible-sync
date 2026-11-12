@@ -88,6 +88,7 @@ class TreeNode:
     rel: str
     is_file: bool
     size_text: str
+    size: int
     direction: str
     status: str
     children: list["TreeNode"]
@@ -193,11 +194,33 @@ def folder_status(changes: list[Change]) -> tuple[int, str]:
     return total, "; ".join(parts)
 
 
-def build_tree(rows: list[Listed]) -> list[TreeNode]:
-    """Folder tree of the visible rows. Folders carry the size and status of their files."""
+def build_tree(
+    rows: list[Listed],
+    *,
+    minimum_size: int = 0,
+    size_target: str = "files",
+    size_scope: str = "",
+    sort_by: str = "name",
+) -> list[TreeNode]:
+    """Review-only size filters and sibling sorting; the caller's rows stay untouched."""
 
+    scope = size_scope.strip().strip("/")
+    minimum_size = max(0, minimum_size)
+
+    def in_scope(rel: str) -> bool:
+        return not scope or rel == scope or rel.startswith(scope + "/")
+
+    visible = [
+        row for row in rows
+        if not (
+            minimum_size
+            and size_target in {"files", "all"}
+            and in_scope(row.change.rel)
+            and row.change.size < minimum_size
+        )
+    ]
     root: dict = {"rel": "", "children": {}, "files": []}
-    for row in rows:
+    for row in visible:
         parts = row.change.rel.split("/")
         node = root
         acc: list[str] = []
@@ -212,38 +235,47 @@ def build_tree(rows: list[Listed]) -> list[TreeNode]:
             found.extend(collect(child))
         return found
 
+    def order(items: list[TreeNode]) -> list[TreeNode]:
+        if sort_by in {"size_desc", "size_asc"}:
+            reverse = sort_by == "size_desc"
+            return sorted(items, key=lambda item: (item.size, item.name.lower()), reverse=reverse)
+        return sorted(items, key=lambda item: item.name.lower())
+
     def emit(node: dict) -> list[TreeNode]:
         folders = []
-        for name in sorted(node["children"], key=str.lower):
-            child = node["children"][name]
+        for name, child in node["children"].items():
             changes = collect(child)
             total, status = folder_status(changes)
+            if minimum_size and size_target in {"folders", "all"} and in_scope(child["rel"]) and total < minimum_size:
+                continue
             folders.append(
                 TreeNode(
-                    name,
-                    child["rel"],
-                    False,
-                    format_bytes(total),
-                    direction_summary(changes),
-                    status,
-                    emit(child),
+                    name=name,
+                    rel=child["rel"],
+                    is_file=False,
+                    size_text=format_bytes(total),
+                    size=total,
+                    direction=direction_summary(changes),
+                    status=status,
+                    children=emit(child),
                 )
             )
         files = []
-        for row in sorted(node["files"], key=lambda item: item.change.rel.lower()):
+        for row in node["files"]:
             change = row.change
             files.append(
                 TreeNode(
-                    change.rel.rsplit("/", 1)[-1],
-                    change.rel,
-                    True,
-                    format_bytes(change.size),
-                    direction_mark(change.action),
-                    file_detail(change),
-                    [],
+                    name=change.rel.rsplit("/", 1)[-1],
+                    rel=change.rel,
+                    is_file=True,
+                    size_text=format_bytes(change.size),
+                    size=change.size,
+                    direction=direction_mark(change.action),
+                    status=file_detail(change),
+                    children=[],
                 )
             )
-        return folders + files
+        return order(folders) + order(files)
 
     return emit(root)
 

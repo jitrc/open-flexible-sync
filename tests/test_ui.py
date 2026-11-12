@@ -11,10 +11,10 @@ from gi.repository import Gio, GLib, Gtk
 from ofs.apply import CopyProgress
 from ofs.compare import Action, Change, FileStat
 from ofs.jobs import JobResult
-from ofs.model import Profile, SyncMode
+from ofs.model import ExclusionMode, Profile, SyncMode
 from ofs.scan import ScanResult, scan_profile
 from ofs.store import load_profiles, save_profile
-from ofs.ui import ExclusionEditor, MainWindow, Preview, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
+from ofs.ui import ExclusionEditor, MainWindow, PlanRow, Preview, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
 
 
 def _group_titles(box) -> list[tuple[str, bool]]:
@@ -165,7 +165,9 @@ def test_overview_groups_and_preview_actions(tmp_path, monkeypatch):
             seen["skipped"] = set(window.session_skips["alpha notes"])
             seen["masks_after_ignore"] = next(item.exclusions for item in load_profiles() if item.name == "alpha notes")
             other = preview.store.get_item(0)
-            preview._add_exclusion(other)
+            exclusion_dialog = preview._add_exclusion(other)
+            seen["default_exclusion"] = exclusion_dialog.exclusion_entry.get_text()
+            exclusion_dialog.exclusion_save_button.emit("clicked")
             seen["saved_masks"] = next(item.exclusions for item in load_profiles() if item.name == "alpha notes")
             self.quit()
 
@@ -1546,6 +1548,337 @@ def test_different_profiles_scan_in_parallel_but_same_profile_cannot_duplicate(t
     assert sorted(seen["batch_sizes"]) == [1, 2]
 
 
+def test_preview_actions_stay_visible_and_folder_controls_have_a_toolbar(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestPreviewControlLayout")
+    profile = Profile(name="control layout", left="/sample/left", right="/sample/right")
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            preview.set_default_size(1100, 720)
+            preview.present()
+            settle()
+            seen["maximized"] = preview.is_maximized()
+            preview.unmaximize()
+            preview.set_default_size(1100, 720)
+            settle()
+            close = next(button for button in _buttons(preview) if button.get_label() == "Close")
+            seen["scrolled_actions"] = [
+                widget.get_ancestor(Gtk.ScrolledWindow) is not None
+                for widget in (preview.shown, preview.completion_action, preview.start_button, close)
+            ]
+            seen["folder_controls_scrolled"] = preview.expand_all_button.get_ancestor(Gtk.ScrolledWindow) is not None
+            tree_controls = getattr(preview, "tree_controls", preview.expand_all_button.get_parent())
+            seen["folder_heading"] = any(
+                isinstance(widget, Gtk.Label) and widget.get_text() == "Folders"
+                for widget in _widgets(tree_controls)
+            )
+            seen["window_height"] = preview.get_height()
+            left_point = preview.left_status.translate_coordinates(preview, 0, 0)
+            right_point = preview.right_status.translate_coordinates(preview, 0, 0)
+            seen["side_columns"] = preview.sides_header.get_orientation() == Gtk.Orientation.HORIZONTAL
+            seen["side_positions"] = right_point[0] > left_point[0] and right_point[1] == left_point[1]
+            for name, widget in (("start", preview.start_button), ("close", close)):
+                point = widget.translate_coordinates(preview, 0, 0)
+                seen[f"{name}_bottom"] = point[1] + widget.get_height() if point is not None else -1
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["scrolled_actions"] == [False, False, False, False]
+    assert seen["folder_controls_scrolled"] is False
+    assert seen["folder_heading"] is True
+    assert seen["side_columns"] is True and seen["side_positions"] is True
+    assert seen["maximized"] is True
+    assert 0 < seen["start_bottom"] <= seen["window_height"]
+    assert 0 < seen["close_bottom"] <= seen["window_height"]
+
+
+def test_scan_totals_share_the_row_with_current_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanInfoLayout")
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            scan = ScanWindow(owner)
+            scan.present()
+            settle()
+            seen["shared_row"] = scan.count_label.get_parent() is scan.scan_info
+            seen["path_shared"] = scan.file_label.get_parent().get_parent() is scan.scan_info
+            path_point = scan.file_label.translate_coordinates(scan, 0, 0)
+            count_point = scan.count_label.translate_coordinates(scan, 0, 0)
+            seen["totals_right"] = count_point[0] > path_point[0]
+            seen["totals_top"] = count_point[1] <= path_point[1]
+            scan.allow_close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["shared_row"] is True and seen["path_shared"] is True
+    assert seen["totals_right"] is True and seen["totals_top"] is True
+
+
+def test_exclusion_dialog_supports_editing_path_name_and_global_scope(tmp_path, monkeypatch):
+    from ofs.settings import global_exclusion_mode, global_exclusions, set_global_exclusion_mode, set_global_exclusions
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestExclusionChoices")
+    profile = Profile(name="exclusion choices", left="/sample/left", right="/sample/right", imported_settings=True, note="Keep this note")
+    set_global_exclusions(["existing.tmp"])
+    set_global_exclusion_mode(ExclusionMode.DONT_COPY)
+    save_profile(profile)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            row = PlanRow(Change("nested/cache/item.tmp", Action.COPY_LEFT_TO_RIGHT, "new", 12))
+            dialog = preview._ask_exclusion(row)
+            seen["path_default"] = dialog.exclusion_entry.get_text()
+            dialog.exclusion_save_button.emit("clicked")
+            seen["profile_rule"] = list(profile.exclusions)
+
+            before_global = profile.to_json()
+            dialog = preview._ask_exclusion(row)
+            dialog.exclusion_scope.set_selected(1)
+            seen["scope_preserves_path"] = dialog.exclusion_entry.get_text()
+            dialog.exclusion_match.set_selected(1)
+            seen["name_default"] = dialog.exclusion_entry.get_text()
+            dialog.exclusion_entry.set_text("shared-name")
+            dialog.exclusion_save_button.emit("clicked")
+            seen["global_rules"] = global_exclusions()
+            seen["global_mode"] = global_exclusion_mode()
+            seen["profile_preserved"] = profile.to_json() == before_global
+
+            dialog = preview._ask_exclusion("other/data", folder=True)
+            seen["folder_default"] = dialog.exclusion_entry.get_text()
+            dialog.exclusion_entry.set_text("  ")
+            dialog.exclusion_save_button.emit("clicked")
+            seen["blank_saved"] = "other/data" in global_exclusions() or not global_exclusions()
+            next(button for button in _buttons(dialog) if button.get_label() == "Cancel").emit("clicked")
+            seen["after_cancel"] = global_exclusions()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["path_default"] == "nested/cache/item.tmp"
+    assert seen["profile_rule"] == ["nested/cache/item.tmp"]
+    assert seen["scope_preserves_path"] == "nested/cache/item.tmp"
+    assert seen["name_default"] == "item.tmp"
+    assert seen["global_rules"] == ["existing.tmp", "shared-name"]
+    assert seen["global_mode"] == ExclusionMode.DONT_COPY
+    assert seen["profile_preserved"] is True
+    assert seen["folder_default"] == "other/data"
+    assert seen["blank_saved"] is False
+    assert seen["after_cancel"] == ["existing.tmp", "shared-name"]
+
+
+def test_global_exclusion_filters_live_displayed_queued_and_final_rows(tmp_path, monkeypatch):
+    from ofs.settings import global_exclusions, set_global_exclusions
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestGlobalLiveExclusion")
+    set_global_exclusions(["existing.tmp"])
+    save_profile(Profile(name="live global", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            profile = owner.profiles[0]
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            preview._queue_entry("Left", "reports/drop/first.tmp", FileStat(10, 1))
+            preview._drain_pending()
+            preview._queue_entry("Left", "reports/drop/queued.tmp", FileStat(20, 1))
+            dialog = preview._ask_exclusion("reports/drop", folder=True)
+            dialog.exclusion_scope.set_selected(1)
+            dialog.exclusion_save_button.emit("clicked")
+            seen["visible_removed"] = all(not item.change.rel.startswith("reports/drop/") for item in preview.rows)
+            preview._drain_pending()
+            preview._queue_entry("Right", "reports/drop/future.tmp", FileStat(30, 2))
+            preview._drain_pending()
+            seen["queued_and_future_removed"] = all(not item.change.rel.startswith("reports/drop/") for item in preview.rows)
+            result = ScanResult([
+                Change("reports/drop/final.tmp", Action.COPY_LEFT_TO_RIGHT, "new", 40),
+                Change("reports/keep.txt", Action.COPY_LEFT_TO_RIGHT, "new", 50),
+            ])
+            preview._finish_scan(JobResult(profile, result, None))
+            seen["final_changes"] = [change.rel for change in result.changes]
+            seen["final_rows"] = [row.change.rel for row in preview.rows]
+            seen["global_rules"] = global_exclusions()
+            seen["profile_rules"] = list(profile.exclusions)
+            progress.allow_close()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["visible_removed"] is True
+    assert seen["queued_and_future_removed"] is True
+    assert seen["final_changes"] == ["reports/keep.txt"]
+    assert seen["final_rows"] == ["reports/keep.txt"]
+    assert seen["global_rules"] == ["existing.tmp", "reports/drop"]
+    assert seen["profile_rules"] == []
+
+
+def test_size_filter_scope_and_sort_change_display_but_not_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestSizeReviewControls")
+    changes = [
+        Change("small/tiny.txt", Action.COPY_LEFT_TO_RIGHT, "new", 10),
+        Change("small/big.txt", Action.COPY_LEFT_TO_RIGHT, "new", 2000),
+        Change("other/mid.txt", Action.COPY_LEFT_TO_RIGHT, "new", 1500),
+        Change("other/tiny.txt", Action.DELETE_RIGHT, "extra", 50),
+    ]
+    profile = Profile(name="size review", left="/sample/left", right="/sample/right", mode=SyncMode.EXACT_MIRROR)
+    save_profile(profile)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult(changes), None))
+            original = [(row.change.rel, row.change.action, row.change.size) for row in preview.rows]
+            preview.size_amount.set_text("1")
+            preview.size_units.set_selected(1)
+            preview.size_apply.set_selected(2)
+            seen["all_level_files"] = sorted(preview._file_iters)
+            preview._set_size_scope(None, "small")
+            seen["scoped_files"] = sorted(preview._file_iters)
+            preview.sort_results.set_selected(1)
+            seen["largest_first"] = preview.tree_store.get_value(preview.tree_store.get_iter_first(), 0).split()[0]
+            preview.sort_results.set_selected(2)
+            seen["smallest_first"] = preview.tree_store.get_value(preview.tree_store.get_iter_first(), 0).split()[0]
+            seen["plan_after_review"] = [(row.change.rel, row.change.action, row.change.size) for row in preview.rows]
+            seen["before"] = original
+            seen["shown"] = preview.shown.get_text()
+            seen["review_hint"] = preview.size_hint.get_text()
+            seen["minimum_before_invalid"] = preview.review_min_size
+            preview.size_amount.insert_text("x", -1)
+            seen["invalid_text"] = preview.size_amount.get_text()
+            seen["invalid_preserved_minimum"] = preview.review_min_size
+            seen["invalid_hint"] = preview.size_hint.get_text()
+            preview.size_amount.set_text("0")
+            preview._set_size_scope(None, "")
+            seen["restored_files"] = sorted(preview._file_iters)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["all_level_files"] == ["other/mid.txt", "small/big.txt"]
+    assert seen["scoped_files"] == ["other/mid.txt", "other/tiny.txt", "small/big.txt"]
+    assert seen["largest_first"] == "small"
+    assert seen["smallest_first"] == "other"
+    assert seen["plan_after_review"] == seen["before"]
+    assert "minimum 1 KiB" in seen["shown"]
+    assert "Display only" in seen["review_hint"] and "Start" in seen["review_hint"]
+    assert seen["invalid_preserved_minimum"] == 1024, seen
+    assert "non-negative number" in seen["invalid_hint"]
+    assert seen["restored_files"] == ["other/mid.txt", "other/tiny.txt", "small/big.txt", "small/tiny.txt"]
+
+def test_live_folder_size_filter_recalculates_aggregates_without_changing_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLiveSizeFolders")
+    save_profile(Profile(name="live sizes", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            profile = owner.profiles[0]
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            preview.size_amount.set_text("1")
+            preview.size_units.set_selected(1)
+            preview.size_apply.set_selected(1)
+            preview.sort_results.set_selected(1)
+            preview._queue_entry("Left", "tiny/small.bin", FileStat(512, 1))
+            preview._drain_pending()
+            seen["small_folder_hidden"] = "tiny" not in preview._folder_iters
+            preview._queue_entry("Left", "big/large.bin", FileStat(2048, 1))
+            preview._drain_pending()
+            seen["large_folder_size"] = preview.tree_store.get_value(preview._folder_iters["big"], 1)
+            seen["large_folder_first"] = preview.tree_store.get_value(preview.tree_store.get_iter_first(), 0).split()[0]
+            preview._queue_entry("Left", "tiny/second.bin", FileStat(1024, 1))
+            preview._drain_pending()
+            seen["grown_folder_size"] = preview.tree_store.get_value(preview._folder_iters["tiny"], 1)
+            seen["display_plan"] = {row.change.rel: row.change.size for row in preview.rows}
+            result = ScanResult([
+                Change("tiny/small.bin", Action.COPY_LEFT_TO_RIGHT, "new", 512),
+                Change("tiny/second.bin", Action.COPY_LEFT_TO_RIGHT, "new", 1024),
+                Change("big/large.bin", Action.COPY_LEFT_TO_RIGHT, "new", 2048),
+            ])
+            preview._finish_scan(JobResult(profile, result, None))
+            seen["final_plan"] = [row.change.rel for row in preview.rows]
+            seen["final_sorted_root"] = preview.tree_store.get_value(preview.tree_store.get_iter_first(), 0).split()[0]
+            progress.allow_close()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["small_folder_hidden"] is True
+    assert seen["large_folder_size"] == "2 KB"
+    assert seen["large_folder_first"] == "big"
+    assert seen["grown_folder_size"] == "1.5 KB"
+    assert seen["display_plan"] == {"tiny/small.bin": 512, "tiny/second.bin": 1024, "big/large.bin": 2048}
+    assert seen["final_plan"] == ["tiny/small.bin", "tiny/second.bin", "big/large.bin"]
+    assert seen["final_sorted_root"] == "big"
+
+
+def test_large_size_sort_still_uses_batched_tree_and_preserves_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLargeSizeReview")
+    changes = [
+        Change(f"group-{index // 50:02d}/file-{index:04d}.bin", Action.COPY_LEFT_TO_RIGHT, "new", index + 1)
+        for index in range(1200)
+    ]
+    profile = Profile(name="large size review", left="/sample/left", right="/sample/right")
+    save_profile(profile)
+    seen = {}
+
+    def settle():
+        ticks = 0
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+            ticks += 1
+        return ticks
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult(changes), None))
+            preview.size_amount.set_text("1000")
+            preview.size_units.set_selected(0)
+            preview.sort_results.set_selected(1)
+            seen["ticks"] = settle()
+            seen["rows"] = len(preview.rows)
+            seen["planned"] = len(preview._planned())
+            seen["visible"] = len(preview._file_iters)
+            seen["first_folder"] = preview.tree_store.get_value(preview.tree_store.get_iter_first(), 0).split()[0]
+            seen["minimum_visible"] = min(row.change.size for row in preview.rows if row.change.rel in preview._file_iters)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["ticks"] >= 5
+    assert seen["rows"] == 1200
+    assert seen["planned"] == 1200
+    assert seen["visible"] == 201
+    assert seen["first_folder"] == "group-23"
+    assert seen["minimum_visible"] == 1000
+
+
 def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, monkeypatch):
     from ofs.apply import RunControl
 
@@ -1604,7 +1937,8 @@ def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, mon
     assert seen["remaining"] == 0
     assert seen["guarded_copy"] is True
     assert "Copy whole new folder…" not in seen["folder_actions"]
-    assert "Add this folder to exclusions" in seen["folder_actions"]
+    assert "Add exclusion…" in seen["folder_actions"]
+    assert "Filter sizes under this folder" in seen["folder_actions"]
     assert seen["rescan"] == {"partial job"}
 
 
@@ -2057,6 +2391,46 @@ def test_multi_edit_cache_size_and_fractional_age_controls(tmp_path, monkeypatch
     assert all(profile.min_age_days == 0.25 for profile in seen["age"])
     assert "1.5 KB" in seen["size_placeholder"]
     assert all(profile.min_size == 1536 for profile in seen["size"])
+
+
+def test_normal_activate_restores_main_window_instead_of_blank_scan_panel(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestActivateMainWindow")
+    save_profile(Profile(name="activation", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            owner.present()
+            preview = owner._preview(JobResult(owner.profiles[0], ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            # Reproduce a detached old-style progress top-level left active.
+            progress.present()
+            settle()
+            seen["before"] = isinstance(self.props.active_window, ScanWindow)
+            owner.close()
+            settle()
+            super().do_activate()
+            settle()
+            seen["main_active"] = isinstance(self.props.active_window, MainWindow)
+            seen["main_visible"] = self.props.active_window.get_visible()
+            seen["blank_hidden"] = not progress.get_visible()
+            progress.allow_close()
+            preview._finish_scan(JobResult(owner.profiles[0], ScanResult([]), None))
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["before"] is True
+    assert seen["main_active"] is True
+    assert seen["main_visible"] is True
+    assert seen["blank_hidden"] is True
 
 
 def test_new_windows_share_profile_locks_but_keep_independent_state(tmp_path, monkeypatch):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shlex
@@ -1883,6 +1884,8 @@ class Preview(Gtk.Window):
         self.owner = owner
         self.job = job
         self.set_default_size(1100, 720)
+        # Large trees benefit from the available screen; smaller restored windows stay usable.
+        self.maximize()
         assert job.result is not None
         if job.result.listing:
             self.rows = list(job.result.listing)
@@ -1933,6 +1936,10 @@ class Preview(Gtk.Window):
         self._replace_tree_model = False
         self._visible_changes = {}
         self._tree_default_expanded = True
+        self._tree_sort = "name"
+        self.review_min_size = 0
+        self.review_size_target = "files"
+        self.review_size_scope = ""
         self._tree_state_overrides: dict[str, bool] = {}
         self._folder_iters = {}
         self._record_tree_state = True
@@ -1950,17 +1957,30 @@ class Preview(Gtk.Window):
         sidebar.set_margin_top(12)
         sidebar.set_margin_bottom(12)
         sidebar.set_size_request(220, -1)
-        tree_controls = Gtk.Box(spacing=6)
-        self.expand_all_button = Gtk.Button(label="Expand all")
+        self.tree_controls = Gtk.Box(spacing=6)
+        self.tree_controls.set_margin_start(12)
+        self.tree_controls.set_margin_end(12)
+        self.tree_controls.set_margin_bottom(8)
+        folder_heading = Gtk.Label(label="Folders", xalign=0, css_classes=["heading"])
+        folder_heading.set_margin_end(6)
+        self.tree_controls.append(folder_heading)
+        self.expand_all_button = Gtk.Button()
+        _button_icon(self.expand_all_button, "Expand all", "pan-down-symbolic")
         self.expand_all_button.set_tooltip_text("Show every nested folder and file")
         self.expand_all_button.connect("clicked", self._set_tree_expanded, True)
-        self.collapse_all_button = Gtk.Button(label="Collapse all")
+        self.collapse_all_button = Gtk.Button()
+        _button_icon(self.collapse_all_button, "Collapse all", "pan-up-symbolic")
         self.collapse_all_button.set_tooltip_text("Show only top-level folders and files; the copy plan does not change")
         self.collapse_all_button.connect("clicked", self._set_tree_expanded, False)
         for button in (self.expand_all_button, self.collapse_all_button):
-            _compact(button)
-            tree_controls.append(button)
-        sidebar.append(tree_controls)
+            self.tree_controls.append(button)
+        sort_heading = Gtk.Label(label="Sort by", xalign=0)
+        sort_heading.set_margin_start(12)
+        self.tree_controls.append(sort_heading)
+        self.sort_results = Gtk.DropDown.new_from_strings(["Name", "Size: largest first", "Size: smallest first"])
+        self.sort_results.set_tooltip_text("Order folders and files within each parent; the synchronization plan does not change")
+        self.sort_results.connect("notify::selected", self._sort_tree)
+        self.tree_controls.append(self.sort_results)
         sidebar.append(self._radios("State", "state", [
             ("Show All", "all"),
             ("Affected", "affected"),
@@ -1974,6 +1994,7 @@ class Preview(Gtk.Window):
             ("One Side", "one"),
             ("Both Sides", "both"),
         ]))
+        sidebar.append(self._size_filter_controls())
         sidebar.append(self._radios("Moved Files", "moved", [
             ("Show", "show"),
             ("Show Only", "only"),
@@ -1989,15 +2010,20 @@ class Preview(Gtk.Window):
             ("Show Only", "only"),
             ("Don't Show", "hide"),
         ]))
+        action_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        action_area.set_margin_start(12)
+        action_area.set_margin_end(8)
+        action_area.set_margin_top(8)
+        action_area.set_margin_bottom(12)
         self.shown = Gtk.Label(xalign=0, wrap=True)
-        sidebar.append(self.shown)
-        sidebar.append(Gtk.Label(label="After completed copy", xalign=0, css_classes=["dim-label"]))
+        action_area.append(self.shown)
+        action_area.append(Gtk.Label(label="After completed copy", xalign=0, css_classes=["dim-label"]))
         self.completion_action = Gtk.DropDown.new_from_strings(["Do nothing", "Sleep", "Hibernate", "Shut down"])
         self.completion_values = ["none", "sleep", "hibernate", "shutdown"]
         self.completion_action.set_selected(0)
         self.completion_action.set_sensitive(not self.partial)
         self.completion_action.set_tooltip_text("Apply only after this copy finishes without errors or cancellation. Other active copies prevent the power action.")
-        sidebar.append(self.completion_action)
+        action_area.append(self.completion_action)
         self.start_button = Gtk.Button(label="Rescan" if self.partial else "Start")
         self.start_button.add_css_class("suggested-action")
         self.start_button.connect("clicked", self._start_or_rescan)
@@ -2005,11 +2031,11 @@ class Preview(Gtk.Window):
             self.start_button.set_tooltip_text("After adding exclusions, start a complete fresh scan. Partial results cannot be copied or deleted.")
         close_button = Gtk.Button(label="Close")
         close_button.connect("clicked", lambda *_: self.close())
-        sidebar.append(self.start_button)
-        sidebar.append(close_button)
+        action_area.append(self.start_button)
+        action_area.append(close_button)
 
-        self.left_status = Gtk.Label(xalign=0)
-        self.right_status = Gtk.Label(xalign=0)
+        self.left_status = Gtk.Label(xalign=0, wrap=True)
+        self.right_status = Gtk.Label(xalign=0, wrap=True)
         header = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         header.set_margin_start(12)
         header.set_margin_end(12)
@@ -2022,8 +2048,10 @@ class Preview(Gtk.Window):
                 css_classes=["result-warn"],
             )
             header.append(warning)
-        header.append(self._side_head("Left", self.job.profile.left, self.left_status))
-        header.append(self._side_head("Right", self.job.profile.right, self.right_status))
+        self.sides_header = Gtk.Box(homogeneous=True, spacing=24)
+        self.sides_header.append(self._side_head("Left", self.job.profile.left, self.left_status))
+        self.sides_header.append(self._side_head("Right", self.job.profile.right, self.right_status))
+        header.append(self.sides_header)
 
         self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool])
         self.view = Gtk.TreeView(model=self.tree_store)
@@ -2069,6 +2097,7 @@ class Preview(Gtk.Window):
         listing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.operation_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         listing.append(header)
+        listing.append(self.tree_controls)
         listing.append(self.operation_area)
         listing.append(scrolled)
         listing.append(bar)
@@ -2076,7 +2105,11 @@ class Preview(Gtk.Window):
         sidebar_scroll = Gtk.ScrolledWindow(vexpand=True)
         sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         sidebar_scroll.set_child(sidebar)
-        root.append(sidebar_scroll)
+        sidebar_column = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        sidebar_column.append(sidebar_scroll)
+        sidebar_column.append(Gtk.Separator())
+        sidebar_column.append(action_area)
+        root.append(sidebar_column)
         listing.set_hexpand(True)
         root.append(listing)
         self.set_child(root)
@@ -2086,6 +2119,8 @@ class Preview(Gtk.Window):
         assert panel is not None
         # Keep the existing controls/callbacks, but present them above the tree.
         progress.set_child(None)
+        # The old top-level must never reappear as an empty standalone window.
+        progress.hide()
         expander = Gtk.Expander(label=title, expanded=True)
         expander.set_tooltip_text("Show or collapse operation details without changing the plan")
         expander.set_child(panel)
@@ -2149,7 +2184,10 @@ class Preview(Gtk.Window):
         with self.owner._session_rule_lock(profile.name):
             return (
                 rel in self.owner.session_skips.get(profile.name, set())
-                or any_match(rel, profile.exclusions + self.owner.session_masks.get(profile.name, []))
+                or any_match(
+                    rel,
+                    profile.exclusions + list(self._live_permanent_masks) + self.owner.session_masks.get(profile.name, []),
+                )
             )
 
     def _drain_pending(self) -> bool:
@@ -2180,7 +2218,11 @@ class Preview(Gtk.Window):
                 if existing.on_left and existing.on_right:
                     existing.change = Change(rel, Action.ASK, "Seen on both sides; awaiting comparison", stat.size)
             self._append_pending(existing)
-        self._refresh_detail()
+        if self._live_refill_pending:
+            self._live_refill_pending = False
+            self._refill()
+        else:
+            self._refresh_detail()
         self.shown.set_text(f"Discovered preview: {len(self._live_seen)} paths. Pending rows make no copy/delete decision.")
         self._refresh_tree_layout()
         if self._scan_active and self._entry_queue:
@@ -2196,6 +2238,10 @@ class Preview(Gtk.Window):
         if not matches(row, **self.filters):
             return
         self._visible_changes[rel] = row.change
+        if self._scan_active and (self.review_min_size or self._tree_sort != "name"):
+            # Folder aggregates and sibling order depend on all newly queued rows.
+            self._live_refill_pending = True
+            return
         if self._scan_active and (self._pending_tree or self._replace_tree_model):
             self._live_refill_pending = True
             return
@@ -2305,6 +2351,93 @@ class Preview(Gtk.Window):
         box.append(status)
         return box
 
+    def _size_filter_controls(self) -> Gtk.Expander:
+        self.size_filter_expander = Gtk.Expander(label="Size filter", expanded=False)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        minimum = Gtk.Box(spacing=4)
+        self.size_amount = Gtk.Entry(text="0", width_chars=7, max_width_chars=7)
+        self.size_amount.set_tooltip_text("Minimum size; zero or an empty value disables the size filter")
+        self.size_units = Gtk.DropDown.new_from_strings(["B", "KiB", "MiB", "GiB", "TiB"])
+        self.size_units.set_selected(2)
+        minimum.append(self.size_amount)
+        minimum.append(self.size_units)
+        box.append(Gtk.Label(label="Minimum size", xalign=0))
+        box.append(minimum)
+        box.append(Gtk.Label(label="Apply threshold to", xalign=0))
+        self.size_apply = Gtk.DropDown.new_from_strings(["Files only", "Folders only", "Files and folders"])
+        self.size_apply.set_tooltip_text("Folder size is the total of its currently visible files")
+        box.append(self.size_apply)
+        self.size_scope_label = Gtk.Label(label="Location: whole preview", xalign=0, wrap=True)
+        self.size_scope_label.set_tooltip_text("Right-click a folder to apply the size threshold only below that folder")
+        box.append(self.size_scope_label)
+        self.size_scope_clear = Gtk.Button(label="Use whole preview")
+        _compact(self.size_scope_clear)
+        self.size_scope_clear.set_visible(False)
+        self.size_scope_clear.connect("clicked", self._set_size_scope, "")
+        box.append(self.size_scope_clear)
+        self.size_hint = Gtk.Label(label="Display only; Start runs the whole plan.", xalign=0, wrap=True)
+        self.size_hint.add_css_class("dim-label")
+        box.append(self.size_hint)
+        self.size_amount.connect("changed", self._size_review_changed)
+        self.size_units.connect("notify::selected", self._size_review_changed)
+        self.size_apply.connect("notify::selected", self._size_review_changed)
+        self.size_filter_expander.set_child(box)
+        return self.size_filter_expander
+
+    def _size_review_changed(self, *_args) -> None:
+        try:
+            amount = float(self.size_amount.get_text().strip() or 0)
+        except ValueError:
+            self.size_hint.set_text("Enter a non-negative number, such as 1.5 MiB.")
+            return
+        if not math.isfinite(amount) or amount < 0:
+            self.size_hint.set_text("Enter a non-negative number, such as 1.5 MiB.")
+            return
+        factors = (1, 1024, 1024**2, 1024**3, 1024**4)
+        self.review_min_size = int(amount * factors[self.size_units.get_selected()])
+        self.review_size_target = ("files", "folders", "all")[self.size_apply.get_selected()]
+        self.size_hint.set_text("Display only; Start runs the whole plan.")
+        self._refill()
+
+    def _set_size_scope(self, _button, folder: str = "") -> None:
+        self.review_size_scope = folder.strip().strip("/")
+        location = f"below {self.review_size_scope}" if self.review_size_scope else "whole preview"
+        self.size_scope_label.set_text(f"Location: {location}")
+        self.size_scope_clear.set_visible(bool(self.review_size_scope))
+        self.size_filter_expander.set_expanded(True)
+        self._refill()
+
+    def _sort_tree(self, _drop_down, _param) -> None:
+        self._tree_sort = ("name", "size_desc", "size_asc")[self.sort_results.get_selected()]
+        self._refill()
+
+    def _tree_nodes(self, visible: list[Listed]):
+        nodes = build_tree(
+            visible,
+            minimum_size=self.review_min_size,
+            size_target=self.review_size_target,
+            size_scope=self.review_size_scope,
+            sort_by=self._tree_sort,
+        )
+        if (self.review_min_size or self._tree_sort != "name") and len(visible) >= _PREVIEW_ASYNC_THRESHOLD:
+            self._pending_tree = []
+            self._replace_tree_model = False
+            self._live_refill_pending = False
+            self._visible_changes = {row.change.rel: row.change for row in visible}
+            self.store = Gio.ListStore.new(PlanRow)
+            self._reset_tree_model()
+            self._refresh_detail()
+            GLib.idle_add(self._fill_pending_sized_tree, nodes, self._fill_generation, priority=GLib.PRIORITY_DEFAULT_IDLE)
+            return nodes
+        return nodes
+
+    def _fill_pending_sized_tree(self, nodes, generation: int) -> bool:
+        if generation != self._fill_generation:
+            return False
+        self._pending_tree = [(None, node) for node in reversed(nodes)]
+        GLib.idle_add(self._fill_some, generation)
+        return False
+
     def _set_tree_expanded(self, _button, expanded: bool) -> None:
         self._tree_default_expanded = expanded
         self._tree_state_overrides.clear()
@@ -2364,6 +2497,9 @@ class Preview(Gtk.Window):
     def _refill(self) -> None:
         self._fill_generation += 1
         visible = [row for row in self.rows if matches(row, **self.filters)]
+        if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD and (self.review_min_size or self._tree_sort != "name"):
+            self._tree_nodes(visible)
+            return
         if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD:
             # Keep planning cheap, and yield GTK after each small render batch.
             self._pending_tree = [(None, node) for node in reversed(build_tree(visible))]
@@ -2376,6 +2512,9 @@ class Preview(Gtk.Window):
         self._pending_tree = []
         self._replace_tree_model = False
         self._live_refill_pending = False
+        if (self.review_min_size or self._tree_sort != "name") and len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD:
+            self._tree_nodes([row for row in self.rows if matches(row, **self.filters)])
+            return
         self.store = Gio.ListStore.new(PlanRow)
         for row in visible:
             self.store.append(PlanRow(row.change))
@@ -2406,7 +2545,7 @@ class Preview(Gtk.Window):
             for child in node.children:
                 add(current, child)
 
-        for node in build_tree(visible):
+        for node in self._tree_nodes(visible):
             add(None, node)
         self._refresh_tree_layout()
 
@@ -2486,7 +2625,8 @@ class Preview(Gtk.Window):
             ("L ◀── R", "Copy this folder right to left", lambda: self._set_folder_direction(rel, "left")),
             ("Open left folder", "", lambda: open_uri(Path(self.job.profile.left) / rel)),
             ("Open right folder", "", lambda: open_uri(Path(self.job.profile.right) / rel)),
-            ("Add this folder to exclusions", "", lambda: self._save_exclusion(rel)),
+            ("Add exclusion…", "Choose profile/global, a relative path or name, and edit the rule", lambda: self._ask_exclusion(rel, folder=True)),
+            ("Filter sizes under this folder", "Review only; change what is displayed without changing the synchronization plan", lambda: self._set_size_scope(None, rel)),
             ("Ignore this folder for this run", "", lambda: self._ignore_folder(rel)),
         ]
         for text, tip, callback in actions:
@@ -2520,9 +2660,7 @@ class Preview(Gtk.Window):
             ("Open right file", "", lambda: self._open_side("right", row.change.rel, folder=False)),
             ("Open left folder", "", lambda: self._open_side("left", row.change.rel, folder=True)),
             ("Open right folder", "", lambda: self._open_side("right", row.change.rel, folder=True)),
-            ("Add this name to exclusions", "", lambda: self._add_exclusion(row)),
-            ("Apply exclusion mask…", "", lambda: self._ask_exclusion(row)),
-            ("Remove this folder from profile", "", lambda: self._exclude_folder(row)),
+            ("Add exclusion…", "Choose profile/global, a relative path or name, and edit the rule", lambda: self._ask_exclusion(row)),
             ("Ignore for this run", "", lambda: self._ignore(row, extension=False)),
             ("Ignore this extension for this run", "", lambda: self._ignore(row, extension=True)),
             ("Compare files", "", lambda: self._compare(row)),
@@ -2552,34 +2690,74 @@ class Preview(Gtk.Window):
     def _open_side(self, side: str, rel: str, *, folder: bool) -> None:
         open_uri(self._side_path(side, rel, folder=folder))
 
-    def _add_exclusion(self, row: PlanRow) -> None:
-        self._save_exclusion(Path(row.change.rel).name)
+    def _add_exclusion(self, row: PlanRow) -> Gtk.Window:
+        return self._ask_exclusion(row)
 
-    def _ask_exclusion(self, row: PlanRow) -> None:
-        window = Gtk.Window(transient_for=self, modal=True, title="Exclusion mask")
-        window.set_default_size(520, 180)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        entry = Gtk.Entry(text=Path(row.change.rel).name)
-        entry.set_hexpand(True)
+    def _ask_exclusion(self, selected: PlanRow | str, *, folder: bool | None = None) -> Gtk.Window:
+        rel = selected if isinstance(selected, str) else selected.change.rel
+        rel = rel.replace("\\", "/").strip().strip("/")
+        is_folder = isinstance(selected, str) if folder is None else folder
+        window = Gtk.Window(transient_for=self, modal=True, title="Add Exclusion")
+        window.set_default_size(620, 300)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        box.set_margin_start(18)
+        box.set_margin_end(18)
+        box.set_margin_top(18)
+        box.set_margin_bottom(18)
+        form = Gtk.Grid(column_spacing=12, row_spacing=10)
+        scope = Gtk.DropDown.new_from_strings(["This profile", "Global exclusions (all profiles)"])
+        match = Gtk.DropDown.new_from_strings(["Full relative path", "Folder or file name (any location)"])
+        entry = Gtk.Entry(text=rel, hexpand=True, activates_default=True)
+        window.exclusion_scope = scope
+        window.exclusion_match = match
+        window.exclusion_entry = entry
+        for row, (text, widget) in enumerate((("Save to", scope), ("Match", match), ("Exclusion rule", entry))):
+            form.attach(Gtk.Label(label=text, xalign=0), 0, row, 1, 1)
+            form.attach(widget, 1, row, 1, 1)
+        box.append(form)
         hint = Gtk.Label(xalign=0, wrap=True)
-        hint.set_text("Saved on this profile. *.tmp matches a name in any folder. A path such as cache/tmp matches that folder and everything under it.")
         hint.add_css_class("dim-label")
-        save = Gtk.Button(label="Save")
+        box.append(hint)
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_args: window.close())
+        save = Gtk.Button(label="Add Exclusion", css_classes=["suggested-action"])
+        window.exclusion_save_button = save
+        buttons.append(cancel)
+        buttons.append(save)
+        box.append(buttons)
+
+        def explain(*_args) -> None:
+            global_scope = scope.get_selected() == 1
+            target = "all profiles" if global_scope else f"profile {self.job.profile.name}"
+            if match.get_selected() == 0:
+                text = f"Relative to each profile root; matches this exact {'folder and its contents' if is_folder else 'path'} on both sides in {target}."
+            else:
+                text = f"Matches this folder or file name at any depth, on both sides in {target}."
+            if global_scope and global_exclusion_mode() == ExclusionMode.DONT_COPY:
+                text += " Global Don't Copy still applies; rescan to calculate any Exact Mirror deletions."
+            hint.set_text(text)
+
+        def choose_match(*_args) -> None:
+            entry.set_text(rel.rsplit("/", 1)[-1] if match.get_selected() else rel)
+            explain()
 
         def on_save(*_args) -> None:
-            self._save_exclusion(entry.get_text())
-            window.close()
+            if not entry.get_text().strip():
+                hint.set_text("Enter a relative path or folder/file name before saving.")
+                return
+            if self._save_exclusion(entry.get_text(), scope="global" if scope.get_selected() else "profile"):
+                window.close()
 
+        match.connect("notify::selected", choose_match)
+        scope.connect("notify::selected", explain)
         save.connect("clicked", on_save)
-        box.append(entry)
-        box.append(hint)
-        box.append(save)
+        entry.connect("activate", on_save)
         window.set_child(box)
+        window.set_default_widget(save)
+        explain()
         window.present()
+        return window
 
     def _exclude_folder(self, row: PlanRow) -> None:
         rel = row.change.rel.replace("\\", "/")
@@ -2588,19 +2766,35 @@ class Preview(Gtk.Window):
             return
         self._save_exclusion(rel.rsplit("/", 1)[0])
 
-    def _save_exclusion(self, mask: str) -> None:
+    def _save_exclusion(self, mask: str, *, scope: str = "profile") -> bool:
         mask = mask.strip()
         if not mask:
-            return
+            return False
         profile = self.job.profile
         with self.owner._session_rule_lock(profile.name):
             self._live_permanent_masks.add(mask)
-            if mask not in profile.exclusions:
-                profile.exclusions.append(mask)
-                save_profile(profile)
-        self.rows = [item for item in self.rows if not path_matches(item.change.rel, mask)]
+            if scope == "global":
+                masks = global_exclusions()
+                if mask not in masks:
+                    set_global_exclusions([*masks, mask])
+            else:
+                if mask not in profile.exclusions:
+                    profile.exclusions.append(mask)
+                    save_profile(profile)
+            mode = global_exclusion_mode() if scope == "global" else profile.exclusion_mode
+
+        def allowed(relative: str) -> bool:
+            return not path_matches(relative, mask)
+
+        self.rows = [
+            item for item in self.rows
+            if allowed(item.change.rel) and (not item.change.dest_rel or allowed(item.change.dest_rel))
+        ]
         self._refill()
         self.owner.reload()
+        if mode == ExclusionMode.DONT_COPY:
+            self.detail.set_text(f"Saved exclusion: {mask}. Rescan to calculate any Exact Mirror Don't Copy deletions.")
+        return True
 
     def _compare(self, row: PlanRow) -> None:
         left = self._side_path("left", row.change.rel, folder=False)
@@ -2701,7 +2895,16 @@ class Preview(Gtk.Window):
         self.left_status.set_text(left)
         self.right_status.set_text(right)
         visible = [self.store.get_item(index) for index in range(self.store.get_n_items())]
-        self.shown.set_text(shown_summary([Listed(item.change, False, False) for item in visible]))
+        summary = shown_summary([Listed(item.change, False, False) for item in visible])
+        if self.review_min_size:
+            target = {"files": "files", "folders": "folders", "all": "files and folders"}[self.review_size_target]
+            location = self.review_size_scope or "whole preview"
+            amount = self.size_amount.get_text().strip() or "0"
+            unit = self.size_units.get_selected_item().get_string()
+            summary += f"; minimum {amount} {unit} for {target} ({location})"
+        if self._tree_sort != "name":
+            summary += "; size-sorted within folders"
+        self.shown.set_text(summary)
         if self.partial:
             text = "Review only. Add permanent or session exclusions, then Rescan. Partial plans cannot be applied."
         else:
@@ -2997,8 +3200,13 @@ class ScanWindow(Gtk.Window):
         for side in ("start", "end", "top", "bottom"):
             getattr(root, f"set_margin_{side}")(16)
         root.append(heading)
-        root.append(path_box)
-        root.append(self.count_label)
+        self.scan_info = Gtk.Box(spacing=16)
+        path_box.set_hexpand(True)
+        self.count_label.set_hexpand(True)
+        self.count_label.set_valign(Gtk.Align.START)
+        self.scan_info.append(path_box)
+        self.scan_info.append(self.count_label)
+        root.append(self.scan_info)
         root.append(self.bar)
         root.append(buttons)
         self.set_child(root)
@@ -3734,9 +3942,16 @@ class SfsApplication(Gtk.Application):
 
     def do_activate(self) -> None:
         apply_appearance(theme())
-        window = self.props.active_window
+        active = self.props.active_window
+        window = active if isinstance(active, MainWindow) else next(
+            (candidate for candidate in self.get_windows() if isinstance(candidate, MainWindow)),
+            None,
+        )
         if window is None:
             window = MainWindow(self)
+        for candidate in self.get_windows():
+            if isinstance(candidate, (ScanWindow, ProgressWindow)) and candidate.get_child() is None:
+                candidate.hide()
         window.present()
 
     def do_command_line(self, command_line: Gio.ApplicationCommandLine) -> int:

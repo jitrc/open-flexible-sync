@@ -53,6 +53,52 @@ def test_tree_shows_folder_size_and_status():
     assert "copy_l2r" not in tree[1].status
 
 
+def test_tree_size_filter_sort_and_scope_do_not_change_source_rows():
+    rows = [
+        _row("small/tiny.txt", Action.COPY_LEFT_TO_RIGHT, 10, right=False),
+        _row("small/big.txt", Action.COPY_RIGHT_TO_LEFT, 1500, left=False),
+        _row("large/mid.txt", Action.COPY_LEFT_TO_RIGHT, 500, right=False),
+        _row("large/big.txt", Action.MOVE_ON_RIGHT, 4000),
+        _row("root_small.txt", Action.DELETE_RIGHT, 20, left=False),
+        _row("root_big.txt", Action.UNCHANGED, 100),
+    ]
+    before = [(row.change.rel, row.change.action, row.change.size) for row in rows]
+
+    name_tree = build_tree(rows)
+    assert [node.name for node in name_tree[:2]] == ["large", "small"]
+    assert name_tree[0].size == 4500
+
+    largest = build_tree(rows, sort_by="size_desc")
+    assert [node.name for node in largest[:2]] == ["large", "small"]
+    assert largest[0].children[0].name == "big.txt"
+    smallest = build_tree(rows, sort_by="size_asc")
+    assert [node.name for node in smallest[:2]] == ["small", "large"]
+    assert smallest[1].children[0].name == "mid.txt"
+
+    files = build_tree(rows, minimum_size=1000)
+    assert [node.name for node in files] == ["large", "small"]
+    assert files[0].size == 4000 and [node.name for node in files[0].children] == ["big.txt"]
+    assert files[1].size == 1500 and [node.name for node in files[1].children] == ["big.txt"]
+
+    folders = build_tree(rows, minimum_size=2000, size_target="folders")
+    assert folders[0].name == "large"
+    assert [node.name for node in folders[0].children] == ["big.txt", "mid.txt"]
+    assert {node.name for node in folders if node.is_file} == {"root_big.txt", "root_small.txt"}
+
+    every_level = build_tree(rows, minimum_size=2000, size_target="all")
+    assert [node.name for node in every_level] == ["large"]
+    assert every_level[0].size == 4000
+    assert [node.name for node in every_level[0].children] == ["big.txt"]
+
+    scoped = build_tree(rows, minimum_size=1000, size_target="all", size_scope="small")
+    remaining = {node.rel for node in scoped for node in node.children}
+    assert "small/big.txt" in remaining
+    assert "small/tiny.txt" not in remaining
+    assert "large/mid.txt" in remaining
+    assert {node.name for node in scoped if node.is_file} == {"root_big.txt", "root_small.txt"}
+    assert [(row.change.rel, row.change.action, row.change.size) for row in rows] == before
+
+
 def test_pointing_a_folder_keeps_unchanged_files():
     copied = Change("1960s/a.mp3", Action.COPY_LEFT_TO_RIGHT, "left is newer", 10, "elsewhere")
     asked = Change("1960s/b.mp3", Action.ASK, "both changed", 4)

@@ -11,8 +11,12 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Collapsible scan and copy panels provide more result-tree room. Completed operations are marked and use subdued rows without changing the plan.
 - Closing an active live preview requests safe cancellation rather than losing track of the running operation.
 - Live discovery now explicitly shows cache off, fresh discovery, uncached override, and actual cache reuse per destination side. Copy status shows when metadata has been invalidated.
+- Scan-result exclusions offer editable profile/global scope and full-relative-path/name matching. Global additions preserve existing rules and mode and are rechecked against displayed, queued, future, and final live rows.
+- Display-only minimum-size filtering supports files, folders, or both and whole-preview/selected-folder scope. Name and size sorting retain the directory hierarchy and plan.
 
 ### Changed
+
+- Scan comparisons open maximized, with two-column Left/Right headers and side-by-side current-path/statistics. Restored windows keep Start, Close, counts, and power choices pinned while filters scroll independently.
 
 - Exact Mirror automatic move inference now requires the same filename. Different basenames remain explicit copy and delete operations.
 
@@ -23,6 +27,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Scan/copy completion is ordered with its progress events and cannot starve behind lower-priority live-list rendering. Late statistics cannot re-enable completed scan controls.
 - Live rule sharing keeps the worker's final plan consistent with visible Ignore/Exclude actions; cached metadata and history-derived deletes are filtered appropriately.
 - Detached-overview copying retains profile lock/release and cross-window power safeguards; the common copy entry point directly refuses incomplete or partial scans.
+- Normal activation restores or creates the main OFS window rather than focusing an empty detached scan-control window.
 
 ## [0.3.0] - 2026-11-12
 
