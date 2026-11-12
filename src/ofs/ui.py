@@ -19,6 +19,7 @@ gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
+from ofs.archive import older_files, restore_version
 from ofs.compare import Action, Change, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
 from ofs.history import delete_history
@@ -106,6 +107,9 @@ class MainWindow(Gtk.ApplicationWindow):
         new_button.connect("clicked", self._new_profile)
         replace_button = Gtk.Button(label="Replace paths")
         replace_button.connect("clicked", self._replace_paths)
+        restore_button = Gtk.Button(label="Restore Older…")
+        restore_button.set_tooltip_text("Restore an archived file to a separate folder")
+        restore_button.connect("clicked", self._restore_older)
         self.run_button = Gtk.Button(label="Run checked")
         self.run_button.add_css_class("run")
         self.run_button.connect("clicked", self._run)
@@ -114,6 +118,7 @@ class MainWindow(Gtk.ApplicationWindow):
         header.pack_start(import_button)
         header.pack_start(new_button)
         header.pack_start(replace_button)
+        header.pack_start(restore_button)
         header.pack_end(self.run_button)
         header.pack_end(settings_button)
 
@@ -428,6 +433,20 @@ class MainWindow(Gtk.ApplicationWindow):
             f"Imported {count} profiles. Filled direction, Exact Mirror, and timestamp rules that were still at the defaults.{globals_note}"
         )
 
+    def _restore_older(self, *_args) -> None:
+        checked = [profile for profile in self.profiles if profile.name in self.checked]
+        if len(checked) == 1:
+            profile = checked[0]
+        elif checked:
+            self.status.set_text("Check only the profile whose Older files should be restored.")
+            return
+        elif len(self.profiles) == 1:
+            profile = self.profiles[0]
+        else:
+            self.status.set_text("Check the profile whose Older files should be restored. Disabled profiles can be restored from Edit.")
+            return
+        RestoreWindow(self, profile).present()
+
     def _new_profile(self, *_args) -> None:
         self._editor(None)
 
@@ -644,6 +663,7 @@ class MainWindow(Gtk.ApplicationWindow):
         ignore_time = Gtk.CheckButton(label="Ignore the timestamp", active=bool(rules and rules.ignore_timestamp))
         larger = Gtk.CheckButton(label="A larger file is newer", active=bool(rules and rules.larger_is_newer))
         older = Gtk.CheckButton(label="Keep replaced files under Older", active=bool(existing and existing.keep_older))
+        keep_deleted = Gtk.CheckButton(label="Recoverable deletions — move deleted files under Older", active=bool(existing and existing.keep_deleted))
         older_keep = Gtk.SpinButton.new_with_range(1, 99, 1)
         older_keep.set_value(1 if existing is None or existing.older_keep < 1 else existing.older_keep)
         binary = Gtk.CheckButton(label="Binary compare when size matches (reads file bytes)", active=bool(existing and existing.binary_compare))
@@ -676,11 +696,17 @@ class MainWindow(Gtk.ApplicationWindow):
             grid.attach(Gtk.Label(label=label, xalign=1), 0, index, 1, 1)
             grid.attach(widget, 1, index, 1, 1)
         checks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for widget in (small, hour, seconds, ignore_time, larger, older, binary, track, disabled):
+        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, disabled):
             checks.append(widget)
         grid.attach(checks, 1, len(rows), 1, 1)
         save = Gtk.Button(label="Save")
-        grid.attach(save, 1, len(rows) + 1, 1, 1)
+        editor_buttons = Gtk.Box(spacing=8)
+        editor_buttons.append(save)
+        if existing is not None:
+            restore = Gtk.Button(label="Restore Older…")
+            restore.connect("clicked", lambda *_: RestoreWindow(self, existing).present())
+            editor_buttons.append(restore)
+        grid.attach(editor_buttons, 1, len(rows) + 1, 1, 1)
 
         def on_save(*_args) -> None:
             from ofs.model import TimestampRules
@@ -707,6 +733,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     larger_is_newer=larger.get_active(),
                 ),
                 keep_older=older.get_active(),
+                keep_deleted=keep_deleted.get_active(),
                 older_keep=int(older_keep.get_value()),
                 min_size=parse_size(min_size.get_text()),
                 max_size=parse_size(max_size.get_text()),
@@ -2031,6 +2058,74 @@ class ResultsWindow(Gtk.Window):
         scrolled.set_child(view)
         window.set_child(scrolled)
         window.present()
+
+
+class RestoreWindow(Gtk.Window):
+    """Recover selected Older versions into a separate, explicitly chosen tree."""
+
+    def __init__(self, owner: MainWindow, profile: Profile):
+        super().__init__(transient_for=owner, modal=True, title=f"Restore Older — {profile.name}")
+        self.profile = profile
+        self.entries = older_files(profile)
+        self.set_default_size(760, 580)
+        self.status = Gtk.Label(xalign=0, wrap=True)
+        self.destination = Gtk.Entry(hexpand=True, placeholder_text="Restore destination outside both synchronized folders")
+        self.rows: list[tuple[Gtk.CheckButton, object]] = []
+        listing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        for item in self.entries:
+            date = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(item.modified))
+            check = Gtk.CheckButton(label=f"{item.label} · {format_bytes(item.size)} · {date}")
+            check.set_hexpand(True)
+            listing.append(check)
+            self.rows.append((check, item))
+        select_all = Gtk.CheckButton(label="Select all archived files")
+        select_all.connect("toggled", self._select_all)
+        scroll = Gtk.ScrolledWindow(vexpand=True)
+        scroll.set_child(listing)
+        restore = Gtk.Button(label="Restore selected")
+        restore.add_css_class("suggested-action")
+        restore.connect("clicked", self._restore)
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.set_text("Copies the selected archived versions into the destination. Existing files there are not overwritten; the Older archive and live sync folders stay unchanged.")
+        hint.add_css_class("dim-label")
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(root, f"set_margin_{side}")(12)
+        if not self.entries:
+            self.status.set_text("No archived files. Enable Older or Recoverable deletions in the profile before a run that needs them.")
+        root.append(self.status)
+        root.append(scroll)
+        root.append(select_all)
+        root.append(hint)
+        root.append(self.destination)
+        root.append(restore)
+        self.set_child(root)
+
+    def _select_all(self, button: Gtk.CheckButton) -> None:
+        for check, _item in self.rows:
+            check.set_active(button.get_active())
+
+    def _restore(self, *_args) -> None:
+        destination_text = self.destination.get_text().strip()
+        if not destination_text:
+            self.status.set_text("Choose a restore folder outside both synchronized folders first.")
+            return
+        selected = [item for check, item in self.rows if check.get_active()]
+        if not selected:
+            self.status.set_text("Select at least one archived file to restore.")
+            return
+        restored = 0
+        errors = []
+        for item in selected:
+            try:
+                restore_version(item, Path(destination_text).expanduser())
+                restored += 1
+            except (OSError, ValueError) as exc:
+                errors.append(f"{item.relative}: {exc}")
+        if errors:
+            self.status.set_text(f"Restored {restored}. Errors: " + " | ".join(errors[:8]))
+        else:
+            self.status.set_text(f"Restored {restored} file(s) to {destination_text}. The originals remain under Older.")
 
 
 class SfsApplication(Gtk.Application):

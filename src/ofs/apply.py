@@ -41,6 +41,7 @@ class ApplyReport:
     folders_created: int = 0
     folders_removed: int = 0
     versions_removed: int = 0
+    deletions_archived: int = 0
     cancelled: bool = False
 
     def summary(self) -> str:
@@ -285,9 +286,9 @@ def apply_plan(
             elif change.action == Action.COPY_RIGHT_TO_LEFT:
                 _copy(profile, right_root, left_root, change.rel, report, "left", control, progress, limiter)
             elif change.action == Action.DELETE_RIGHT:
-                _delete(right_root, change.rel, report, "right")
+                _delete(profile, right_root, change.rel, report, "right")
             elif change.action == Action.DELETE_LEFT:
-                _delete(left_root, change.rel, report, "left")
+                _delete(profile, left_root, change.rel, report, "left")
             elif change.action == Action.MOVE_ON_RIGHT:
                 _move(right_root, change.rel, change.dest_rel, report, "right")
             elif change.action == Action.MOVE_ON_LEFT:
@@ -485,7 +486,7 @@ def _restore_older(profile: Profile, dest_root: Path, dest: Path, rel: str) -> N
             source.replace(slots[index])
 
 
-def _delete(root: Path, rel: str, report: ApplyReport, side: str) -> None:
+def _delete(profile: Profile, root: Path, rel: str, report: ApplyReport, side: str) -> None:
     target = _inside(root, rel)
     if not target.exists():
         return
@@ -493,6 +494,10 @@ def _delete(root: Path, rel: str, report: ApplyReport, side: str) -> None:
         raise ApplyError("refusing to delete a directory entry from a file plan")
     size = target.stat().st_size
     parent = target.parent
-    target.unlink()
+    if profile.keep_deleted:
+        _keep_older(profile, root, target, rel, report)
+        report.deletions_archived += 1
+    else:
+        target.unlink()
     _count(report, side, "delete", size)
     _prune_empty(root, parent, report)

@@ -12,7 +12,7 @@ from ofs.jobs import JobResult
 from ofs.model import Profile, SyncMode
 from ofs.scan import scan_profile
 from ofs.store import load_profiles, save_profile
-from ofs.ui import ExclusionEditor, MainWindow, ProgressWindow, ResultsWindow, ScanWindow, SfsApplication
+from ofs.ui import ExclusionEditor, MainWindow, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
 
 
 def _group_titles(box) -> list[tuple[str, bool]]:
@@ -388,6 +388,42 @@ def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatc
     assert saved.disabled is True
     assert seen["disabled_rows"] == ["selection job"]
     assert saved.name == "selection job"
+
+
+def test_restore_browser_recovers_a_disabled_profiles_older_file(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestRestore")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    archive = right / "Older" / "folder" / "saved.txt"
+    left.mkdir()
+    archive.parent.mkdir(parents=True)
+    archive.write_text("recover me")
+    save_profile(Profile(name="disabled job", left=str(left), right=str(right), disabled=True))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            editor = window._editor(window.profiles[0])
+            seen["editor_restore"] = "Restore Older…" in _button_labels(editor)
+            browser = RestoreWindow(window, window.profiles[0])
+            select_all = next(item for item in _widgets(browser) if isinstance(item, Gtk.CheckButton) and item.get_label() == "Select all archived files")
+            select_all.set_active(True)
+            destination = tmp_path / "restored"
+            browser.destination.set_text(str(destination))
+            browser._restore()
+            seen["target"] = (destination / "folder" / "saved.txt").read_text()
+            seen["archive"] = archive.read_text()
+            seen["live_missing"] = not (right / "folder" / "saved.txt").exists()
+            seen["status"] = browser.status.get_text()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["editor_restore"] is True
+    assert seen["target"] == seen["archive"] == "recover me"
+    assert seen["live_missing"] is True
+    assert "Restored 1" in seen["status"]
 
 
 def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tmp_path, monkeypatch):

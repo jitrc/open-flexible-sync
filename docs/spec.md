@@ -45,6 +45,7 @@ In the tree now:
 
 - Overview grouped by the first word only when several profiles share that prefix; one-off names stay ungrouped. Groups start collapsed, with a distinct heading and a profile count. Expand all, Collapse all, search, status filters, and an optional available-paths filter. Search opens the groups that match. Filtering does not change the checked set. Each group heading has a tri-state checkbox that selects or clears visible enabled members only; disabled and filtered-out members are never implicitly included (an already checked hidden member is left unchanged). Fixed columns show profile, last run, result, and actions. Run checked scans the checked profiles. Each row has its own Run, plus Edit, Duplicate, and Delete.
 - Include and exclusion masks, Don't Copy versus Ignore Totally, Standard versus Exact Mirror, direction, the timestamp rules that are on the editor, optional binary compare, and `Older` for replaced files. A lone `*` stored in an imported exclusion list matches no path.
+- Recoverable deletions, opt-in and sharing the Older retention count. Older files from either side can be listed with path, version, size, and timestamp, then copied atomically to a separate chosen restore folder. Restore never overwrites an existing file or writes into either live sync root.
 - Optional per-profile file database: first run records only; a later run can turn a rename into a move and a real deletion into a delete, and it asks when both sides changed. A database stored for different folders is ignored. Duplicate leaves the database behind. Delete removes the profile and the database, and leaves the folders on disk.
 - Global exclusions in Settings, ignored totally on every profile. The old defaults apply until that list is saved. Per-profile minimum and maximum size and age. Files outside those limits are skipped: listed under Skipped, not copied, and not deleted. `Older` keeps one replaced file, or the number set on the profile, and drops the oldest beyond that.
 - A scan window while the folders are read: current profile/path, discovered, filtered, and added counts, pause, Skip Rest, and Cancel. Skip Rest abandons only the current profile and continues with the next checked profile; Cancel stops the checked batch. Neither skipped nor stopped scans open a partial comparison or write a log.
@@ -222,7 +223,9 @@ A failed item is recorded without preventing unrelated later items. Results offe
 
 The config uses an “Older” tree. The product must be able to keep replaced files as older versions:
 
-- Move the previous file into a folder named `Older`, either as a subfolder of each folder or as one tree that recreates the relative path.
+- Move the previous file into a folder named `Older`, either as a subfolder of each folder or as one tree that recreates the relative path. OFS uses one tree recreating the relative path.
+- Optionally archive files removed by a delete action in the same tree, including rotated versions and retention. The default remains permanent deletion so imported/existing profiles do not change behavior.
+- Restore versions from either side to a separate folder outside both synchronized roots. Restoration is atomic, preserves metadata, refuses existing destination files, and never silently arms the live sync trees.
 - Cap how many older versions to keep, and prune past that cap.
 - Filename versioning is a second, later mechanism (timestamp in the name, `(2)` before the extension). The folder named `Older` is the one OFS keeps.
 

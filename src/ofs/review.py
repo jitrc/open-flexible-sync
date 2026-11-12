@@ -372,6 +372,8 @@ def result_rows(report) -> list[tuple[str, str, str]]:
     ]
     if getattr(report, "versions_removed", 0):
         rows.append(("Older versions removed", str(report.versions_removed), ""))
+    if getattr(report, "deletions_archived", 0):
+        rows.append(("Deletions archived", str(report.deletions_archived), ""))
     return rows
 
 

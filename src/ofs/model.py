@@ -69,6 +69,7 @@ class Profile:
     mode: SyncMode = SyncMode.STANDARD
     timestamps: TimestampRules = field(default_factory=TimestampRules)
     keep_older: bool = False
+    keep_deleted: bool = False
     older_folder: str = "Older"
     older_keep: int = 1
     min_size: int = 0
@@ -104,6 +105,7 @@ class Profile:
             "mode": self.mode.value,
             "timestamps": self.timestamps.to_json(),
             "keep_older": self.keep_older,
+            "keep_deleted": self.keep_deleted,
             "older_folder": self.older_folder,
             "older_keep": self.older_keep,
             "min_size": self.min_size,
@@ -134,6 +136,7 @@ class Profile:
             mode=SyncMode(data.get("mode", SyncMode.STANDARD)),
             timestamps=TimestampRules.from_json(data.get("timestamps")),
             keep_older=bool(data.get("keep_older", False)),
+            keep_deleted=bool(data.get("keep_deleted", False)),
             older_folder=data.get("older_folder") or "Older",
             older_keep=_positive_int(data.get("older_keep"), 1),
             min_size=_positive_int(data.get("min_size"), 0),

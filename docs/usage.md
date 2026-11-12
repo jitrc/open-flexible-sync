@@ -12,7 +12,9 @@ Edit can set direction, Copy only (no deletions), Exact Mirror, the exclusion mo
 
 Settings holds the compare command and the global exclusions. Until you save that list, every profile ignores `.DS_Store`, `Thumbs.db`, `Temporary Internet Files`, `*.tmp`, `*.$$$`, and `*.~*`. Global masks are ignored totally. Saving an empty list turns them off.
 
-`Older versions` is how many replaced copies to keep. The newest is `Older/<path>`. The one before it is `Older/<path>.~1~`, and so on. The default is one, which replaces the previous archive. A higher number rotates them and deletes the oldest.
+`Older versions` is how many copies to keep. The newest is `Older/<path>`. The one before it is `Older/<path>.~1~`, and so on. The default is one, which replaces the previous archive. A higher number rotates them and deletes the oldest. Keep replaced files and Recoverable deletions are separate opt-in settings. The latter moves files deleted by synchronization into the same `Older` tree; unchanged empty folders are not archived. Import and existing profiles keep permanent deletion as the default.
+
+Restore Older… in the header operates on the one checked profile. It is also available in Edit, including for a disabled profile. Select file versions and choose a destination outside both synchronized folders. Restoration copies the archive atomically without changing the archive or either live tree. Existing destination files are not overwritten. Relative paths are recreated below the chosen folder.
 
 A missing folder fails that job with "volume is not mounted" and the next checked job still runs. Left volume and Right volume, when filled in, name the disk that must hold that folder. The scan does not start when that label is absent or when the folder is on a different disk.
 
