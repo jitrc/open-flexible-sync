@@ -20,6 +20,7 @@ from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
 from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
 from ofs.archive import older_files, restore_version
+from ofs.bulk import FIELDS, bulk_preview, prepare_bulk_edit
 from ofs.compare import Action, Change, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
 from ofs.history import delete_history
@@ -107,6 +108,9 @@ class MainWindow(Gtk.ApplicationWindow):
         new_button.connect("clicked", self._new_profile)
         replace_button = Gtk.Button(label="Replace paths")
         replace_button.connect("clicked", self._replace_paths)
+        multi_button = Gtk.Button(label="Multi Edit…")
+        multi_button.set_tooltip_text("Change one setting on all checked profiles")
+        multi_button.connect("clicked", self._multi_edit)
         restore_button = Gtk.Button(label="Restore Older…")
         restore_button.set_tooltip_text("Restore an archived file to a separate folder")
         restore_button.connect("clicked", self._restore_older)
@@ -118,6 +122,7 @@ class MainWindow(Gtk.ApplicationWindow):
         header.pack_start(import_button)
         header.pack_start(new_button)
         header.pack_start(replace_button)
+        header.pack_start(multi_button)
         header.pack_start(restore_button)
         header.pack_end(self.run_button)
         header.pack_end(settings_button)
@@ -454,6 +459,41 @@ class MainWindow(Gtk.ApplicationWindow):
         profile = self._profile(name)
         if profile is not None:
             self._editor(profile)
+
+    def _multi_edit(self, *_args) -> BulkEditWindow | None:
+        chosen = [profile for profile in self.profiles if profile.name in self.checked]
+        if not chosen:
+            self.status.set_text("Check the profiles to change with Multi Edit.")
+            return None
+        window = BulkEditWindow(self, chosen)
+        window.present()
+        return window
+
+    def _confirm_bulk_edit(self, changed: list[Profile], field: str, window: BulkEditWindow) -> None:
+        dialog = Gtk.AlertDialog()
+        dialog.set_message(f"Apply Multi Edit to {len(changed)} profiles?")
+        dialog.set_detail(bulk_preview(changed, field))
+        dialog.set_buttons(["Cancel", "Apply Changes"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+        dialog.choose(self, None, self._bulk_chosen, changed, window)
+
+    def _bulk_chosen(self, dialog, result, changed: list[Profile], window: BulkEditWindow) -> None:
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if choice == 1:
+            self._save_bulk_changes(changed)
+            window.close()
+
+    def _save_bulk_changes(self, changed: list[Profile]) -> None:
+        for profile in changed:
+            save_profile(profile)
+            if profile.disabled:
+                self.checked.discard(profile.name)
+        self.reload()
+        self.status.set_text(f"Multi Edit updated {len(changed)} profiles. Unselected fields were preserved.")
 
     def _replace_paths(self, *_args) -> None:
         chosen = [profile for profile in self.profiles if profile.name in self.checked]
@@ -2058,6 +2098,79 @@ class ResultsWindow(Gtk.Window):
         scrolled.set_child(view)
         window.set_child(scrolled)
         window.present()
+
+
+class BulkEditWindow(Gtk.Window):
+    """Change one field; show the exact profile/value set before saving."""
+
+    def __init__(self, owner: MainWindow, profiles: list[Profile]):
+        super().__init__(transient_for=owner, modal=True, title=f"Multi Edit — {len(profiles)} checked profiles")
+        self.owner = owner
+        self.profiles = profiles
+        self.set_default_size(640, 310)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(root, f"set_margin_{side}")(12)
+        self.field = Gtk.DropDown.new_from_strings([item.label for item in FIELDS])
+        self.field.connect("notify::selected", lambda *_: self._show_value())
+        self.value_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        self.value_widget: Gtk.Widget | None = None
+        self.mask_operation: Gtk.DropDown | None = None
+        self.preview = Gtk.Label(xalign=0, wrap=True)
+        self.preview.set_text(f"{len(profiles)} checked profiles. Choose one field to change; other fields are preserved.")
+        self.apply = Gtk.Button(label="Preview Changes…")
+        self.apply.add_css_class("suggested-action")
+        self.apply.connect("clicked", self._preview_changes)
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.set_text("Masks can be added to each profile without removing existing rules, or can replace that profile's whole list. Confirmation is required before anything is saved.")
+        hint.add_css_class("dim-label")
+        for label, widget in (("Field to change", self.field), ("New value", self.value_box)):
+            root.append(Gtk.Label(label=label, xalign=0))
+            root.append(widget)
+        root.append(self.preview)
+        root.append(hint)
+        root.append(self.apply)
+        self.set_child(root)
+        self._show_value()
+
+    def _show_value(self) -> None:
+        while child := self.value_box.get_first_child():
+            self.value_box.remove(child)
+        definition = FIELDS[self.field.get_selected()]
+        self.mask_operation = None
+        if definition.kind == "choice":
+            self.value_widget = Gtk.DropDown.new_from_strings([label for label, _value in definition.options])
+        elif definition.kind == "number":
+            self.value_widget = Gtk.SpinButton.new_with_range(1, 99, 1)
+            self.value_widget.set_value(1)
+        else:
+            self.value_widget = Gtk.Entry(hexpand=True)
+            self.value_widget.set_placeholder_text("One or several masks separated by ; or newline")
+            self.mask_operation = Gtk.DropDown.new_from_strings(["Add to existing masks", "Replace existing masks"])
+            self.value_box.append(self.mask_operation)
+        self.value_box.append(self.value_widget)
+
+    def _preview_changes(self, *_args) -> None:
+        definition = FIELDS[self.field.get_selected()]
+        if definition.kind == "choice":
+            assert isinstance(self.value_widget, Gtk.DropDown)
+            value = definition.options[self.value_widget.get_selected()][1]
+        elif definition.kind == "number":
+            assert isinstance(self.value_widget, Gtk.SpinButton)
+            value = self.value_widget.get_value_as_int()
+        else:
+            assert isinstance(self.value_widget, Gtk.Entry)
+            value = self.value_widget.get_text()
+        add_masks = self.mask_operation is not None and self.mask_operation.get_selected() == 0
+        try:
+            changed = prepare_bulk_edit(self.profiles, definition.key, value, add_masks=add_masks)
+        except ValueError as exc:
+            self.preview.set_text(str(exc))
+            return
+        if not changed:
+            self.preview.set_text("No profile would change.")
+            return
+        self.owner._confirm_bulk_edit(changed, definition.key, self)
 
 
 class RestoreWindow(Gtk.Window):

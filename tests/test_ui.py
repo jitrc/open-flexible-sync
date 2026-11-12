@@ -426,6 +426,42 @@ def test_restore_browser_recovers_a_disabled_profiles_older_file(tmp_path, monke
     assert "Restored 1" in seen["status"]
 
 
+def test_multi_edit_previews_then_saves_only_the_checked_field(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestBulk")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    save_profile(Profile(name="alpha one", left=str(left), right=str(right), exclusions=["keep"]))
+    save_profile(Profile(name="alpha two", left=str(left), right=str(right)))
+    save_profile(Profile(name="beta other", left=str(left), right=str(right)))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window.checked = {"alpha one", "alpha two"}
+            dialog = window._multi_edit()
+            dialog.field.set_selected(1)  # Sync mode
+            dialog.value_widget.set_selected(1)  # Exact Mirror
+            window._confirm_bulk_edit = lambda changed, field, source: seen.update(changed=changed, field=field, source=source)
+            dialog.apply.emit("clicked")
+            changed = seen["changed"]
+            seen["unchanged_before_save"] = [item.mode for item in load_profiles()]
+            window._save_bulk_changes(changed)
+            seen["saved"] = {item.name: item for item in load_profiles()}
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["field"] == "mode"
+    assert seen["unchanged_before_save"] == [SyncMode.STANDARD] * 3
+    assert seen["saved"]["alpha one"].mode == SyncMode.EXACT_MIRROR
+    assert seen["saved"]["alpha two"].mode == SyncMode.EXACT_MIRROR
+    assert seen["saved"]["beta other"].mode == SyncMode.STANDARD
+    assert seen["saved"]["alpha one"].exclusions == ["keep"]
+
+
 def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestCopyProgress")

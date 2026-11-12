@@ -54,7 +54,7 @@ In the tree now:
 - Optional left and right volume labels. A scan refuses a folder that is not on that disk and continues with the next checked profile. Replace paths asks, then rewrites the checked profiles and removes their file databases.
 - A GNOME launcher named OFS starts this app. It is separate from the 32-bit program and does not use that program's DPI lock.
 
-Still open, and still in the sections below: scheduler, unattended runs, multi-edit of one field across profiles, partial files, ZIP, internet protocols, and mail. Import reads direction, Standard versus Exact Mirror, and the four timestamp checkboxes. Versioning on or off is not a varying per-profile flag in that `.cfg`, so `Older` stays off. The comparison filters hide rows. Start still runs the whole remaining plan.
+Still open, and still in the sections below: scheduler, unattended runs, partial files, ZIP, internet protocols, and mail. Import reads direction, Standard versus Exact Mirror, and the four timestamp checkboxes. Versioning on or off is not a varying per-profile flag in that `.cfg`, so `Older` stays off. The comparison filters hide rows. Start still runs the whole remaining plan.
 
 ## Requirements added after the first draft
 
@@ -251,7 +251,7 @@ View Log opens that run's text file. A confirmed Start that begins copying write
 ### Profile editing
 
 - Create, rename, delete, disable, enable, and duplicate a profile. Disabled is persistent, visible in Overview, and blocks GUI/CLI runs without deleting the profile, its paths, history, or results. A future scheduler must honor it too. Duplicate copies the job and leaves the file database behind. Delete asks, then removes the profile and its database. The folders on disk stay.
-- Edit the same field across many selected profiles (the old Multi Edit).
+- Multi Edit changes one field across the checked profiles. It previews affected names and resulting values, requires confirmation, and leaves every unselected field unchanged. Include/exclusion masks offer Add (union without duplicate additions) or Replace. Disabling removes affected names from the run selection; disabled profiles can still be re-enabled through Multi Edit.
 - Search and replace a path across the checked profiles. Ask before saving. Remove the file databases of the profiles that change, because those databases still describe the old folders.
 - Import and export the new profile format.
 - Optional password before editing profiles.
