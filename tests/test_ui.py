@@ -14,7 +14,7 @@ from ofs.jobs import JobResult
 from ofs.model import Profile, SyncMode
 from ofs.scan import ScanResult, scan_profile
 from ofs.store import load_profiles, save_profile
-from ofs.ui import ExclusionEditor, MainWindow, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
+from ofs.ui import ExclusionEditor, MainWindow, Preview, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
 
 
 def _group_titles(box) -> list[tuple[str, bool]]:
@@ -398,6 +398,47 @@ def test_exclusion_editor_splits_edits_removes_and_tests_rules(tmp_path, monkeyp
     assert seen["include_jpg"] == "Included by: *.jpg"
     assert seen["include_txt"] == "Not included; this path is left out."
     assert seen["include_rules"] == ["*.jpg", "*.png"]
+
+
+def test_profile_editor_tabs_keep_save_and_cancel_fixed(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestEditorTabs")
+    save_profile(Profile(name="original", left="/sample/left", right="/sample/right", note="preserve"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            editor = window._editor(window.profiles[0])
+            seen["tabs"] = [editor.editor_tabs.get_tab_label_text(editor.editor_tabs.get_nth_page(index)) for index in range(editor.editor_tabs.get_n_pages())]
+            buttons = [item for item in _widgets(editor.editor_footer) if isinstance(item, Gtk.Button)]
+            seen["footer"] = [item.get_label() for item in buttons]
+            seen["save_parent_is_footer"] = next(item for item in buttons if item.get_label() == "Save").get_parent() is editor.editor_footer
+            editor.editor_tabs.set_current_page(2)
+            name = next(item for item in _widgets(editor) if isinstance(item, Gtk.Entry) and item.get_text() == "original")
+            name.set_text("cancelled")
+            next(item for item in buttons if item.get_label() == "Cancel").emit("clicked")
+            seen["cancel_closed"] = not editor.get_visible()
+            seen["after_cancel"] = load_profiles()[0].name
+
+            editor = window._editor(window.profiles[0])
+            editor.editor_tabs.set_current_page(3)
+            name = next(item for item in _widgets(editor) if isinstance(item, Gtk.Entry) and item.get_text() == "original")
+            name.set_text("renamed")
+            save = next(item for item in _widgets(editor.editor_footer) if isinstance(item, Gtk.Button) and item.get_label() == "Save")
+            save.emit("clicked")
+            seen["save_closed"] = not editor.get_visible()
+            seen["saved"] = load_profiles()[0].to_json()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["tabs"] == ["General", "Filters", "Comparison", "Recovery & Safety"]
+    assert "Cancel" in seen["footer"] and "Save" in seen["footer"] and "Restore Older…" in seen["footer"]
+    assert seen["save_parent_is_footer"] is True
+    assert seen["cancel_closed"] is True and seen["after_cancel"] == "original"
+    assert seen["save_closed"] is True and seen["saved"]["name"] == "renamed"
+    assert seen["saved"]["left"] == "/sample/left" and seen["saved"]["right"] == "/sample/right"
+    assert seen["saved"]["note"] == "preserve"
 
 
 def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatch):
@@ -1800,6 +1841,62 @@ def test_new_windows_share_profile_locks_but_keep_independent_state(tmp_path, mo
     assert seen["release_allows_other_window"] is True
     assert seen["command_status"] == 0 and seen["command_errors"] == []
     assert seen["command_window_count"] == 3
+
+
+def test_closing_main_window_keeps_scan_and_results_alive(tmp_path, monkeypatch):
+    import threading
+    import ofs.ui as ui
+    from ofs.scan import ScanResult
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestClosedOverview")
+    save_profile(Profile(name="alpha", left="/sample/left", right="/sample/right"))
+    started = threading.Event()
+    release = threading.Event()
+    seen = {}
+
+    def controlled_scan(profiles, **_kwargs):
+        started.set()
+        assert release.wait(5)
+        return [JobResult(profiles[0], ScanResult(changes=[]), None)]
+
+    monkeypatch.setattr(ui, "run_checked", controlled_scan)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window.present()
+            window._run_names({"alpha"})
+            scan = next(item for item in self.get_windows() if isinstance(item, ScanWindow))
+            window.close()
+            seen["overview_closed"] = not window.get_visible()
+            seen["scan_has_application"] = scan.get_application() is self
+            seen["scan_survives"] = scan.get_visible() and not scan._allow_close
+            seen["claimed_while_closed"] = self.profile_is_active("alpha")
+            release.set()
+            GLib.timeout_add(20, self.watch)
+
+        def watch(self):
+            preview = next((item for item in self.get_windows() if isinstance(item, Preview)), None)
+            if preview is None:
+                return True
+            seen["preview_has_application"] = preview.get_application() is self
+            seen["preview_visible"] = preview.get_visible()
+            seen["released_after_scan"] = not self.profile_is_active("alpha")
+            self.quit()
+            return False
+
+    assert App().run(None) == 0
+    assert started.is_set()
+    assert seen == {
+        "overview_closed": True,
+        "scan_has_application": True,
+        "scan_survives": True,
+        "claimed_while_closed": True,
+        "preview_has_application": True,
+        "preview_visible": True,
+        "released_after_scan": True,
+    }
 
 
 def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):

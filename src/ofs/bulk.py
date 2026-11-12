@@ -33,7 +33,7 @@ FIELDS = (
     BulkField("direction", "Direction", "choice", (("Left to right", Direction.LEFT_TO_RIGHT), ("Right to left", Direction.RIGHT_TO_LEFT), ("Both directions", Direction.BOTH))),
     BulkField("mode", "Sync mode", "choice", (("Copy only (no deletions)", SyncMode.STANDARD), ("Exact Mirror", SyncMode.EXACT_MIRROR))),
     BulkField("exclusion_mode", "Exclusion mode", "choice", (("Ignore Totally", ExclusionMode.IGNORE_TOTALLY), ("Don't Copy", ExclusionMode.DONT_COPY))),
-    BulkField("cache_destination", "Destination metadata cache (5 minutes)", "choice", _ON_OFF),
+    BulkField("cache_destination", "Destination metadata cache (persistent)", "choice", _ON_OFF),
     BulkField("group_override", "Custom group / subgroups", "text"),
     BulkField("left_volume", "Left volume label", "text"),
     BulkField("right_volume", "Right volume label", "text"),

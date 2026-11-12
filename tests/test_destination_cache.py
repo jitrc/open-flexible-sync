@@ -5,7 +5,7 @@ from pathlib import Path
 import ofs.cache as cache_module
 import ofs.scan as scan_module
 from ofs.apply import apply_plan
-from ofs.cache import MAX_AGE_SECONDS, destination_sides, invalidate_destination, load_destination, save_destination
+from ofs.cache import destination_sides, invalidate_destination, load_destination, save_destination
 from ofs.compare import Action, Change, FileStat
 from ofs.model import Direction, ExclusionMode, Profile
 from ofs.scan import invalidate_cached_destinations, scan_profile
@@ -37,13 +37,18 @@ def test_destination_cache_is_opt_in_and_preserves_full_metadata(tmp_path, monke
     assert Profile.from_json(profile.to_json()).cache_destination is True
 
 
-def test_cache_expires_and_rejects_stale_or_invalid_manifests(tmp_path, monkeypatch):
+def test_cache_persists_for_months_and_rejects_invalid_manifests(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile = _profile(tmp_path, cache_destination=True)
     save_destination(profile, "Right", [], profile.exclusion_mode, {"a": FileStat(1, 1)})
     path = cache_module._path(profile)
     document = json.loads(path.read_text())
-    monkeypatch.setattr(cache_module.time, "time", lambda: document["saved"] + MAX_AGE_SECONDS + 0.1)
+    months_later = document["saved"] + 183 * 86400
+    monkeypatch.setattr(cache_module.time, "time", lambda: months_later)
+    cached = load_destination(profile, "Right", [], profile.exclusion_mode)
+    assert cached is not None and cached == ({"a": FileStat(1, 1)}, document["saved"])
+    document["saved"] = float("nan")
+    path.write_text(json.dumps(document))
     assert load_destination(profile, "Right", [], profile.exclusion_mode) is None
     path.write_text("{not json")
     assert load_destination(profile, "Right", [], profile.exclusion_mode) is None

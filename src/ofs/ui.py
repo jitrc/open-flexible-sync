@@ -141,6 +141,7 @@ _PREVIEW_ASYNC_THRESHOLD = 1000
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application):
         super().__init__(application=app, title="OFS")
+        self._ofs_app = app
         self.set_default_size(1100, 740)
         self.profiles: list[Profile] = []
         self.checked: set[str] = set()
@@ -565,7 +566,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         when, body, tone = _result_parts(profile.last_result, profile.note)
         local_scan = profile.name in self._scan_running
-        app = self.get_application()
+        app = self._ofs_app
         active_elsewhere = isinstance(app, SfsApplication) and app.profile_is_active(profile.name)
         scanning = local_scan or active_elsewhere
         stamp = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER)
@@ -764,7 +765,7 @@ class MainWindow(Gtk.ApplicationWindow):
         RestoreWindow(self, profile).present()
 
     def _new_window(self, *_args) -> MainWindow | None:
-        app = self.get_application()
+        app = self._ofs_app
         return app.open_new_window() if isinstance(app, SfsApplication) else None
 
     def _new_profile(self, *_args) -> None:
@@ -1010,12 +1011,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _editor(self, profile: Profile | None) -> Gtk.Window:
         existing = profile
         window = Gtk.Window(transient_for=self, modal=True, title="Profile")
-        window.set_default_size(780, 840)
-        grid = Gtk.Grid(column_spacing=8, row_spacing=8)
-        grid.set_margin_start(12)
-        grid.set_margin_end(12)
-        grid.set_margin_top(12)
-        grid.set_margin_bottom(12)
+        window.set_default_size(780, 720)
         name = Gtk.Entry(text="" if existing is None else existing.name)
         name.set_hexpand(True)
         group = Gtk.Entry(text="" if existing is None else existing.group_override)
@@ -1052,10 +1048,10 @@ class MainWindow(Gtk.ApplicationWindow):
         preserve_ownership = Gtk.CheckButton(label="Preserve owner and group when permitted", active=bool(existing and existing.preserve_ownership))
         preserve_ownership.set_tooltip_text("If the filesystem does not permit this, the copy fails safely instead of silently dropping ownership.")
         cache_destination = Gtk.CheckButton(
-            label="Cache destination metadata (up to 5 minutes)",
+            label="Cache destination metadata (until OFS changes it)",
             active=bool(existing and existing.cache_destination),
         )
-        cache_destination.set_tooltip_text("For repeat discovery. OFS changes invalidate it; cached metadata can miss external changes, so use Run uncached when needed.")
+        cache_destination.set_tooltip_text("For repeat discovery across backup rounds and restarts. OFS writes and changed filters invalidate it. Cached metadata can miss external destination changes, so use Run uncached when needed.")
         disabled = Gtk.CheckButton(label="Disabled — keep this profile but do not run it", active=bool(existing and existing.disabled))
         delete_all = Gtk.CheckButton(label="Block deletion of every file in a folder", active=bool(existing and existing.block_delete_all))
         never_delete = Gtk.CheckButton(label="Never delete files (existing empty-folder cleanup only)", active=bool(existing and existing.never_delete_files))
@@ -1108,7 +1104,29 @@ class MainWindow(Gtk.ApplicationWindow):
             box.append(browse)
             return box
 
-        rows = [
+        tabs = Gtk.Notebook(vexpand=True)
+        window.editor_tabs = tabs
+
+        def editor_page(title: str, rows: list[tuple[str, Gtk.Widget]], checks: tuple[Gtk.CheckButton, ...] = ()) -> None:
+            page = Gtk.Grid(column_spacing=8, row_spacing=8)
+            for side in ("start", "end", "top", "bottom"):
+                getattr(page, f"set_margin_{side}")(16)
+            for index, (label, widget) in enumerate(rows):
+                page.attach(Gtk.Label(label=label, xalign=1), 0, index, 1, 1)
+                page.attach(widget, 1, index, 1, 1)
+            if checks:
+                group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+                group.add_css_class("editor-checks")
+                for index, widget in enumerate(checks):
+                    grid_row = len(rows) + index
+                    page.attach(Gtk.Label(), 0, grid_row, 1, 1)
+                    page.attach(widget, 1, grid_row, 1, 1)
+            scroll = Gtk.ScrolledWindow(vexpand=True)
+            scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            scroll.set_child(page)
+            tabs.append_page(scroll, Gtk.Label(label=title))
+
+        editor_page("General", [
             ("Name", name),
             ("Group / subgroups", group),
             ("Left", directory_entry(left, "Left")),
@@ -1117,8 +1135,9 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Right volume", right_volume),
             ("Mode", mode),
             ("Direction", direction),
+        ], (cache_destination, disabled))
+        editor_page("Filters", [
             ("Symlinks", symlinks),
-            ("Same time, different size", same_time_size),
             ("Include filters", include_editor),
             ("Exclusions", exclusion),
             ("Exclusion rules", exclusion_editor),
@@ -1126,24 +1145,31 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Max size", max_size),
             ("Min age (days)", min_age),
             ("Max age (days)", max_age),
+        ])
+        editor_page("Comparison", [
+            ("Same time, different size", same_time_size),
+        ], (small, hour, seconds, ignore_time, larger, binary, track, always_copy, compare_permissions, compare_ownership, preserve_ownership))
+        editor_page("Recovery & Safety", [
             ("Older versions", older_keep),
             ("Delete limit (%; 0 = off)", delete_limit),
-        ]
-        for index, (label, widget) in enumerate(rows):
-            grid.attach(Gtk.Label(label=label, xalign=1), 0, index, 1, 1)
-            grid.attach(widget, 1, index, 1, 1)
-        checks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, always_copy, compare_permissions, compare_ownership, preserve_ownership, cache_destination, disabled, delete_all, never_delete):
-            checks.append(widget)
-        grid.attach(checks, 1, len(rows), 1, 1)
+        ], (older, keep_deleted, delete_all, never_delete))
+
         save = Gtk.Button(label="Save")
-        editor_buttons = Gtk.Box(spacing=8)
-        editor_buttons.append(save)
+        save.add_css_class("suggested-action")
+        cancel = Gtk.Button(label="Cancel")
+        cancel.set_tooltip_text("Close without saving profile changes")
+        cancel.connect("clicked", lambda *_: window.close())
+        editor_buttons = Gtk.Box(spacing=8, hexpand=True)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(editor_buttons, f"set_margin_{side}")(12)
         if existing is not None:
             restore = Gtk.Button(label="Restore Older…")
             restore.connect("clicked", lambda *_: RestoreWindow(self, existing).present())
             editor_buttons.append(restore)
-        grid.attach(editor_buttons, 1, len(rows) + 1, 1, 1)
+        editor_buttons.append(Gtk.Box(hexpand=True))
+        editor_buttons.append(cancel)
+        editor_buttons.append(save)
+        window.set_default_widget(save)
 
         def on_save(*_args) -> None:
             chosen = name.get_text().strip()
@@ -1210,9 +1236,12 @@ class MainWindow(Gtk.ApplicationWindow):
             self.reload()
 
         save.connect("clicked", on_save)
-        editor_scroll = Gtk.ScrolledWindow(vexpand=True)
-        editor_scroll.set_child(grid)
-        window.set_child(editor_scroll)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        root.append(tabs)
+        root.append(Gtk.Separator())
+        root.append(editor_buttons)
+        window.editor_footer = editor_buttons
+        window.set_child(root)
         window.present()
         return window
 
@@ -1225,7 +1254,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if profile.direction == Direction.BOTH:
             self.status.set_text("Copy new folder needs a one-way profile, so the destination is unambiguous.")
             return None
-        app = self.get_application()
+        app = self._ofs_app
         if profile.name in self._scan_running or profile.name in self._folder_copy_running or (isinstance(app, SfsApplication) and app.profile_is_active(profile.name)):
             self.status.set_text("This profile is already scanning or copying a new folder. Wait for it to finish first.")
             return None
@@ -1290,7 +1319,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return None
         if choice != 1:
             return None
-        app = self.get_application()
+        app = self._ofs_app
         if profile.name in self._scan_running or profile.name in self._folder_copy_running or (isinstance(app, SfsApplication) and app.profile_is_active(profile.name)):
             self.status.set_text("The profile became active before this confirmation. Wait for the other operation to finish.")
             return None
@@ -1340,7 +1369,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _whole_folder_finished(self, progress: WholeFolderWindow, outcome: FolderCopyOutcome, path: Path | None) -> bool:
         progress.allow_close()
         self._folder_copy_running.discard(progress.profile_name)
-        app = self.get_application()
+        app = self._ofs_app
         if isinstance(app, SfsApplication):
             app.release_profile(progress.profile_name)
         progress.job.profile.last_result = f"{time.strftime('%Y-%m-%d %H:%M')}  {outcome.report.summary()}"
@@ -1371,7 +1400,7 @@ class MainWindow(Gtk.ApplicationWindow):
         selected = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
         profiles = []
         already_running: set[str] = set()
-        app = self.get_application()
+        app = self._ofs_app
         for profile in selected:
             locally_running = profile.name in self._scan_running
             globally_busy = isinstance(app, SfsApplication) and (app.profile_is_active(profile.name) or not app.claim_profile(profile.name))
@@ -1414,6 +1443,8 @@ class MainWindow(Gtk.ApplicationWindow):
         masks = {profile.name: list(self.session_masks.get(profile.name, []))}
         progress = ScanWindow(self, f"Scanning {profile.name}", estimates={profile.name: scan_estimate(profile.name)})
         progress.present()
+        # Closing the overview must not quit OFS before the result has a window.
+        self._ofs_app.hold()
 
         def on_stats(name: str, side: str, rel: str, values) -> None:
             GLib.idle_add(progress.update_stats, name, side, rel, values)
@@ -1436,27 +1467,30 @@ class MainWindow(Gtk.ApplicationWindow):
         threading.Thread(target=work, daemon=True, name=f"OFS scan: {profile.name}").start()
 
     def _scan_finished(self, batch_id: int, name: str, results: list[JobResult], progress: ScanWindow) -> bool:
-        batch = self._scan_batches.get(batch_id)
-        progress.allow_close()
-        self._scan_running.discard(name)
-        app = self.get_application()
-        if isinstance(app, SfsApplication):
-            app.release_profile(name)
-        self._rebuild()
-        if batch is None:
-            return False
-        batch["remaining"].discard(name)
-        batch["results"].extend(results)
-        if batch["remaining"]:
-            self._with_scan_activity(f"Scanned {name}; other selected profiles are still running.")
-            return False
+        try:
+            batch = self._scan_batches.get(batch_id)
+            progress.allow_close()
+            self._scan_running.discard(name)
+            app = self._ofs_app
+            if isinstance(app, SfsApplication):
+                app.release_profile(name)
+            self._rebuild()
+            if batch is None:
+                return False
+            batch["remaining"].discard(name)
+            batch["results"].extend(results)
+            if batch["remaining"]:
+                self._with_scan_activity(f"Scanned {name}; other selected profiles are still running.")
+                return False
 
-        completed = batch["results"]
-        del self._scan_batches[batch_id]
-        order = {profile.name: index for index, profile in enumerate(self.profiles)}
-        completed.sort(key=lambda job: order.get(job.profile.name, len(order)))
-        self._show_results(completed)
-        return False
+            completed = batch["results"]
+            del self._scan_batches[batch_id]
+            order = {profile.name: index for index, profile in enumerate(self.profiles)}
+            completed.sort(key=lambda job: order.get(job.profile.name, len(order)))
+            self._show_results(completed)
+            return False
+        finally:
+            self._ofs_app.release()
 
     def _show_results(self, results: list[JobResult]) -> bool:
         if results and all(job.error == "scan stopped" for job in results):
@@ -1481,6 +1515,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._preview(results[0])
             return False
         summary = Gtk.Window(transient_for=self, title="Scan")
+        summary.set_application(self._ofs_app)
         summary.set_default_size(760, 420)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.set_margin_start(12)
@@ -1518,6 +1553,11 @@ class MainWindow(Gtk.ApplicationWindow):
 
 def _compact(button: Gtk.Button) -> None:
     button.add_css_class("compact")
+
+
+def _owner_application(owner: Gtk.Window) -> Gtk.Application | None:
+    # A closed overview retains its app reference for detached operation results.
+    return getattr(owner, "_ofs_app", None) or owner.get_application()
 
 
 _RUN_RESULT = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s+(.*)$")
@@ -1776,8 +1816,9 @@ def _install_css() -> None:
 class Preview(Gtk.Window):
     def __init__(self, owner: MainWindow, job: JobResult):
         super().__init__(transient_for=owner, title=job.profile.name)
-        if owner.get_application() is not None:
-            self.set_application(owner.get_application())
+        app = _owner_application(owner)
+        if app is not None:
+            self.set_application(app)
         _install_css()
         self.owner = owner
         self.job = job
@@ -2523,8 +2564,9 @@ class ScanWindow(Gtk.Window):
 
     def __init__(self, owner: Gtk.Window, title: str = "Scanning", *, estimates: dict[str, tuple[int, float]] | None = None):
         super().__init__(transient_for=owner, modal=False, title=title)
-        if owner.get_application() is not None:
-            self.set_application(owner.get_application())
+        app = _owner_application(owner)
+        if app is not None:
+            self.set_application(app)
         self.set_default_size(700, 280)
         self.control = RunControl()
         self._allow_close = False
@@ -2699,8 +2741,9 @@ def _duration(seconds: float) -> str:
 class ProgressWindow(Gtk.Window):
     def __init__(self, owner: Preview, title: str):
         super().__init__(transient_for=owner, modal=True, title=f"Copying {title}")
-        if owner is not None and owner.get_application() is not None:
-            self.set_application(owner.get_application())
+        app = _owner_application(owner) if owner is not None else None
+        if app is not None:
+            self.set_application(app)
         self.set_default_size(680, 300)
         self.control = RunControl()
         self._allow_close = False
@@ -2863,7 +2906,7 @@ class WholeFolderWindow(ProgressWindow):
 class ResultsWindow(Gtk.Window):
     def __init__(self, owner: Preview, report: ApplyReport, log_path: Path | None):
         super().__init__(transient_for=owner, modal=True, title="Copying Results")
-        self.set_application(owner.get_application())
+        self.set_application(_owner_application(owner))
         _install_css()
         self.owner = owner
         self.profile_name = owner.job.profile.name

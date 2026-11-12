@@ -24,8 +24,8 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 ## Profile management and migration
 
 - **New profile** is the first header action.
-- **Profiles → New window**, or the desktop launcher's **New Window** action, opens an independent main view in the same OFS process. Selections, filters, scrolling, and dialogs are per window. Shared per-profile operation locks reject duplicate scans, whole-folder copies, and comparison-plan copies across windows; different profiles can proceed independently. Existing serial/chunked behavior within each copy is unchanged.
-- Profile Editor **Left** and **Right** entries have folder **Browse…** buttons for local/mounted folders. Choosing a folder updates the text field only; typed paths remain supported and the normal Save operation preserves imported flags/history behavior.
+- **Profiles → New window**, or the desktop launcher's **New Window** action, opens an independent main view in the same OFS process. Selections, filters, scrolling, and dialogs are per window. Shared per-profile operation locks reject duplicate scans, whole-folder copies, and comparison-plan copies across windows; different profiles can proceed independently. Existing serial/chunked behavior within each copy is unchanged. Closing an overview does not cancel its active scan or strand the resulting preview: the operation retains OFS until its result window is attached and its profile claim is released.
+- Profile Editor groups existing controls into **General**, **Filters**, **Comparison**, and **Recovery & Safety** tabs. Only the current tab's content scrolls. **Cancel**, **Save**, and (for existing profiles) **Restore Older…** remain in a fixed footer outside the tab. Cancel saves nothing; saving from any tab preserves noncurrent-tab settings, imported flags, notes, and path/history behavior.
 - **Multi Edit** previews and confirms one field across checked profiles. It includes cache Off/On, sync/exclusion modes, Older/deletion safeguards, symlink and metadata controls, timestamps, volume labels, size limits, and fractional-day age limits. Other fields remain unchanged. Masks can be added without duplicating existing rules or can replace the entire mask list.
 - **Replace paths in checked profiles…** handles changed mount points and moved folders:
   - Replace matching text in both paths, Left only, or Right only.
@@ -65,10 +65,10 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 
 ## Destination metadata cache
 
-- Enable **Cache destination metadata (up to 5 minutes)** independently per profile. Existing/imported profiles default to uncached discovery.
+- Enable **Cache destination metadata (until OFS changes it)** independently per profile. Existing/imported profiles default to uncached discovery. Multi Edit offers explicit Off/On for checked profiles.
 - A completed destination walk is saved as an atomic JSON manifest under the OFS `cache/` directory. The manifest stores paths, timestamps, size, kind, link target, permissions, and UID/GID; it never stores file contents.
 - The following fresh destination scan can reuse that metadata and is labeled as cached. The other/source tree is always read fresh. In both-direction mode the two possible destinations have independently validated metadata snapshots.
-- The cache expires after five minutes. Its root path and filter settings must match; folder/mask changes or OFS copy/move/delete operations invalidate it. Canceled/skipped scans never become a cached manifest. An uncached refresh creates a fresh completed manifest.
+- The cache has no time-based expiry and survives restarts for later backup rounds. Its root path and filter settings must match; folder/mask changes or OFS copy/move/delete operations invalidate it. Canceled/skipped scans never become a cached manifest. An uncached refresh creates a fresh completed manifest.
 - **Cached metadata can miss changes made by other programs while the cache is valid.** After external changes, choose **Run uncached** in the header, or use `scan NAME --uncached` / `run NAME --uncached [--apply]`. This is a one-run override and does not turn off the saved setting.
 - A cache is not the file-history SQLite database, stored hashes, content-addressed storage, or post-copy verification. Metadata-only comparison cannot prove equal contents; optional binary comparison still performs its direct byte comparison on candidates.
 

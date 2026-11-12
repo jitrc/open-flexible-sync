@@ -1,8 +1,9 @@
-"""Opt-in, expiring destination metadata cache. Never copy file contents from it."""
+"""Opt-in persistent destination metadata cache. Never copy file contents from it."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import tempfile
 import time
@@ -16,7 +17,6 @@ from ofs.store import config_dir
 
 FORMAT = "ofs-destination-cache"
 VERSION = 1
-MAX_AGE_SECONDS = 300.0
 
 
 def destination_sides(profile: Profile) -> tuple[str, ...]:
@@ -57,9 +57,10 @@ def load_destination(profile: Profile, side: str, global_masks: list[str], globa
             return None
         if document.get("settings") != _settings_signature(profile, global_masks, global_mode):
             return None
+        # Age is reported, not expired: periodic backup jobs may reuse this
+        # destination walk for months. OFS writes and setting changes invalidate it.
         saved = float(document["saved"])
-        age = max(0.0, time.time() - saved)
-        if age > MAX_AGE_SECONDS:
+        if not math.isfinite(saved):
             return None
         files = {}
         for item in document["entries"]:
