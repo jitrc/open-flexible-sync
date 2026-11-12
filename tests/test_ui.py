@@ -390,6 +390,46 @@ def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatc
     assert saved.name == "selection job"
 
 
+def test_profile_editor_preserves_symlink_metadata_and_other_policy_fields(tmp_path, monkeypatch):
+    from ofs.model import SizeConflict, SymlinkMode, TimestampRules
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestPolicyFields")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    original = Profile(
+        name="preserved fields",
+        left=str(left),
+        right=str(right),
+        timestamps=TimestampRules(same_time_different_size=SizeConflict.SKIP),
+        keep_deleted=True,
+        older_folder="LegacyOld",
+        max_delete_percent=35,
+        block_delete_all=True,
+        never_delete_files=True,
+        symlinks=SymlinkMode.PRESERVE,
+        compare_permissions=True,
+        compare_ownership=True,
+        preserve_ownership=True,
+        always_copy=True,
+        imported_settings=True,
+    )
+    save_profile(original)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            editor = window._editor(window.profiles[0])
+            save = next(item for item in _buttons(editor) if item.get_label() == "Save")
+            save.emit("clicked")
+            self.quit()
+
+    assert App().run(None) == 0
+    assert load_profiles()[0].to_json() == original.to_json()
+
+
 def test_restore_browser_recovers_a_disabled_profiles_older_file(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestRestore")

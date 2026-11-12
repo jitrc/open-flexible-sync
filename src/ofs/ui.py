@@ -26,7 +26,7 @@ from ofs.jobs import JobResult, run_checked
 from ofs.history import delete_history
 from ofs.legacy import import_cfg, import_global_masks
 from ofs.masks import included, path_matches, split_masks
-from ofs.model import Direction, ExclusionMode, Profile, SyncMode, parse_size
+from ofs.model import Direction, ExclusionMode, Profile, SizeConflict, SymlinkMode, SyncMode, TimestampRules, parse_size
 from ofs.review import (
     SAFETY_SECONDS,
     Listed,
@@ -802,11 +802,23 @@ class MainWindow(Gtk.ApplicationWindow):
         older_keep.set_value(1 if existing is None or existing.older_keep < 1 else existing.older_keep)
         binary = Gtk.CheckButton(label="Binary compare when size matches (reads file bytes)", active=bool(existing and existing.binary_compare))
         track = Gtk.CheckButton(label="Remember files and detect moves and deletions", active=bool(existing and existing.track))
+        always_copy = Gtk.CheckButton(label="Always copy even when unchanged", active=bool(existing and existing.always_copy))
+        compare_permissions = Gtk.CheckButton(label="Compare file permissions", active=bool(existing and existing.compare_permissions))
+        compare_ownership = Gtk.CheckButton(label="Compare file owner and group", active=bool(existing and existing.compare_ownership))
+        preserve_ownership = Gtk.CheckButton(label="Preserve owner and group when permitted", active=bool(existing and existing.preserve_ownership))
+        preserve_ownership.set_tooltip_text("If the filesystem does not permit this, the copy fails safely instead of silently dropping ownership.")
         disabled = Gtk.CheckButton(label="Disabled — keep this profile but do not run it", active=bool(existing and existing.disabled))
         delete_all = Gtk.CheckButton(label="Block deletion of every file in a folder", active=bool(existing and existing.block_delete_all))
         never_delete = Gtk.CheckButton(label="Never delete files (existing empty-folder cleanup only)", active=bool(existing and existing.never_delete_files))
         delete_limit = Gtk.SpinButton.new_with_range(0, 100, 1)
         delete_limit.set_value(0 if existing is None else existing.max_delete_percent)
+        symlinks = Gtk.DropDown.new_from_strings(["Follow targets", "Preserve links", "Skip links"])
+        symlink_values = [SymlinkMode.FOLLOW, SymlinkMode.PRESERVE, SymlinkMode.SKIP]
+        symlinks.set_selected(0 if existing is None else symlink_values.index(existing.symlinks))
+        symlinks.set_tooltip_text("Follow reads file/dir targets without following cycles; Preserve transfers the link itself; Skip ignores links entirely.")
+        size_policies = [SizeConflict.COPY, SizeConflict.SKIP, SizeConflict.ASK]
+        same_time_size = Gtk.DropDown.new_from_strings(["Copy", "Skip", "Ask"])
+        same_time_size.set_selected(0 if rules is None else size_policies.index(rules.same_time_different_size))
         include_editor = ExclusionEditor(["(all)"] if existing is None else existing.include, include=True)
         exclusion_editor = ExclusionEditor([] if existing is None else existing.exclusions)
         min_size = Gtk.Entry(text="" if existing is None or not existing.min_size else str(existing.min_size))
@@ -821,6 +833,8 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Right volume", right_volume),
             ("Mode", mode),
             ("Direction", direction),
+            ("Symlinks", symlinks),
+            ("Same time, different size", same_time_size),
             ("Include filters", include_editor),
             ("Exclusions", exclusion),
             ("Exclusion rules", exclusion_editor),
@@ -835,7 +849,7 @@ class MainWindow(Gtk.ApplicationWindow):
             grid.attach(Gtk.Label(label=label, xalign=1), 0, index, 1, 1)
             grid.attach(widget, 1, index, 1, 1)
         checks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, disabled, delete_all, never_delete):
+        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, always_copy, compare_permissions, compare_ownership, preserve_ownership, disabled, delete_all, never_delete):
             checks.append(widget)
         grid.attach(checks, 1, len(rows), 1, 1)
         save = Gtk.Button(label="Save")
@@ -848,8 +862,6 @@ class MainWindow(Gtk.ApplicationWindow):
         grid.attach(editor_buttons, 1, len(rows) + 1, 1, 1)
 
         def on_save(*_args) -> None:
-            from ofs.model import TimestampRules
-
             chosen = name.get_text().strip()
             if not chosen:
                 return
@@ -870,8 +882,10 @@ class MainWindow(Gtk.ApplicationWindow):
                     ignore_seconds=seconds.get_active(),
                     ignore_timestamp=ignore_time.get_active(),
                     larger_is_newer=larger.get_active(),
+                    same_time_different_size=size_policies[same_time_size.get_selected()],
                 ),
                 keep_older=older.get_active(),
+                older_folder="Older" if existing is None else existing.older_folder,
                 keep_deleted=keep_deleted.get_active(),
                 older_keep=int(older_keep.get_value()),
                 min_size=parse_size(min_size.get_text()),
@@ -880,7 +894,12 @@ class MainWindow(Gtk.ApplicationWindow):
                 max_age_days=_days(max_age.get_text()),
                 binary_compare=binary.get_active(),
                 track=track.get_active(),
+                always_copy=always_copy.get_active(),
                 disabled=disabled.get_active(),
+                symlinks=symlink_values[symlinks.get_selected()],
+                compare_permissions=compare_permissions.get_active(),
+                compare_ownership=compare_ownership.get_active(),
+                preserve_ownership=preserve_ownership.get_active(),
                 max_delete_percent=delete_limit.get_value_as_int(),
                 block_delete_all=delete_all.get_active(),
                 never_delete_files=never_delete.get_active(),

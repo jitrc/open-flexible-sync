@@ -24,6 +24,12 @@ class SyncMode(str, Enum):
     EXACT_MIRROR = "exact_mirror"
 
 
+class SymlinkMode(str, Enum):
+    FOLLOW = "follow"
+    PRESERVE = "preserve"
+    SKIP = "skip"
+
+
 class SizeConflict(str, Enum):
     """Same timestamp, different size."""
 
@@ -83,6 +89,10 @@ class Profile:
     max_delete_percent: int = 0
     block_delete_all: bool = False
     never_delete_files: bool = False
+    symlinks: SymlinkMode = SymlinkMode.FOLLOW
+    compare_permissions: bool = False
+    compare_ownership: bool = False
+    preserve_ownership: bool = False
     last_result: str = ""
     note: str = ""
     imported_settings: bool = False
@@ -122,6 +132,10 @@ class Profile:
             "max_delete_percent": self.max_delete_percent,
             "block_delete_all": self.block_delete_all,
             "never_delete_files": self.never_delete_files,
+            "symlinks": self.symlinks.value,
+            "compare_permissions": self.compare_permissions,
+            "compare_ownership": self.compare_ownership,
+            "preserve_ownership": self.preserve_ownership,
             "last_result": self.last_result,
             "note": self.note,
             "imported_settings": self.imported_settings,
@@ -156,6 +170,10 @@ class Profile:
             max_delete_percent=min(100, _positive_int(data.get("max_delete_percent"), 0)),
             block_delete_all=bool(data.get("block_delete_all", False)),
             never_delete_files=bool(data.get("never_delete_files", False)),
+            symlinks=SymlinkMode(data.get("symlinks", SymlinkMode.FOLLOW)),
+            compare_permissions=bool(data.get("compare_permissions", False)),
+            compare_ownership=bool(data.get("compare_ownership", False)),
+            preserve_ownership=bool(data.get("preserve_ownership", False)),
             last_result=data.get("last_result") or "",
             note=data.get("note") or "",
             imported_settings=bool(data.get("imported_settings", False)),

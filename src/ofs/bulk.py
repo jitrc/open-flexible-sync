@@ -10,6 +10,7 @@ from ofs.model import (
     ExclusionMode,
     Profile,
     SizeConflict,
+    SymlinkMode,
     SyncMode,
     TimestampRules,
 )
@@ -37,6 +38,10 @@ FIELDS = (
     BulkField("max_delete_percent", "Maximum deletion percentage (0 = off)", "number", maximum=100),
     BulkField("block_delete_all", "Block deletion of every file in a folder", "choice", _ON_OFF),
     BulkField("never_delete_files", "Never delete files", "choice", _ON_OFF),
+    BulkField("symlinks", "Symlink handling", "choice", (("Follow targets", SymlinkMode.FOLLOW), ("Preserve links", SymlinkMode.PRESERVE), ("Skip links", SymlinkMode.SKIP))),
+    BulkField("compare_permissions", "Compare file permissions", "choice", _ON_OFF),
+    BulkField("compare_ownership", "Compare file owner/group", "choice", _ON_OFF),
+    BulkField("preserve_ownership", "Preserve owner/group on copy/restore", "choice", _ON_OFF),
     BulkField("binary_compare", "Binary comparison", "choice", _ON_OFF),
     BulkField("track", "Remember files and detect moves/deletions", "choice", _ON_OFF),
     BulkField("always_copy", "Always copy even when unchanged", "choice", _ON_OFF),

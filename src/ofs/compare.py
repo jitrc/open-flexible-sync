@@ -30,6 +30,11 @@ class Action(str, Enum):
 class FileStat:
     size: int
     mtime: float
+    kind: str = "file"
+    target: str = ""
+    mode: int = 0
+    uid: int = 0
+    gid: int = 0
 
 
 @dataclass(frozen=True)
@@ -258,6 +263,8 @@ def _pair_mirror_moves(
             new_stat = source.get(new)
             if new_stat is None:
                 continue
+            if new_stat.kind != old_stat.kind or new_stat.target != old_stat.target:
+                continue
             state = classify_time(old_stat.mtime, new_stat.mtime, old_stat.size, new_stat.size, profile.timestamps)
             if state == "equal":
                 hits.append(new)
@@ -312,6 +319,19 @@ def _limit_stat(action: Action, left: FileStat | None, right: FileStat | None) -
     return None
 
 
+def _metadata_reason(profile: Profile, first: FileStat, second: FileStat) -> str:
+    reasons = []
+    if profile.compare_permissions and first.mode != second.mode:
+        reasons.append("permissions differ")
+    if profile.compare_ownership and (first.uid, first.gid) != (second.uid, second.gid):
+        reasons.append("owner/group differ")
+    return ", ".join(reasons)
+
+
+def _unsupported(stat: FileStat | None) -> bool:
+    return stat is not None and stat.kind in {"broken", "unsupported"}
+
+
 def _one_way(
     profile: Profile,
     rel: str,
@@ -329,11 +349,20 @@ def _one_way(
         if mirror and dest is not None:
             return [Change(rel, delete_action, "only on destination", dest.size)]
         return []
+    if _unsupported(source):
+        return [Change(rel, Action.ASK, "source link is dangling or has an unsupported target", source.size)]
     if dest is None:
         return [Change(rel, copy_action, "only on source", source.size)]
+    if source.kind != dest.kind:
+        return [Change(rel, copy_action, "item types differ", source.size)]
+    if source.kind == "symlink" and source.target != dest.target:
+        return [Change(rel, copy_action, "link target differs", source.size)]
     # Arguments are source then destination, so left_newer means the source is newer.
     state = classify_time(source.mtime, dest.mtime, source.size, dest.size, profile.timestamps)
     if state == "equal":
+        metadata = _metadata_reason(profile, source, dest)
+        if metadata:
+            return [Change(rel, copy_action, metadata, source.size)]
         if profile.always_copy:
             return [Change(rel, copy_action, "always copy", source.size)]
         return []
@@ -356,13 +385,23 @@ def _size_conflict(profile: Profile, rel: str, copy_action: Action, size: int) -
 def _both(profile: Profile, rel: str, left: FileStat | None, right: FileStat | None) -> list[Change]:
     if left is None and right is None:
         return []
+    if _unsupported(left) or _unsupported(right):
+        stat = left or right
+        return [Change(rel, Action.ASK, "a link is dangling or has an unsupported target", stat.size if stat else 0)]
     if left is None and right is not None:
         return [Change(rel, Action.COPY_RIGHT_TO_LEFT, "only on right", right.size)]
     if right is None and left is not None:
         return [Change(rel, Action.COPY_LEFT_TO_RIGHT, "only on left", left.size)]
     assert left is not None and right is not None
+    if left.kind != right.kind:
+        return [Change(rel, Action.ASK, "item types differ", left.size)]
+    if left.kind == "symlink" and left.target != right.target:
+        return [Change(rel, Action.ASK, "link targets differ", left.size)]
     state = classify_time(left.mtime, right.mtime, left.size, right.size, profile.timestamps)
     if state == "equal":
+        metadata = _metadata_reason(profile, left, right)
+        if metadata:
+            return [Change(rel, Action.ASK, metadata, left.size)]
         if profile.always_copy:
             return [Change(rel, Action.COPY_LEFT_TO_RIGHT, "always copy", left.size)]
         return []

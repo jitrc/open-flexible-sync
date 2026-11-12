@@ -45,7 +45,7 @@ def older_files(profile: Profile) -> list[ArchivedFile]:
         if not base.is_dir():
             continue
         for path in base.rglob("*"):
-            if path.is_symlink() or not path.is_file():
+            if not path.is_file() and not path.is_symlink():
                 continue
             relative = path.relative_to(base).as_posix()
             match = _VERSION.fullmatch(path.name)
@@ -54,7 +54,7 @@ def older_files(profile: Profile) -> list[ArchivedFile]:
                 relative = str(Path(relative).with_name(match.group("name"))).replace(os.sep, "/")
             else:
                 version = 0
-            info = path.stat()
+            info = path.lstat()
             found.append(ArchivedFile(profile, side, relative, version, path, info.st_size, info.st_mtime))
     found.sort(key=lambda item: (item.side, item.relative.lower(), item.version))
     return found
@@ -74,19 +74,30 @@ def restore_version(item: ArchivedFile, destination_root: Path, *, overwrite: bo
     target = root / relative
     if root not in target.resolve().parents:
         raise ValueError("restore path escapes the selected folder")
-    if not item.path.is_file() or item.path.is_symlink():
-        raise OSError("archived file is missing or is not a regular file")
+    if not item.path.is_file() and not item.path.is_symlink():
+        raise OSError("archived entry is missing or is not a file/symlink")
     target.parent.mkdir(parents=True, exist_ok=True)
     descriptor, temporary_name = tempfile.mkstemp(prefix=".ofs-restore-", suffix=".part", dir=target.parent)
     os.close(descriptor)
     temporary = Path(temporary_name)
     try:
-        shutil.copy2(item.path, temporary)
+        if item.path.is_symlink():
+            temporary.unlink()
+            os.symlink(os.readlink(item.path), temporary)
+            try:
+                shutil.copystat(item.path, temporary, follow_symlinks=False)
+            except NotImplementedError:
+                pass
+        else:
+            shutil.copy2(item.path, temporary)
+        if item.profile.preserve_ownership:
+            info = item.path.lstat()
+            os.chown(temporary, info.st_uid, info.st_gid, follow_symlinks=False)
         if overwrite:
             os.replace(temporary, target)
         else:
             # temp and target share one filesystem: link is an atomic no-clobber commit.
-            os.link(temporary, target)
+            os.link(temporary, target, follow_symlinks=False)
             temporary.unlink()
         return target
     finally:

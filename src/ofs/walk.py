@@ -39,13 +39,18 @@ def ensure_dir(path: str) -> Path:
     return folder
 
 
-def walk(root: Path, skip_dir, *, skip_file=None, control=None, on_progress=None, on_stats=None) -> dict[str, FileStat]:
-    """Return relative file paths, leaving ignored folders and files out.
+def walk(
+    root: Path,
+    skip_dir,
+    *,
+    skip_file=None,
+    control=None,
+    on_progress=None,
+    on_stats=None,
+    symlinks: str = "follow",
+) -> dict[str, FileStat]:
+    """Return file/link metadata, with optional following and cycle protection."""
 
-    Symlinks are recorded and not followed. Control checks run between entries.
-    on_progress(rel, count) retains the original progress callback; on_stats
-    additionally receives discovered/filtered/added walk statistics.
-    """
 
     found: dict[str, FileStat] = {}
     discovered = 0
@@ -72,45 +77,87 @@ def walk(root: Path, skip_dir, *, skip_file=None, control=None, on_progress=None
             if control.skipping:
                 raise WalkSkipped
 
-    def visit(directory: Path, rel: str) -> None:
+    def file_stat(info, path: Path, *, kind: str = "file", target: str = "") -> FileStat:
+        return FileStat(info.st_size, info.st_mtime, kind, target, stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)
+
+    def filtered_out(child: str, *, directory: bool) -> bool:
+        nonlocal filtered
+        skip = skip_dir(child) if directory else skip_file is not None and skip_file(child)
+        if not skip:
+            return False
+        filtered += 1
+        report(child)
+        return True
+
+    def visit(directory: Path, rel: str, ancestors: set[tuple[int, int]]) -> bool:
         nonlocal discovered, filtered
         check()
+        try:
+            info = directory.stat()
+            identity = (info.st_dev, info.st_ino)
+        except OSError:
+            return False
+        if identity in ancestors:
+            filtered += 1
+            report(rel or ".")
+            return False
+        ancestors = ancestors | {identity}
         report(rel)
         try:
             entries = list(os.scandir(directory))
         except OSError:
-            return
+            return False
         for entry in entries:
             check()
             child = f"{rel}/{entry.name}" if rel else entry.name
+            path = Path(entry.path)
             try:
                 info = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
             discovered += 1
             if stat.S_ISLNK(info.st_mode):
-                if skip_file is not None and skip_file(child):
+                try:
+                    target = os.readlink(path)
+                except OSError:
+                    continue
+                if filtered_out(child, directory=False):
+                    continue
+                if symlinks == "skip":
                     filtered += 1
                     report(child)
                     continue
-                found[child] = FileStat(info.st_size, info.st_mtime)
+                if symlinks == "preserve":
+                    found[child] = file_stat(info, path, kind="symlink", target=target)
+                    report(child)
+                    continue
+                try:
+                    followed = entry.stat(follow_symlinks=True)
+                except OSError:
+                    found[child] = file_stat(info, path, kind="broken", target=target)
+                    report(child)
+                    continue
+                if stat.S_ISDIR(followed.st_mode):
+                    if not filtered_out(child, directory=True):
+                        if not visit(path, child, ancestors):
+                            found[child] = file_stat(info, path, kind="unsupported", target=target)
+                    continue
+                if stat.S_ISREG(followed.st_mode):
+                    found[child] = file_stat(followed, path)
+                else:
+                    # Never disappear a present source and mistake the other side for an extra.
+                    found[child] = file_stat(info, path, kind="unsupported", target=target)
                 report(child)
                 continue
             if stat.S_ISDIR(info.st_mode):
-                if skip_dir(child):
-                    filtered += 1
-                    report(child)
-                    continue
-                visit(directory / entry.name, child)
+                if not filtered_out(child, directory=True):
+                    visit(path, child, ancestors)
                 continue
-            if stat.S_ISREG(info.st_mode):
-                if skip_file is not None and skip_file(child):
-                    filtered += 1
-                    report(child)
-                    continue
-                found[child] = FileStat(info.st_size, info.st_mtime)
+            if stat.S_ISREG(info.st_mode) and not filtered_out(child, directory=False):
+                found[child] = file_stat(info, path)
                 report(child)
+        return True
 
-    visit(root, "")
+    visit(root, "", set())
     report("", force=True)
     return found

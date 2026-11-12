@@ -23,6 +23,21 @@ class History:
     right: dict[str, FileStat]
 
 
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Extend earlier OFS databases in place; old records remain regular files."""
+
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
+    for name, kind, default in (
+        ("kind", "TEXT", "'file'"),
+        ("target", "TEXT", "''"),
+        ("mode", "INTEGER", "0"),
+        ("uid", "INTEGER", "0"),
+        ("gid", "INTEGER", "0"),
+    ):
+        if columns and name not in columns:
+            conn.execute(f"ALTER TABLE files ADD COLUMN {name} {kind} NOT NULL DEFAULT {default}")
+
+
 def database_path(profile: Profile):
     folder = config_dir() / "database"
     folder.mkdir(parents=True, exist_ok=True)
@@ -37,14 +52,16 @@ def load_history(profile: Profile) -> tuple[History | None, str]:
         return None, ""
     try:
         with sqlite3.connect(path) as conn:
+            _ensure_columns(conn)
             rows = dict(conn.execute("SELECT key, value FROM meta"))
             if rows.get("left") != profile.left or rows.get("right") != profile.right:
                 return None, "File database belongs to different folders and was ignored."
             left: dict[str, FileStat] = {}
             right: dict[str, FileStat] = {}
-            for side, rel, size, mtime in conn.execute("SELECT side, rel, size, mtime FROM files"):
+            for row in conn.execute("SELECT side, rel, size, mtime, kind, target, mode, uid, gid FROM files"):
+                side, rel, size, mtime, kind, target_name, file_mode, uid, gid = row
                 target = left if side == "left" else right
-                target[rel] = FileStat(int(size), float(mtime))
+                target[rel] = FileStat(int(size), float(mtime), kind, target_name, int(file_mode), int(uid), int(gid))
     except sqlite3.Error:
         return None, "File database could not be read and was ignored."
     return History(left, right), ""
@@ -54,14 +71,15 @@ def save_history(profile: Profile, left: dict[str, FileStat], right: dict[str, F
     path = database_path(profile)
     with sqlite3.connect(path) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
-        conn.execute("CREATE TABLE IF NOT EXISTS files (side TEXT, rel TEXT, size INTEGER, mtime REAL, PRIMARY KEY (side, rel))")
+        conn.execute("CREATE TABLE IF NOT EXISTS files (side TEXT, rel TEXT, size INTEGER, mtime REAL, kind TEXT NOT NULL DEFAULT 'file', target TEXT NOT NULL DEFAULT '', mode INTEGER NOT NULL DEFAULT 0, uid INTEGER NOT NULL DEFAULT 0, gid INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (side, rel))")
+        _ensure_columns(conn)
         conn.execute("DELETE FROM meta")
         conn.execute("DELETE FROM files")
         conn.executemany("INSERT INTO meta (key, value) VALUES (?, ?)", [("left", profile.left), ("right", profile.right)])
         conn.executemany(
-            "INSERT INTO files (side, rel, size, mtime) VALUES (?, ?, ?, ?)",
-            [("left", rel, stat.size, stat.mtime) for rel, stat in left.items()]
-            + [("right", rel, stat.size, stat.mtime) for rel, stat in right.items()],
+            "INSERT INTO files (side, rel, size, mtime, kind, target, mode, uid, gid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [("left", rel, stat.size, stat.mtime, stat.kind, stat.target, stat.mode, stat.uid, stat.gid) for rel, stat in left.items()]
+            + [("right", rel, stat.size, stat.mtime, stat.kind, stat.target, stat.mode, stat.uid, stat.gid) for rel, stat in right.items()],
         )
 
 
@@ -116,7 +134,9 @@ def _moves(previous: dict[str, FileStat], current: dict[str, FileStat], rules) -
         hits = [
             new
             for new in added
-            if classify_time(previous[old].mtime, current[new].mtime, previous[old].size, current[new].size, rules) == "equal"
+            if previous[old].kind == current[new].kind
+            and previous[old].target == current[new].target
+            and classify_time(previous[old].mtime, current[new].mtime, previous[old].size, current[new].size, rules) == "equal"
         ]
         if len(hits) == 1:
             pairs.append((old, hits[0]))
@@ -198,6 +218,12 @@ def _visible(profile: Profile, rel: str, global_masks: list[str]) -> bool:
 
 
 def _same(before: FileStat, after: FileStat, profile: Profile) -> bool:
+    if before.kind != after.kind or before.target != after.target:
+        return False
+    if profile.compare_permissions and before.mode != after.mode:
+        return False
+    if profile.compare_ownership and (before.uid, before.gid) != (after.uid, after.gid):
+        return False
     return classify_time(before.mtime, after.mtime, before.size, after.size, profile.timestamps) == "equal"
 
 

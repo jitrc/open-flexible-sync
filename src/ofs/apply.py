@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ofs.compare import Action, Change
-from ofs.model import Profile
+from ofs.model import Profile, SymlinkMode
 from ofs.review import deletion_violations
 
 
@@ -247,9 +247,11 @@ def files_identical(left: Path, right: Path) -> bool:
     return filecmp.cmp(left, right, shallow=False)
 
 
-def _inside(root: Path, rel: str) -> Path:
-    target = (root / rel).resolve()
+def _inside(root: Path, rel: str, *, link_ok: bool = False) -> Path:
+    path = root / rel
     root_resolved = root.resolve()
+    # A preserved link is an object in the tree, not its target's path.
+    target = path.parent.resolve() / path.name if link_ok else path.resolve()
     if target != root_resolved and root_resolved not in target.parents:
         raise ApplyError(f"path escapes the profile folder: {rel}")
     return target
@@ -287,6 +289,11 @@ def apply_plan(
             report.errors.extend(f"Deletion protection: {message}" for message in violations)
             progress.finish()
             return report
+    layout_errors = _link_layout_problems(profile, ordered)
+    if layout_errors:
+        report.errors.extend(layout_errors)
+        progress.finish()
+        return report
     for index, change in enumerate(ordered):
         progress.begin(index, change)
         if control is not None and not control.checkpoint():
@@ -306,9 +313,9 @@ def apply_plan(
             elif change.action == Action.DELETE_LEFT:
                 _delete(profile, left_root, change.rel, report, "left")
             elif change.action == Action.MOVE_ON_RIGHT:
-                _move(right_root, change.rel, change.dest_rel, report, "right")
+                _move(profile, right_root, change.rel, change.dest_rel, report, "right")
             elif change.action == Action.MOVE_ON_LEFT:
-                _move(left_root, change.rel, change.dest_rel, report, "left")
+                _move(profile, left_root, change.rel, change.dest_rel, report, "left")
         except _CopyStopped:
             report.cancelled = True
             break
@@ -321,6 +328,56 @@ def apply_plan(
 
 def _is_copy(action: Action) -> bool:
     return action in (Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT)
+
+
+def _link_layout_problems(profile: Profile, changes: list[Change]) -> list[str]:
+    """Do not partially execute a link/directory transition in Preserve mode."""
+
+    if profile.symlinks != SymlinkMode.PRESERVE:
+        return []
+    roots = (Path(profile.left), Path(profile.right))
+    errors = []
+
+    def link_parents(root: Path, rel: str) -> list[str]:
+        path = Path(rel)
+        if path.is_absolute() or ".." in path.parts:
+            return [f"{rel}: invalid relative path"]
+        current = root
+        links = []
+        for part in path.parts[:-1]:
+            if part == ".":
+                continue
+            current /= part
+            if current.is_symlink():
+                links.append(current.relative_to(root).as_posix())
+        return links
+
+    for change in changes:
+        action = change.action
+        operations: list[tuple[Path, str, Path, str]] = []
+        if action == Action.COPY_LEFT_TO_RIGHT:
+            operations = [(roots[0], change.rel, roots[1], change.rel)]
+        elif action == Action.COPY_RIGHT_TO_LEFT:
+            operations = [(roots[1], change.rel, roots[0], change.rel)]
+        elif action == Action.MOVE_ON_RIGHT:
+            operations = [(roots[1], change.rel, roots[1], change.dest_rel)]
+        elif action == Action.MOVE_ON_LEFT:
+            operations = [(roots[0], change.rel, roots[0], change.dest_rel)]
+        elif action in (Action.DELETE_RIGHT, Action.DELETE_LEFT):
+            root = roots[1] if action == Action.DELETE_RIGHT else roots[0]
+            operations = [(root, change.rel, root, change.rel)]
+        for source_root, rel, dest_root, dest_rel in operations:
+            for root, one_rel in ((source_root, rel), (dest_root, dest_rel)):
+                for parent in link_parents(root, one_rel):
+                    message = f"{one_rel}: preserved link {parent!r} is a parent of a planned entry; resolve the link/directory conflict first."
+                    if message not in errors:
+                        errors.append(message)
+            if action in (Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT):
+                source = source_root / rel
+                destination = dest_root / dest_rel
+                if source.is_symlink() and destination.is_dir() and not destination.is_symlink():
+                    errors.append(f"{rel}: source link conflicts with a real destination directory; resolve it before copying.")
+    return errors
 
 
 def _apply_order(change: Change) -> int:
@@ -379,14 +436,15 @@ def _prune_empty(root: Path, directory: Path, report: ApplyReport) -> None:
         current = current.parent
 
 
-def _move(root: Path, old_rel: str, new_rel: str, report: ApplyReport, side: str) -> None:
-    source = _inside(root, old_rel)
+def _move(profile: Profile, root: Path, old_rel: str, new_rel: str, report: ApplyReport, side: str) -> None:
+    preserving = profile.symlinks == SymlinkMode.PRESERVE
+    source = _inside(root, old_rel, link_ok=preserving)
     dest = _inside(root, new_rel)
-    if not source.is_file():
+    if not (source.is_file() or (preserving and source.is_symlink())):
         raise ApplyError("source is missing")
-    if dest.exists():
+    if os.path.lexists(dest):
         raise ApplyError("destination already exists")
-    size = source.stat().st_size
+    size = source.lstat().st_size if preserving else source.stat().st_size
     parent = source.parent
     _mkdirs(root, dest, report)
     source.rename(dest)
@@ -405,20 +463,38 @@ def _copy(
     progress: _CopyProgressReporter | None = None,
     limiter: _RateLimiter | None = None,
 ) -> None:
-    source = _inside(source_root, rel)
-    dest = _inside(dest_root, rel)
-    if not source.is_file():
-        raise ApplyError("source is missing")
-    size = source.stat().st_size
+    preserving = profile.symlinks == SymlinkMode.PRESERVE
+    source = _inside(source_root, rel, link_ok=preserving)
+    dest = _inside(dest_root, rel, link_ok=preserving)
+    if preserving and source.is_symlink():
+        info = source.lstat()
+    elif source.is_file():
+        info = source.stat()
+    else:
+        raise ApplyError("source is missing, dangling, or inconsistent with the symlink policy")
+    if os.path.lexists(dest) and dest.is_dir() and not dest.is_symlink():
+        raise ApplyError("refusing to replace a real destination directory with a file or link")
+    size = info.st_size
     if progress is not None:
         progress.chunk(0, size)
     _mkdirs(dest_root, dest, report)
     temporary: Path | None = None
     try:
-        with source.open("rb") as reading:
-            descriptor, name = tempfile.mkstemp(prefix=".ofs-", suffix=".part", dir=dest.parent)
-            temporary = Path(name)
-            with os.fdopen(descriptor, "wb") as writing:
+        descriptor, name = tempfile.mkstemp(prefix=".ofs-", suffix=".part", dir=dest.parent)
+        temporary = Path(name)
+        if preserving and source.is_symlink():
+            os.close(descriptor)
+            temporary.unlink()
+            os.symlink(os.readlink(source), temporary)
+            try:
+                shutil.copystat(source, temporary, follow_symlinks=False)
+            except NotImplementedError:
+                # Some platforms cannot update link timestamps; the link target is still exact.
+                pass
+            if progress is not None:
+                progress.chunk(size, size)
+        else:
+            with source.open("rb") as reading, os.fdopen(descriptor, "wb") as writing:
                 copied = 0
                 while True:
                     _copy_checkpoint(control)
@@ -432,9 +508,11 @@ def _copy(
                     if limiter is not None:
                         limiter.spend(len(block), control)
             shutil.copystat(source, temporary)
+        if profile.preserve_ownership:
+            os.chown(temporary, info.st_uid, info.st_gid, follow_symlinks=False)
         # Once archiving starts, do not pause between it and the atomic replace.
         _copy_checkpoint(control)
-        archived = bool(dest.exists() and profile.keep_older)
+        archived = bool(os.path.lexists(dest) and profile.keep_older)
         if archived:
             _keep_older(profile, dest_root, dest, rel, report)
         try:
@@ -459,11 +537,11 @@ def _copy(
 
 def _keep_older(profile: Profile, dest_root: Path, dest: Path, rel: str, report: ApplyReport) -> None:
     folder = profile.older_folder.strip("/") or "Older"
-    archive = _inside(dest_root, f"{folder}/{rel}")
+    archive = _inside(dest_root, f"{folder}/{rel}", link_ok=True)
     keep = profile.older_keep if profile.older_keep > 1 else 1
     _mkdirs(dest_root, archive, report)
     if keep == 1:
-        if archive.exists():
+        if os.path.lexists(archive):
             archive.unlink()
         shutil.move(str(dest), str(archive))
         return
@@ -471,14 +549,14 @@ def _keep_older(profile: Profile, dest_root: Path, dest: Path, rel: str, report:
     for index in range(1, keep):
         slots.append(archive.with_name(f"{archive.name}.~{index}~"))
     oldest = slots[-1]
-    if oldest.exists() and oldest.is_file():
+    if os.path.lexists(oldest):
         oldest.unlink()
         report.versions_removed += 1
     for index in range(len(slots) - 2, -1, -1):
         source = slots[index]
         target = slots[index + 1]
-        if source.exists():
-            if target.exists():
+        if os.path.lexists(source):
+            if os.path.lexists(target):
                 target.unlink()
             source.rename(target)
     shutil.move(str(dest), str(archive))
@@ -488,8 +566,8 @@ def _restore_older(profile: Profile, dest_root: Path, dest: Path, rel: str) -> N
     """Best-effort rollback after replace fails, preserving every surviving version."""
 
     folder = profile.older_folder.strip("/") or "Older"
-    archive = _inside(dest_root, f"{folder}/{rel}")
-    if not archive.exists():
+    archive = _inside(dest_root, f"{folder}/{rel}", link_ok=True)
+    if not os.path.lexists(archive):
         raise ApplyError("versioned destination backup is missing")
     keep = profile.older_keep if profile.older_keep > 1 else 1
     slots = [archive]
@@ -498,17 +576,17 @@ def _restore_older(profile: Profile, dest_root: Path, dest: Path, rel: str) -> N
     archive.replace(dest)
     for index in range(len(slots) - 1):
         source = slots[index + 1]
-        if source.exists():
+        if os.path.lexists(source):
             source.replace(slots[index])
 
 
 def _delete(profile: Profile, root: Path, rel: str, report: ApplyReport, side: str) -> None:
-    target = _inside(root, rel)
-    if not target.exists():
+    target = _inside(root, rel, link_ok=True)
+    if not os.path.lexists(target):
         return
-    if target.is_dir():
+    if target.is_dir() and not target.is_symlink():
         raise ApplyError("refusing to delete a directory entry from a file plan")
-    size = target.stat().st_size
+    size = target.lstat().st_size
     parent = target.parent
     if profile.keep_deleted:
         _keep_older(profile, root, target, rel, report)

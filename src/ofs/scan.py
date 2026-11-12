@@ -108,6 +108,7 @@ def scan_profile(
             control=control,
             on_progress=progress("Left"),
             on_stats=stats("Left"),
+            symlinks=profile.symlinks.value,
         ),
         masks,
         mode,
@@ -120,6 +121,7 @@ def scan_profile(
             control=control,
             on_progress=progress("Right"),
             on_stats=stats("Right"),
+            symlinks=profile.symlinks.value,
         ),
         masks,
         mode,
@@ -165,12 +167,22 @@ def remember(profile: Profile) -> None:
     left_root = ensure_dir(profile.left)
     right_root = ensure_dir(profile.right)
     left = _drop_global(
-        walk(left_root, lambda rel: _skip_dir(profile, rel, destination=False, global_masks=masks, global_mode=mode)),
+        walk(
+            left_root,
+            lambda rel: _skip_dir(profile, rel, destination=False, global_masks=masks, global_mode=mode),
+            skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
+            symlinks=profile.symlinks.value,
+        ),
         masks,
         mode,
     )
     right = _drop_global(
-        walk(right_root, lambda rel: _skip_dir(profile, rel, destination=True, global_masks=masks, global_mode=mode)),
+        walk(
+            right_root,
+            lambda rel: _skip_dir(profile, rel, destination=True, global_masks=masks, global_mode=mode),
+            skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
+            symlinks=profile.symlinks.value,
+        ),
         masks,
         mode,
     )
@@ -190,6 +202,8 @@ def _equalize_identical(
 
     read = 0
     for rel in set(left) & set(right):
+        if left[rel].kind != "file" or right[rel].kind != "file":
+            continue
         if control is not None:
             if not control.checkpoint():
                 raise WalkStopped
@@ -206,5 +220,6 @@ def _equalize_identical(
             continue
         read += left[rel].size + right[rel].size
         if files_identical(left_root / rel, right_root / rel):
-            right[rel] = FileStat(left[rel].size, left[rel].mtime)
+            current = right[rel]
+            right[rel] = FileStat(left[rel].size, left[rel].mtime, current.kind, current.target, current.mode, current.uid, current.gid)
     return read
