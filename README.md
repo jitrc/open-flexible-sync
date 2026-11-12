@@ -10,9 +10,10 @@ Use local folders or OS-mounted NAS, SMB/CIFS, NFS, SSHFS, and rclone storage.
 
 | | What OFS gives you |
 |---|---|
-| 🗂️ **Organized profiles** | Custom groups and subgroups, group selection, search and filters, Multi Edit, profile export/import, and safe path replacement after a mount or folder move. |
-| 🔍 **Understandable scans** | Live discovery counts, elapsed time, repeat-scan ETA estimates and resumable scanning, followed by a clear file/folder preview. |
+| 🗂️ **Organized profiles** | Custom groups and subgroups, search and filters, Multi Edit, profile export/import, and safe path replacement. A tabbed editor keeps Cancel and Save fixed on every page. |
+| 🔍 **Understandable scans** | Live discovery counts, elapsed time, repeat-scan ETA estimates, and Pause/Skip Rest/Cancel controls, followed by a clear file/folder preview. Optional destination metadata caching persists across backup rounds; **Run uncached** handles external changes. |
 | 🛡️ **Safe synchronization** | Copy-only or Exact Mirror, timestamp and optional binary comparison, reviewed deletions, configurable deletion limits, and atomic temporary-file replacement. |
+| 🪟 **Flexible windows** | Open additional main windows in one OFS process with shared per-profile operation locks. Closing an overview does not cancel its active scan or lose the completed preview. |
 | 🗃️ **Recovery when needed** | Optional recovery of deleted files, retained replaced versions, and restoration into a separate destination without overwriting existing files. |
 | 🔗 **Links and metadata** | Follow, preserve, or skip symlinks; optional permission/owner comparison and safe owner/group preservation. |
 | ⚡ **Responsive progress** | Total and per-file bars, speed/ETA, pause/resume, cancellation, optional throttling, logs, results, and retry through a fresh scan. |
@@ -79,6 +80,7 @@ From a checkout:
 
 ```bash
 ./launch.sh
+./launch.sh --new-window                  # another main window in the same process
 ./launch.sh list
 ./launch.sh import                         # import settings without changing the 5.71 cfg
 ```
@@ -87,6 +89,7 @@ Scan and run:
 
 ```bash
 ./launch.sh scan "Profile name"             # scan and print a plan
+./launch.sh scan "Profile name" --uncached  # fresh destination discovery
 ./launch.sh run "Profile name"              # dry-run
 ./launch.sh run "Profile name" --apply      # apply with configured safeguards
 ```
