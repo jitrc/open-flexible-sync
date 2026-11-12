@@ -9,7 +9,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk
 
 from ofs.apply import CopyProgress
-from ofs.compare import Action, Change
+from ofs.compare import Action, Change, FileStat
 from ofs.jobs import JobResult
 from ofs.model import Profile, SyncMode
 from ofs.scan import ScanResult, scan_profile
@@ -768,6 +768,63 @@ def test_deletion_safeguard_disables_confirmation_but_allows_safe_continuation(t
     assert seen["extra_survives"] is True
 
 
+def test_copy_stays_in_preview_and_fades_completed_rows_without_changing_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestUnifiedCopy")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    (left / "nested").mkdir(parents=True)
+    right.mkdir()
+    (left / "a.txt").write_text("alpha")
+    (left / "nested" / "b.txt").write_text("beta")
+    profile = Profile(name="alpha copy", left=str(left), right=str(right))
+    save_profile(profile)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            result = scan_profile(profile)
+            preview = window._preview(JobResult(profile, result, None))
+            seen["before"] = [change.rel for change in preview._planned()]
+            window.close()
+            seen["overview_closed"] = not window.get_visible()
+            preview._begin(preview._planned(), "test embedded progress")
+            seen["locked_with_closed_overview"] = self.profile_is_active("alpha copy")
+            seen["panel"] = preview.copy_details.get_child() is not None
+            GLib.timeout_add(20, self.watch, preview)
+
+        def watch(self, preview):
+            if preview._running:
+                return True
+            seen["released_with_closed_overview"] = not self.profile_is_active("alpha copy")
+            seen["after"] = [change.rel for change in preview._planned()]
+            seen["copied"] = set(preview._completed_rows)
+            seen["flags"] = {rel: preview.tree_store.get_value(tree_iter, 5) for rel, tree_iter in preview._file_iters.items()}
+            name_column = next(column for column in preview.view.get_columns() if column.get_title() == "Name")
+            renderer = name_column.get_cells()[0]
+            tree_iter = preview._file_iters["a.txt"]
+            preview._result_cell_style(name_column, renderer, preview.tree_store, tree_iter, None)
+            seen["subdued"] = not renderer.get_property("sensitive")
+            seen["collapsed"] = not preview.copy_details.get_expanded()
+            seen["source_survives"] = (left / "a.txt").read_text() == "alpha"
+            seen["destinations"] = ((right / "a.txt").read_text(), (right / "nested" / "b.txt").read_text())
+            seen["results"] = any(isinstance(item, ResultsWindow) for item in self.get_windows())
+            self.quit()
+            return False
+
+    assert App().run(None) == 0
+    assert seen["panel"] is True
+    assert seen["before"] == seen["after"] == ["a.txt", "nested/b.txt"]
+    assert seen["copied"] == {"a.txt", "nested/b.txt"}
+    assert seen["flags"] == {"a.txt": True, "nested/b.txt": True}
+    assert seen["subdued"] is True and seen["collapsed"] is True
+    assert seen["overview_closed"] is True
+    assert seen["locked_with_closed_overview"] is True and seen["released_with_closed_overview"] is True
+    assert seen["source_survives"] is True and seen["destinations"] == ("alpha", "beta")
+    assert seen["results"] is True
+
+
 def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestCopyProgress")
@@ -899,6 +956,13 @@ def test_after_copy_power_choice_is_per_run_and_guards_errors_and_cancel(tmp_pat
             preview.completion_action.set_selected(1)
             preview._finished(ClosedProgress(), ApplyReport(copied=2), None)
             seen["blocked"] = "another copy" in preview.detail.get_text()
+            other_copy.allow_close()
+            other_preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            other_preview._running = True
+            owner.close()
+            preview._finished(ClosedProgress(), ApplyReport(copied=2), None)
+            seen["closed_overview_another_preview"] = "another copy" in preview.detail.get_text()
+            other_preview._running = False
             self.quit()
 
     assert App().run(None) == 0
@@ -907,6 +971,7 @@ def test_after_copy_power_choice_is_per_run_and_guards_errors_and_cancel(tmp_pat
     assert calls == ["sleep"]
     assert seen["registered"] is True
     assert seen["blocked"] is True
+    assert seen["closed_overview_another_preview"] is True
 
 
 def test_copy_speed_presets_cover_common_mib_per_second_limits(tmp_path, monkeypatch):
@@ -1206,6 +1271,59 @@ def test_preview_filters_keep_the_plan_and_safety_window_opens(tmp_path, monkeyp
     assert "Do Not Continue" in seen["safety"]
 
 
+def test_live_preview_batches_entries_and_keeps_start_disabled_until_complete(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLivePreview")
+    save_profile(Profile(name="alpha", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(window)
+            preview._begin_scan(progress)
+            seen["controls_shared"] = preview.scan_details.get_child() is not None and preview._scan_progress is progress
+            preview._queue_entry("Left", "root.txt", FileStat(4, 1))
+            for index in range(500):
+                preview._queue_entry("Left", f"folder/item-{index}", FileStat(index + 1, 2))
+            preview._drain_pending()
+            seen["first_batch"] = preview.store.get_n_items()
+            while preview._entry_queue:
+                preview._drain_pending()
+            seen["pending_count"] = len(preview.rows)
+            seen["pending_status"] = preview.tree_store.get_value(preview._file_iters["folder/item-0"], 3)
+            preview._start()
+            seen["direct_start_blocked"] = not preview._running and "not complete" in preview.detail.get_text()
+            seen["button_disabled"] = not preview.start_button.get_sensitive()
+            preview._save_exclusion("folder")
+            assert "folder" in profile.exclusions
+            seen["excluded_removed"] = all(not row.change.rel.startswith("folder/") for row in preview.rows)
+            preview._queue_entry("Left", "folder/after.txt", FileStat(1, 2))
+            preview._drain_pending()
+            seen["queued_exclusion"] = all(row.change.rel != "folder/after.txt" for row in preview.rows)
+
+            result = ScanResult([Change("root.txt", Action.COPY_LEFT_TO_RIGHT, "only on source", 4)])
+            preview._finish_scan(JobResult(profile, result, None))
+            seen["complete"] = preview._scan_complete and not preview._running
+            seen["collapsed"] = not preview.scan_details.get_expanded()
+            seen["start_enabled"] = preview.start_button.get_sensitive()
+            seen["final_paths"] = [row.change.rel for row in preview.rows]
+            progress.allow_close()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["controls_shared"] is True
+    assert seen["first_batch"] == 250 and seen["pending_count"] == 501
+    assert "awaiting comparison" in seen["pending_status"]
+    assert seen["direct_start_blocked"] is True and seen["button_disabled"] is True
+    assert seen["excluded_removed"] is True and seen["queued_exclusion"] is True
+    assert seen["complete"] and seen["collapsed"] and seen["start_enabled"]
+    assert seen["final_paths"] == ["root.txt"]
+
+
 def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanCounts")
@@ -1345,6 +1463,7 @@ def test_different_profiles_scan_in_parallel_but_same_profile_cannot_duplicate(t
                     seen["parallel"] = True
                     release.set()
                 if release.is_set() and not window._scan_running:
+
                     self.quit()
                     return False
                 return True
@@ -1397,9 +1516,9 @@ def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, mon
             seen["button"] = preview.start_button.get_label()
             seen["power_disabled"] = not preview.completion_action.get_sensitive()
             seen["listed"] = len(preview.rows)
-            preview._begin = lambda *_args: seen.setdefault("applied", True)
             preview._start()
-            seen["blocked"] = "applied" not in seen
+            preview._begin(preview._planned(), "test partial guard")
+            seen["blocked"] = not preview._running and "complete comparison" in preview.detail.get_text()
             preview._save_exclusion("cache")
             seen["saved"] = load_profiles()[0].exclusions
             seen["remaining"] = len(preview.rows)
@@ -1612,6 +1731,51 @@ def test_exclusion_edit_preserves_individual_folder_collapse_state(tmp_path, mon
     assert seen["all_collapsed"] is True
 
 
+def test_large_live_refill_does_not_mix_arriving_rows_with_replacement_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLiveRefreshRace")
+    save_profile(Profile(name="alpha", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(window)
+            preview._begin_scan(progress)
+            for index in range(1510):
+                folder = "excluded" if index % 15 == 0 else f"group-{index // 50}"
+                preview._queue_entry("Left", f"{folder}/item-{index}", FileStat(index + 1, 2))
+            while preview._entry_queue:
+                preview._drain_pending()
+            preview._save_exclusion("excluded")
+            for index in range(30):
+                preview._queue_entry("Right", f"incoming/after-{index}", FileStat(index + 3, 3))
+            preview._drain_pending()
+
+            def watch():
+                if preview._pending_tree or preview._replace_tree_model or preview._entry_queue:
+                    return True
+                seen["rows"] = len(preview.rows)
+                seen["store"] = preview.store.get_n_items()
+                seen["iterators"] = len(preview._file_iters)
+                seen["expected_paths"] = preview._file_iters.get("incoming/after-29") is not None
+                seen["no_excluded"] = all(not row.change.rel.startswith("excluded/") for row in preview.rows)
+                preview._finish_scan(JobResult(profile, ScanResult([]), None))
+                progress.allow_close()
+                preview.close()
+                self.quit()
+                return False
+
+            GLib.timeout_add(5, watch)
+
+    assert App().run(None) == 0
+    assert seen["rows"] == len([index for index in range(1510) if index % 15 != 0]) + 30
+    assert seen["store"] == seen["rows"] == seen["iterators"], seen
+    assert seen["expected_paths"] is True and seen["no_excluded"] is True
+
+
 def test_large_tree_updates_batches_and_retains_manual_collapse(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLargeTreeRefresh")
@@ -1798,6 +1962,8 @@ def test_multi_edit_cache_size_and_fractional_age_controls(tmp_path, monkeypatch
             editor = window._multi_edit()
             window._confirm_bulk_edit = lambda changed, field, _editor: seen.update(changed=changed, field=field)
 
+            seen["searchable_fields"] = editor.field.get_enable_search()
+            seen["cache_hint"] = "cache" in editor.preview.get_text().lower()
             editor.field.set_selected(next(index for index, item in enumerate(FIELDS) if item.key == "cache_destination"))
             editor.value_widget.set_selected(1)
             editor.apply.emit("clicked")
@@ -1820,6 +1986,7 @@ def test_multi_edit_cache_size_and_fractional_age_controls(tmp_path, monkeypatch
             self.quit()
 
     assert App().run(None) == 0
+    assert seen["searchable_fields"] is True and seen["cache_hint"] is True
     assert seen["cache_field"] == "cache_destination"
     assert [profile.name for profile in seen["cache"]] == ["alpha one"]
     assert seen["cache"][0].imported_settings is True
@@ -1924,17 +2091,18 @@ def test_closing_main_window_keeps_scan_and_results_alive(tmp_path, monkeypatch)
             window.present()
             window._run_names({"alpha"})
             scan = next(item for item in self.get_windows() if isinstance(item, ScanWindow))
+            preview = window._scan_previews["alpha"]
             window.close()
             seen["overview_closed"] = not window.get_visible()
             seen["scan_has_application"] = scan.get_application() is self
-            seen["scan_survives"] = scan.get_visible() and not scan._allow_close
+            seen["scan_survives"] = preview.get_visible() and preview._scan_active and preview.scan_details.get_expanded()
             seen["claimed_while_closed"] = self.profile_is_active("alpha")
             release.set()
             GLib.timeout_add(20, self.watch)
 
         def watch(self):
             preview = next((item for item in self.get_windows() if isinstance(item, Preview)), None)
-            if preview is None:
+            if preview is None or not preview._scan_complete:
                 return True
             seen["preview_has_application"] = preview.get_application() is self
             seen["preview_visible"] = preview.get_visible()

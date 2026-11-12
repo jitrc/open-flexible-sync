@@ -27,6 +27,7 @@ def run_checked(
     control=None,
     on_progress=None,
     on_stats=None,
+    on_entry=None,
     force_uncached: bool = False,
 ) -> list[JobResult]:
     skips = session_skips or {}
@@ -44,6 +45,10 @@ def run_checked(
             if on_stats is not None:
                 on_stats(name, side, rel, values)
 
+        def report_entry(side: str, rel: str, stat, name: str = profile.name) -> None:
+            if on_entry is not None:
+                on_entry(name, side, rel, stat)
+
         started = time.monotonic()
         try:
             result = scan_profile(
@@ -53,6 +58,7 @@ def run_checked(
                 control=control,
                 on_progress=report,
                 on_stats=report_stats,
+                on_entry=None if on_entry is None else report_entry,
                 force_uncached=force_uncached,
             )
         except MissingVolume as exc:

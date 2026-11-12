@@ -53,6 +53,7 @@ def walk(
     control=None,
     on_progress=None,
     on_stats=None,
+    on_entry=None,
     symlinks: str = "follow",
 ) -> dict[str, FileStat]:
     """Return file/link metadata, with optional following and cycle protection."""
@@ -75,6 +76,11 @@ def walk(
             on_progress(rel or ".", len(found))
         if on_stats is not None:
             on_stats(rel or ".", WalkStats(discovered, filtered, len(found)))
+
+    def emit(rel: str) -> None:
+        # Metadata still comes from the real walk; listeners never affect the plan.
+        if on_entry is not None and rel in found:
+            on_entry(rel, found[rel])
 
     def check() -> None:
         if control is not None:
@@ -135,24 +141,29 @@ def walk(
                     continue
                 if symlinks == "preserve":
                     found[child] = file_stat(info, path, kind="symlink", target=target)
+                    emit(child)
                     report(child)
                     continue
                 try:
                     followed = entry.stat(follow_symlinks=True)
                 except OSError:
                     found[child] = file_stat(info, path, kind="broken", target=target)
+                    emit(child)
                     report(child)
                     continue
                 if stat.S_ISDIR(followed.st_mode):
                     if not filtered_out(child, directory=True):
                         if not visit(path, child, ancestors):
                             found[child] = file_stat(info, path, kind="unsupported", target=target)
+                            emit(child)
                     continue
                 if stat.S_ISREG(followed.st_mode):
                     found[child] = file_stat(followed, path)
+                    emit(child)
                 else:
                     # Never disappear a present source and mistake the other side for an extra.
                     found[child] = file_stat(info, path, kind="unsupported", target=target)
+                    emit(child)
                 report(child)
                 continue
             if stat.S_ISDIR(info.st_mode):
@@ -161,6 +172,7 @@ def walk(
                 continue
             if stat.S_ISREG(info.st_mode) and not filtered_out(child, directory=False):
                 found[child] = file_stat(info, path)
+                emit(child)
                 report(child)
         return True
 

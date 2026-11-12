@@ -20,6 +20,62 @@ def _profile(tmp_path, **kwargs):
     return Profile(name="tracked", left=str(left), right=str(right), track=True, **kwargs), left, right
 
 
+def test_live_session_rules_filter_early_and_late_entries_without_saving_incomplete_state(tmp_path, monkeypatch):
+    from ofs.apply import RunControl
+    from ofs.history import load_history
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile, left, right = _profile(tmp_path, cache_destination=True)
+    _write(left / "folder" / "visible.txt", "first", 10)
+    _write(left / "folder" / "later.txt", "later", 10)
+    _write(left / "keep.txt", "keep", 10)
+    _write(right / "folder" / "visible.txt", "first", 10)
+    shared_masks = []
+    control = RunControl()
+    events = []
+
+    def entry(side, rel, _stat):
+        events.append((side, rel))
+        if side == "Left" and rel.startswith("folder/") and not shared_masks:
+            with control.rules_lock:
+                shared_masks.append("folder")
+
+    result = scan_profile(profile, session_masks=shared_masks, control=control, on_entry=entry)
+    assert events
+    assert not any(rel.startswith("folder/") for row in result.listing for rel in [row.change.rel])
+    assert not any(change.rel.startswith("folder/") for change in result.changes)
+    assert "no partial file-history baseline" in result.note
+    history, _note = load_history(profile)
+    assert history is None
+    from ofs.cache import load_destination
+    from ofs.settings import global_exclusions, global_exclusion_mode
+    assert not load_destination(profile, "Right", global_exclusions(), global_exclusion_mode())
+
+    with control.rules_lock:
+        shared_masks.clear()
+    restored = scan_profile(profile, session_masks=shared_masks)
+    assert any(row.change.rel.startswith("folder/") for row in restored.listing)
+    history, _note = load_history(profile)
+    assert history is not None and "folder/visible.txt" in history.left
+    cached = load_destination(profile, "Right", global_exclusions(), global_exclusion_mode())
+    assert cached is not None and "folder/visible.txt" in cached[0]
+
+
+def test_history_does_not_reintroduce_deletions_for_session_excluded_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile, left, right = _profile(tmp_path, mode=SyncMode.EXACT_MIRROR, cache_destination=True)
+    _write(left / "folder" / "gone.txt", "gone", 10)
+    _write(right / "folder" / "gone.txt", "gone", 10)
+    scan_profile(profile)
+    (left / "folder" / "gone.txt").unlink()
+
+    hidden = scan_profile(profile, session_masks=["folder"])
+    assert hidden.changes == [] and hidden.listing == []
+    assert (right / "folder" / "gone.txt").exists()
+    fresh = scan_profile(profile)
+    assert [(change.rel, change.action) for change in fresh.changes] == [("folder/gone.txt", Action.DELETE_RIGHT)]
+
+
 def test_first_run_records_and_does_not_invent_a_deletion(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile, left, right = _profile(tmp_path)

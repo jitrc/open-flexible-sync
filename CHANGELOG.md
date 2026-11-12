@@ -4,6 +4,13 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+### Added
+
+- Merged scanning, comparison, and comparison-copy progress into a live preview. Pending metadata fills the result tree without becoming a copy/delete decision.
+- Live Ignore/Exclude works across current discovery, queued rows, and final results, with synchronized temporary rules and separate cache/history protection.
+- Collapsible scan and copy panels provide more result-tree room. Completed operations are marked and use subdued rows without changing the plan.
+- Closing an active live preview requests safe cancellation rather than losing track of the running operation.
+
 ### Changed
 
 - Exact Mirror automatic move inference now requires the same filename. Different basenames remain explicit copy and delete operations.
@@ -12,6 +19,9 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 - Indexed move candidates by filename, kind, link target, and size before applying timestamp rules, eliminating quadratic comparisons on large move sets and avoiding oversized same-profile comparison delays.
 - Adding, editing, or removing an include/exclusion rule retains the rule list and surrounding editor-page scroll positions, including when the focused Remove button is replaced.
+- Scan/copy completion is ordered with its progress events and cannot starve behind lower-priority live-list rendering. Late statistics cannot re-enable completed scan controls.
+- Live rule sharing keeps the worker's final plan consistent with visible Ignore/Exclude actions; cached metadata and history-derived deletes are filtered appropriately.
+- Detached-overview copying retains profile lock/release and cross-window power safeguards; the common copy entry point directly refuses incomplete or partial scans.
 
 ## [0.3.0] - 2026-11-12
 

@@ -60,11 +60,13 @@ tar -xzf OFS-0.3.0-linux-x86_64.tar.gz
 
 ![OFS overview with symbolic header icons, synthetic profiles, nested groups, and themed rows](docs/ofs-overview.png)
 
-![OFS comparison and copy progress with fixed-width counters, speed, ETA, Pause, and Cancel](docs/ofs-copy-progress.png)
+![OFS live discovery preview filling the result tree with pending metadata](docs/ofs-live-preview.png)
+
+![OFS result tree during an integrated copy, with shared controls and a subdued completed row](docs/ofs-copy-progress.png)
 
 ![OFS copying results: 2 synthetic files, 32 MiB copied successfully](docs/ofs-results.png)
 
-*Synthetic profile names and placeholder paths. Copy progress is captured from a small temporary test copy; the results report reflects its actual successful totals. No live data or power actions are used.*
+*Synthetic profile names and placeholder paths. The live-scan image demonstrates pending status; the copy image captures a small temporary copy, with both destinations verified after completion. A separate results image reflects an actual successful copy. No live folders or power actions are used.*
 
 ## Documentation
 

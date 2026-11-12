@@ -88,6 +88,29 @@ def test_repeated_scan_uses_only_cached_destination_and_always_reads_source(tmp_
     assert calls == [tmp_path / "left", tmp_path / "left", tmp_path / "right"]
 
 
+def test_live_entry_events_include_cached_metadata_and_skip_dynamic_session_masks(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    (tmp_path / "left" / "folder").mkdir()
+    (tmp_path / "right" / "folder").mkdir()
+    (tmp_path / "left" / "folder" / "same.txt").write_text("same")
+    (tmp_path / "right" / "folder" / "same.txt").write_text("same")
+    seen = []
+    first = scan_profile(profile, on_entry=lambda side, rel, stat: seen.append((side, rel, stat.size)))
+    assert ("Left", "folder/same.txt", 4) in seen
+    assert ("Right", "folder/same.txt", 4) in seen
+    seen.clear()
+    second = scan_profile(profile, on_entry=lambda side, rel, stat: seen.append((side, rel, stat.size)))
+    assert second.cached is True
+    assert seen == [("Left", "folder/same.txt", 4), ("Right", "folder/same.txt", 4)]
+
+    (tmp_path / "left" / "folder" / "ignore.txt").write_text("skip")
+    seen.clear()
+    third = scan_profile(profile, session_masks=["folder"], on_entry=lambda side, rel, stat: seen.append((side, rel, stat.size)))
+    assert seen == []
+    assert third.listing == [] and third.changes == []
+
+
 def test_uncached_cli_scan_refreshes_manifest(tmp_path, monkeypatch, capsys):
     from ofs.cli import main
 

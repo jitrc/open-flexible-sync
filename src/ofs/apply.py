@@ -89,6 +89,7 @@ class RunControl:
         self._running.set()
         self._stop = threading.Event()
         self._skip = threading.Event()
+        self.rules_lock = threading.RLock()
 
     @property
     def paused(self) -> bool:

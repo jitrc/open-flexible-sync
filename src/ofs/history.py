@@ -99,9 +99,17 @@ def adjust_plan(
     *,
     global_masks: list[str] | None = None,
     now: float | None = None,
+    session_skips: set[str] | None = None,
+    session_masks: list[str] | None = None,
 ) -> list[Change]:
     rules = profile.timestamps
-    masks = list(global_masks or [])
+    masks = list(global_masks or []) + list(session_masks or [])
+    session_skips = set(session_skips or set())
+    if session_skips:
+        history = History(
+            {rel: stat for rel, stat in history.left.items() if rel not in session_skips},
+            {rel: stat for rel, stat in history.right.items() if rel not in session_skips},
+        )
     clock = time.time() if now is None else now
     left_moves = _moves(history.left, left, rules)
     right_moves = _moves(history.right, right, rules)
@@ -123,7 +131,12 @@ def adjust_plan(
     kept.extend(_deletions(profile, left, right, history, left_moves, right_moves, kept, masks, clock))
     for rel in sorted(conflict_rels):
         kept.append(Change(rel, Action.ASK, "changed on both sides since last run", left[rel].size))
-    return kept
+    return [
+        change for change in kept
+        if change.rel not in session_skips
+        and not any_match(change.rel, session_masks or [])
+        and (not change.dest_rel or not any_match(change.dest_rel, session_masks or []))
+    ]
 
 
 def _moves(previous: dict[str, FileStat], current: dict[str, FileStat], rules) -> dict[str, str]:

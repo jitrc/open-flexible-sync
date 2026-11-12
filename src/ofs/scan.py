@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -80,6 +81,7 @@ def scan_profile(
     control=None,
     on_progress=None,
     on_stats=None,
+    on_entry=None,
     force_uncached: bool = False,
 ) -> ScanResult:
     masks = global_exclusions()
@@ -89,6 +91,27 @@ def scan_profile(
     left_root = ensure_dir(profile.left)
     right_root = ensure_dir(profile.right)
     walked = {"Left": 0, "Right": 0}
+    rules_lock = getattr(control, "rules_lock", None) or nullcontext()
+    session_filters_used = False
+
+    def session_hidden(rel: str) -> bool:
+        nonlocal session_filters_used
+        with rules_lock:
+            if not session_skips and not session_masks:
+                return False
+            session_filters_used = True
+            return rel in (session_skips or set()) or any_match(rel, session_masks or [])
+
+    def drop_session(files: dict[str, FileStat]) -> dict[str, FileStat]:
+        return {rel: stat for rel, stat in files.items() if not session_hidden(rel)}
+
+    def skip_dir(rel: str, destination: bool) -> bool:
+        with rules_lock:
+            return _skip_dir(profile, rel, destination=destination, global_masks=masks, global_mode=mode) or session_hidden(rel)
+
+    def skip_file(rel: str) -> bool:
+        with rules_lock:
+            return _skip_file(profile, rel, global_masks=masks, global_mode=mode) or session_hidden(rel)
 
     def progress(side: str):
         def report(rel: str, count: int) -> None:
@@ -113,6 +136,7 @@ def scan_profile(
             cached = load_destination(profile, side, masks, mode)
             if cached is not None:
                 files, saved = cached
+                files = drop_session(files)
                 cache_notes.append(f"Using cached {side.lower()} destination metadata ({int(time.time() - saved)}s old; use Run uncached to force a fresh read).")
                 walked[side] = len(files)
                 age_seconds = int(time.time() - saved)
@@ -122,21 +146,26 @@ def scan_profile(
                     from ofs.walk import WalkStats
 
                     on_stats(side, f"Using cached destination metadata ({age_seconds}s old)", WalkStats(len(files), 0, len(files)))
+                if on_entry is not None:
+                    for rel, stat in files.items():
+                        on_entry(side, rel, stat)
                 return files
         try:
             files = walk(
                 root,
-                lambda rel: _skip_dir(profile, rel, destination=destination, global_masks=masks, global_mode=mode),
-                skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
+                lambda rel: skip_dir(rel, destination),
+                skip_file=skip_file,
                 control=control,
                 on_progress=progress(side),
                 on_stats=stats(side),
+                on_entry=None if on_entry is None else lambda rel, stat: on_entry(side, rel, stat),
                 symlinks=profile.symlinks.value,
             )
+            files = drop_session(files)
         except WalkSkipped as exc:
             # Keep the known entries for exclusions, but never treat them as complete.
             partial_sides.append(side)
-            files = _drop_global(exc.files, masks, mode)
+            files = _drop_global(drop_session(exc.files), masks, mode)
             walked[side] = exc.discovered
             if on_stats is not None:
                 from ofs.walk import WalkStats
@@ -145,7 +174,7 @@ def scan_profile(
             if control is not None:
                 control.clear_skip()
             return files
-        if destination and profile.cache_destination and not partial_sides:
+        if destination and profile.cache_destination and not partial_sides and not session_filters_used:
             try:
                 save_destination(profile, side, masks, mode, files)
             except OSError as exc:
@@ -157,26 +186,36 @@ def scan_profile(
     bytes_read = 0
     if profile.binary_compare:
         bytes_read = _equalize_identical(profile, left_root, right_root, left, right, control=control)
-    changes = build_plan(
-        profile,
-        left,
-        right,
-        session_skips=session_skips,
-        session_masks=session_masks,
-        global_masks=masks,
-        global_mode=mode,
-    )
+    with rules_lock:
+        changes = build_plan(
+            profile,
+            left,
+            right,
+            session_skips=session_skips,
+            session_masks=session_masks,
+            global_masks=masks,
+            global_mode=mode,
+        )
     note = ""
     if partial_sides:
         sides = " and ".join(partial_sides)
         note = f"Partial scan: skipped {sides} discovery. Review only; copying and deleting are disabled. Add exclusions, then rescan. No new cache manifest or file history was saved."
     if profile.track and not partial_sides:
-        history, note = load_history(profile)
-        if history is None and not note:
-            save_history(profile, left, right)
-            note = "Recorded the current files. The next run can detect moves and deletions."
+        history, history_note = load_history(profile)
+        if history is None and not history_note:
+            if session_filters_used:
+                note = "Session exclusions are active; no partial file-history baseline was saved."
+            else:
+                save_history(profile, left, right)
+                note = "Recorded the current files. The next run can detect moves and deletions."
+        elif history_note:
+            note = history_note
         elif history is not None:
-            changes = adjust_plan(profile, changes, left, right, history, global_masks=masks)
+            with rules_lock:
+                changes = adjust_plan(
+                    profile, changes, left, right, history, global_masks=masks,
+                    session_skips=session_skips, session_masks=session_masks,
+                )
     return ScanResult(
         changes,
         len(left),

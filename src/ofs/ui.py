@@ -8,7 +8,7 @@ import shlex
 import subprocess
 import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path, PurePosixPath
 
 import gi
@@ -27,7 +27,7 @@ from ofs.jobs import JobResult, run_checked
 from ofs.folder_copy import FolderCopyOutcome, copy_new_folder
 from ofs.history import delete_history
 from ofs.legacy import import_cfg, import_global_masks
-from ofs.masks import included, path_matches, split_masks
+from ofs.masks import any_match, included, path_matches, split_masks
 from ofs.model import Direction, ExclusionMode, Profile, SizeConflict, SymlinkMode, SyncMode, TimestampRules, parse_size
 from ofs.power import PowerActionError, run_completion_action
 from ofs.review import (
@@ -147,12 +147,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.checked: set[str] = set()
         self.session_skips: dict[str, set[str]] = {}
         self.session_masks: dict[str, list[str]] = {}
+        self._session_rule_locks: dict[str, threading.RLock] = {}
         self._labels: dict[str, Gtk.Label] = {}
         self._group_sizes: Counter = Counter()
         self._group_expanded: dict[str, bool] = {}
         self._applying_groups = False
         self._scan_running: set[str] = set()
         self._scan_batches: dict[int, dict] = {}
+        self._scan_previews: dict[str, Preview] = {}
+        self._live_completed: dict[str, Preview] = {}
         self._next_scan_batch = 0
         self._folder_copy_running: set[str] = set()
         self._path_available: dict[str, bool] = {}
@@ -1361,7 +1364,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 path = write_log(current, log_body(current, outcome.changes, outcome.report, choice="explicit new folder; no comparison or overwrites"))
             except Exception as exc:
                 outcome.report.errors.append(f"history/log: {exc}")
-            GLib.idle_add(self._whole_folder_finished, progress, outcome, path)
+            GLib.idle_add(self._whole_folder_finished, progress, outcome, path, priority=GLib.PRIORITY_DEFAULT)
 
         threading.Thread(target=work, daemon=True, name=f"OFS folder copy: {profile.name}").start()
         return progress
@@ -1395,6 +1398,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text("Check one or more profiles to scan without destination caches.")
             return
         self._run_names(chosen, uncached=True)
+
+    def _session_rule_lock(self, name: str) -> threading.RLock:
+        return self._session_rule_locks.setdefault(name, threading.RLock())
 
     def _run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
         selected = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
@@ -1439,15 +1445,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status.set_text(text)
 
     def _start_profile_scan(self, profile: Profile, batch_id: int, uncached: bool) -> None:
-        skips = {profile.name: set(self.session_skips.get(profile.name, set()))}
-        masks = {profile.name: list(self.session_masks.get(profile.name, []))}
+        skips = {profile.name: self.session_skips.setdefault(profile.name, set())}
+        masks = {profile.name: self.session_masks.setdefault(profile.name, [])}
         progress = ScanWindow(self, f"Scanning {profile.name}", estimates={profile.name: scan_estimate(profile.name)})
-        progress.present()
+        progress.control.rules_lock = self._session_rule_lock(profile.name)
+        preview = self._preview(JobResult(profile, ScanResult(changes=[]), None))
+        preview._begin_scan(progress)
+        self._scan_previews[profile.name] = preview
         # Closing the overview must not quit OFS before the result has a window.
         self._ofs_app.hold()
 
         def on_stats(name: str, side: str, rel: str, values) -> None:
-            GLib.idle_add(progress.update_stats, name, side, rel, values)
+            GLib.idle_add(progress.update_stats, name, side, rel, values, priority=GLib.PRIORITY_DEFAULT)
+
+        def on_entry(name: str, side: str, rel: str, stat) -> None:
+            if name == profile.name:
+                preview._queue_entry(side, rel, stat)
 
         def work() -> None:
             try:
@@ -1458,11 +1471,13 @@ class MainWindow(Gtk.ApplicationWindow):
                     session_masks=masks,
                     control=progress.control,
                     on_stats=on_stats,
+                    on_entry=on_entry,
                     force_uncached=uncached,
                 )
             except Exception as exc:
                 results = [JobResult(profile, None, str(exc))]
-            GLib.idle_add(self._scan_finished, batch_id, profile.name, results, progress)
+            # Completion must not starve behind live-tree batches and animation idle work.
+            GLib.idle_add(self._scan_finished, batch_id, profile.name, results, progress, priority=GLib.PRIORITY_DEFAULT)
 
         threading.Thread(target=work, daemon=True, name=f"OFS scan: {profile.name}").start()
 
@@ -1470,6 +1485,11 @@ class MainWindow(Gtk.ApplicationWindow):
         try:
             batch = self._scan_batches.get(batch_id)
             progress.allow_close()
+            live = self._scan_previews.pop(name, None)
+            if live is not None:
+                missing = JobResult(live.job.profile, None, "scan produced no result")
+                live._finish_scan(results[0] if results else missing)
+                self._live_completed[name] = live
             self._scan_running.discard(name)
             app = self._ofs_app
             if isinstance(app, SfsApplication):
@@ -1494,6 +1514,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _show_results(self, results: list[JobResult]) -> bool:
         if results and all(job.error == "scan stopped" for job in results):
+            for job in results:
+                self._live_completed.pop(job.profile.name, None)
             self._with_scan_activity("Scan stopped.")
             return False
         ok = sum(1 for job in results if job.error is None)
@@ -1514,6 +1536,17 @@ class MainWindow(Gtk.ApplicationWindow):
         if len(results) == 1 and results[0].error is None and results[0].result is not None:
             self._preview(results[0])
             return False
+        if len(results) == 1 and results[0].error is not None:
+            name = results[0].profile.name
+            self._live_completed.pop(name, None)
+            if name in self._labels:
+                self._labels[name].set_text(results[0].error or "scan unavailable")
+            return False
+        if len(results) > 1:
+            for job in results:
+                live = self._live_completed.get(job.profile.name)
+                if live is not None and not live._running:
+                    live.close()
         summary = Gtk.Window(transient_for=self, title="Scan")
         summary.set_application(self._ofs_app)
         summary.set_default_size(760, 420)
@@ -1546,7 +1579,9 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _preview(self, job: JobResult) -> None:
         assert job.result is not None
-        window = Preview(self, job)
+        window = self._live_completed.pop(job.profile.name, None)
+        if window is None:
+            window = Preview(self, job)
         window.present()
         return window
 
@@ -1869,6 +1904,23 @@ class Preview(Gtk.Window):
         }
         self.store = Gio.ListStore.new(PlanRow)
         self._running = False
+        self._scan_active = False
+        self._scan_complete = True
+        self._scan_progress: ScanWindow | None = None
+        self._copy_progress: ProgressWindow | None = None
+        self.scan_details: Gtk.Expander | None = None
+        self.copy_details: Gtk.Expander | None = None
+        self._entry_queue = deque()
+        self._entry_lock = threading.Lock()
+        self._entry_refresh_scheduled = False
+        self._live_refill_pending = False
+        self._live_seen: set[str] = set()
+        self._live_rows: dict[str, Listed] = {}
+        self._live_permanent_masks: set[str] = set()
+        self._file_iters = {}
+        self._completed_rows: dict[str, str] = {}
+        self._last_copy_done = 0
+        self._last_copy_errors = 0
         self._popover: Gtk.Popover | None = None
         self._fill_generation = 0
         self._pending_tree = []
@@ -1883,6 +1935,7 @@ class Preview(Gtk.Window):
             self.set_title(f"{job.profile.name} — Partial scan (review only)")
         self._build()
         self._refill()
+        self.connect("close-request", self._close_request)
 
     def _build(self) -> None:
         sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
@@ -1941,7 +1994,7 @@ class Preview(Gtk.Window):
         sidebar.append(self.completion_action)
         self.start_button = Gtk.Button(label="Rescan" if self.partial else "Start")
         self.start_button.add_css_class("suggested-action")
-        self.start_button.connect("clicked", self._rescan if self.partial else self._start)
+        self.start_button.connect("clicked", self._start_or_rescan)
         if self.partial:
             self.start_button.set_tooltip_text("After adding exclusions, start a complete fresh scan. Partial results cannot be copied or deleted.")
         close_button = Gtk.Button(label="Close")
@@ -1966,7 +2019,7 @@ class Preview(Gtk.Window):
         header.append(self._side_head("Left", self.job.profile.left, self.left_status))
         header.append(self._side_head("Right", self.job.profile.right, self.right_status))
 
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool])
         self.view = Gtk.TreeView(model=self.tree_store)
         self.view.set_headers_visible(True)
         self.view.set_enable_tree_lines(True)
@@ -1975,10 +2028,10 @@ class Preview(Gtk.Window):
         self.view.connect("row-expanded", self._remember_tree_state, True)
         self.view.connect("row-collapsed", self._remember_tree_state, False)
         for index, title, width in (
-            (0, "Name", 380),
-            (1, "Size", 100),
-            (2, "Direction", 220),
-            (3, "Status", 240),
+            (0, "Name", 320),
+            (1, "Size", 80),
+            (2, "Direction", 180),
+            (3, "Status", 300),
         ):
             renderer = Gtk.CellRendererText()
             renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
@@ -1991,6 +2044,7 @@ class Preview(Gtk.Window):
             if index == 2:
                 renderer.set_property("family", "monospace")
                 renderer.set_property("scale", 1.15)
+            column.set_cell_data_func(renderer, self._result_cell_style)
             self.view.append_column(column)
         click = Gtk.GestureClick()
         click.set_button(3)
@@ -2007,14 +2061,198 @@ class Preview(Gtk.Window):
         self.detail.set_hexpand(True)
         bar.append(self.detail)
         listing = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        self.operation_area = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         listing.append(header)
+        listing.append(self.operation_area)
         listing.append(scrolled)
         listing.append(bar)
         root = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        root.append(sidebar)
+        sidebar_scroll = Gtk.ScrolledWindow(vexpand=True)
+        sidebar_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        sidebar_scroll.set_child(sidebar)
+        root.append(sidebar_scroll)
         listing.set_hexpand(True)
         root.append(listing)
         self.set_child(root)
+
+    def _attach_operation_panel(self, progress: Gtk.Window, title: str) -> Gtk.Expander:
+        panel = progress.get_child()
+        assert panel is not None
+        # Keep the existing controls/callbacks, but present them above the tree.
+        progress.set_child(None)
+        expander = Gtk.Expander(label=title, expanded=True)
+        expander.set_tooltip_text("Show or collapse operation details without changing the plan")
+        expander.set_child(panel)
+        self.operation_area.append(expander)
+        return expander
+
+    def _begin_scan(self, progress: ScanWindow) -> None:
+        self._scan_active = True
+        self._scan_complete = False
+        self._scan_progress = progress
+        self.scan_details = self._attach_operation_panel(progress, f"Scanning {self.job.profile.name}")
+        self.start_button.set_label("Scanning…")
+        self.start_button.set_sensitive(False)
+        self.start_button.set_tooltip_text("Wait for the complete comparison, or cancel discovery")
+        self.completion_action.set_sensitive(False)
+        self.set_title(f"{self.job.profile.name} — Scanning")
+        self._refresh_detail()
+
+    def _queue_entry(self, side: str, rel: str, stat) -> None:
+        with self._entry_lock:
+            self._entry_queue.append((side, rel, stat))
+            if self._entry_refresh_scheduled:
+                return
+            self._entry_refresh_scheduled = True
+        GLib.idle_add(self._drain_pending)
+
+    def _live_hidden(self, rel: str) -> bool:
+        profile = self.job.profile
+        with self.owner._session_rule_lock(profile.name):
+            return (
+                rel in self.owner.session_skips.get(profile.name, set())
+                or any_match(rel, profile.exclusions + self.owner.session_masks.get(profile.name, []))
+            )
+
+    def _drain_pending(self) -> bool:
+        self._entry_refresh_scheduled = False
+        if not self._scan_active:
+            with self._entry_lock:
+                self._entry_queue.clear()
+            return False
+        for _ in range(_PREVIEW_BATCH_SIZE):
+            with self._entry_lock:
+                if not self._entry_queue:
+                    break
+                side, rel, stat = self._entry_queue.popleft()
+            if self._live_hidden(rel):
+                continue
+            existing = self._live_rows.get(rel)
+            if existing is None:
+                existing = Listed(
+                    Change(rel, Action.ASK, f"Discovered on {side.lower()}; awaiting comparison", stat.size),
+                    side == "Left", side == "Right",
+                )
+                self.rows.append(existing)
+                self._live_seen.add(rel)
+                self._live_rows[rel] = existing
+            else:
+                existing.on_left = existing.on_left or side == "Left"
+                existing.on_right = existing.on_right or side == "Right"
+                if existing.on_left and existing.on_right:
+                    existing.change = Change(rel, Action.ASK, "Seen on both sides; awaiting comparison", stat.size)
+            self._append_pending(existing)
+        self._refresh_detail()
+        self.shown.set_text(f"Discovered preview: {len(self._live_seen)} paths. Pending rows make no copy/delete decision.")
+        self._refresh_tree_layout()
+        if self._scan_active and self._entry_queue:
+            with self._entry_lock:
+                if self._entry_refresh_scheduled:
+                    return False
+                self._entry_refresh_scheduled = True
+            return True
+        return False
+
+    def _append_pending(self, row: Listed) -> None:
+        rel = row.change.rel
+        if not matches(row, **self.filters):
+            return
+        self._visible_changes[rel] = row.change
+        if self._scan_active and (self._pending_tree or self._replace_tree_model):
+            self._live_refill_pending = True
+            return
+        if rel in self._file_iters:
+            self.tree_store.set_value(self._file_iters[rel], 3, row.change.reason)
+            return
+        parts = rel.split("/")
+        parent = None
+        for depth, component in enumerate(parts[:-1], start=1):
+            prefix = "/".join(parts[:depth])
+            folder = self._folder_iters.get(prefix)
+            if folder is None:
+                folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False])
+                self._folder_iters[prefix] = folder
+            parent = folder
+        current = self.tree_store.append(
+            parent,
+            [parts[-1], format_bytes(row.change.size), "L ··· R", row.change.reason, rel, False],
+        )
+        self._file_iters[rel] = current
+        self.store.append(PlanRow(row.change))
+
+    def _filter_current_rules(self, job: JobResult) -> None:
+        if job.result is None:
+            return
+        profile = job.profile
+        with self.owner._session_rule_lock(profile.name):
+            exact = set(self.owner.session_skips.get(profile.name, set()))
+            session = list(self.owner.session_masks.get(profile.name, []))
+            permanent = list(self._live_permanent_masks)
+        def allowed(relative: str) -> bool:
+            return relative not in exact and not any_match(relative, session + permanent)
+        job.result.changes = [change for change in job.result.changes if allowed(change.rel) and (not change.dest_rel or allowed(change.dest_rel))]
+        job.result.listing = [row for row in job.result.listing if allowed(row.change.rel)]
+
+    def _finish_scan(self, job: JobResult) -> None:
+        self.job = job
+        self._filter_current_rules(job)
+        self._scan_active = False
+        self._scan_complete = job.result is not None
+        with self._entry_lock:
+            self._entry_queue.clear()
+        self._live_seen.clear()
+        self._live_rows.clear()
+        progress = self._scan_progress
+        if progress is not None:
+            progress.pause_button.set_sensitive(False)
+            progress.skip_button.set_sensitive(False)
+            progress.cancel_button.set_sensitive(False)
+        if self.scan_details is not None:
+            self.scan_details.set_expanded(False)
+            self.scan_details.set_label("Scan complete" if self._scan_complete else "Scan stopped / unavailable")
+        if job.result is not None:
+            result = job.result
+            self.rows = list(result.listing) if result.listing else [Listed(change, False, False) for change in result.changes]
+            self._original = {row.change.rel: row.change for row in self.rows}
+            self.partial = bool(result.partial_sides)
+            self.set_title(f"{job.profile.name} — Partial scan (review only)" if self.partial else job.profile.name)
+            self.start_button.set_label("Rescan" if self.partial else "Start")
+            self.start_button.set_sensitive(True)
+            if self.partial:
+                self.start_button.set_tooltip_text("After adding exclusions, start a complete fresh scan. Partial results cannot be copied or deleted.")
+            else:
+                self.start_button.set_tooltip_text(None)
+            self.completion_action.set_sensitive(not self.partial)
+        else:
+            self.partial = True
+            self.detail.set_text(job.error or "Scan stopped")
+            self.start_button.set_label("Scan incomplete")
+            self.start_button.set_sensitive(False)
+            self.completion_action.set_sensitive(False)
+            self.set_title(f"{job.profile.name} — Scan stopped")
+        self._refill()
+
+    def _close_request(self, *_args) -> bool:
+        if self._scan_active and self._scan_progress is not None:
+            self._scan_progress._cancel()
+            self.detail.set_text("Canceling discovery… The page stays open until the worker stops.")
+            return True
+        if self._running and self._copy_progress is not None:
+            self._copy_progress._cancel()
+            self.detail.set_text("Canceling at the next file/chunk boundary…")
+            return True
+        if self.owner._live_completed.get(self.job.profile.name) is self:
+            self.owner._live_completed.pop(self.job.profile.name, None)
+        return False
+
+    def _start_or_rescan(self, *_args) -> None:
+        if self.partial and self._scan_complete:
+            self._rescan()
+        else:
+            self._start()
+
+    def _result_cell_style(self, _column, renderer, model, tree_iter, _data) -> None:
+        renderer.set_property("sensitive", not model.get_value(tree_iter, 5))
 
     def _side_head(self, title: str, path: str, status: Gtk.Label) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -2097,6 +2335,9 @@ class Preview(Gtk.Window):
             self.shown.set_text(f"Updating visible list: {len(visible)} files…")
             GLib.idle_add(self._fill_some, self._fill_generation)
             return
+        self._pending_tree = []
+        self._replace_tree_model = False
+        self._live_refill_pending = False
         self.store = Gio.ListStore.new(PlanRow)
         for row in visible:
             self.store.append(PlanRow(row.change))
@@ -2104,20 +2345,25 @@ class Preview(Gtk.Window):
         self._refresh_detail()
 
     def _reset_tree_model(self) -> None:
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool])
         # Replace only the GTK model. Exclusion/filter helpers own the flat store.
         self.view.set_model(self.tree_store)
         self._folder_iters = {}
+        self._file_iters = {}
+
+    def _node_values(self, node) -> list:
+        label = node.name if node.is_file else f"{node.name}    {node.size_text}"
+        status = self._completed_rows.get(node.rel, node.status)
+        return [label, node.size_text, node.direction, status, node.rel, node.rel in self._completed_rows]
 
     def _fill_tree(self, visible: list[Listed]) -> None:
         self._reset_tree_model()
 
         def add(parent, node) -> None:
-            label = node.name if node.is_file else f"{node.name}    {node.size_text}"
-            current = self.tree_store.append(
-                parent, [label, node.size_text, node.direction, node.status, node.rel]
-            )
-            if not node.is_file:
+            current = self.tree_store.append(parent, self._node_values(node))
+            if node.is_file:
+                self._file_iters[node.rel] = current
+            else:
                 self._folder_iters[node.rel] = current
             for child in node.children:
                 add(current, child)
@@ -2135,15 +2381,19 @@ class Preview(Gtk.Window):
             self._replace_tree_model = False
         for _ in range(min(_PREVIEW_BATCH_SIZE, len(self._pending_tree))):
             parent, node = self._pending_tree.pop()
-            label = node.name if node.is_file else f"{node.name}    {node.size_text}"
-            current = self.tree_store.append(parent, [label, node.size_text, node.direction, node.status, node.rel])
+            current = self.tree_store.append(parent, self._node_values(node))
             if node.is_file:
+                self._file_iters[node.rel] = current
                 self.store.append(PlanRow(self._visible_changes[node.rel]))
             else:
                 self._folder_iters[node.rel] = current
             self._pending_tree.extend((current, child) for child in reversed(node.children))
         if self._pending_tree:
             return True
+        if self._scan_active and self._live_refill_pending:
+            self._live_refill_pending = False
+            self._refill()
+            return False
         self._refresh_tree_layout()
         self._refresh_detail()
         return False
@@ -2305,9 +2555,11 @@ class Preview(Gtk.Window):
         if not mask:
             return
         profile = self.job.profile
-        if mask not in profile.exclusions:
-            profile.exclusions.append(mask)
-            save_profile(profile)
+        with self.owner._session_rule_lock(profile.name):
+            self._live_permanent_masks.add(mask)
+            if mask not in profile.exclusions:
+                profile.exclusions.append(mask)
+                save_profile(profile)
         self.rows = [item for item in self.rows if not path_matches(item.change.rel, mask)]
         self._refill()
         self.owner.reload()
@@ -2365,8 +2617,9 @@ class Preview(Gtk.Window):
         if not gone:
             return
         masks = self.owner.session_masks.setdefault(self.job.profile.name, [])
-        if folder not in masks:
-            masks.append(folder)
+        with self.owner._session_rule_lock(self.job.profile.name):
+            if folder not in masks:
+                masks.append(folder)
         drop = set(gone)
         self.rows = [item for item in self.rows if item.change.rel not in drop]
         self._refill()
@@ -2381,11 +2634,13 @@ class Preview(Gtk.Window):
                 return
             mask = f"*{suffix}"
             masks = self.owner.session_masks.setdefault(name, [])
-            if mask not in masks:
-                masks.append(mask)
+            with self.owner._session_rule_lock(name):
+                if mask not in masks:
+                    masks.append(mask)
             self.rows = [item for item in self.rows if Path(item.change.rel).suffix != suffix]
         else:
-            self.owner.session_skips.setdefault(name, set()).add(row.change.rel)
+            with self.owner._session_rule_lock(name):
+                self.owner.session_skips.setdefault(name, set()).add(row.change.rel)
             self._drop(row.change.rel)
             return
         self._refill()
@@ -2395,6 +2650,14 @@ class Preview(Gtk.Window):
         self._refill()
 
     def _refresh_detail(self) -> None:
+        if self._scan_active:
+            self.left_status.set_text("Discovery in progress; no copy/delete decision yet")
+            self.right_status.set_text("Pending or cached metadata; final comparison follows")
+            self.detail.set_text("Live discovery is review-only. Start is unlocked only after the complete comparison.")
+            return
+        if not self._scan_complete:
+            self.detail.set_text(f"{self.job.error or 'Scan stopped'}. Incomplete discovery is review-only and cannot be applied.")
+            return
         planned = self._planned()
         left, right = status_lines(planned)
         self.left_status.set_text(left)
@@ -2410,8 +2673,11 @@ class Preview(Gtk.Window):
         self.detail.set_text(text)
 
     def _start(self, *_args) -> None:
-        """A programmatic click must not make a partial listing into a file operation."""
+        """A pending or partial listing must never become a file operation."""
 
+        if self._scan_active or not self._scan_complete:
+            self.detail.set_text("Discovery is not complete. Pending entries cannot be copied, moved, or deleted.")
+            return
         if self.partial:
             self.detail.set_text("This is a partial, review-only scan. Add exclusions, then choose Rescan.")
             return
@@ -2504,14 +2770,23 @@ class Preview(Gtk.Window):
         return window
 
     def _begin(self, changes: list[Change], choice: str) -> None:
-        app = self.owner.get_application()
+        if self._scan_active or not self._scan_complete or self.partial:
+            self.detail.set_text("Only a complete comparison can be applied. Rescan after incomplete or skipped discovery.")
+            return
+        app = _owner_application(self.owner)
         if isinstance(app, SfsApplication) and not app.claim_profile(self.job.profile.name):
             self.detail.set_text("This profile is already scanning or copying in another OFS window. Wait for that operation to finish.")
             return
         self._running = True
         self.start_button.set_sensitive(False)
         progress = ProgressWindow(self, self.job.profile.name)
-        progress.present()
+        self._copy_progress = progress
+        self.copy_details = self._attach_operation_panel(progress, f"Copying {self.job.profile.name}")
+        self._copy_planned = {change.rel: change for change in changes}
+        self._last_copy_done = 0
+        self._last_copy_errors = 0
+        if self.scan_details is not None:
+            self.scan_details.set_expanded(False)
 
         def work() -> None:
             report = ApplyReport()
@@ -2521,7 +2796,7 @@ class Preview(Gtk.Window):
                     self.job.profile,
                     changes,
                     control=progress.control,
-                    on_copy_progress=lambda update: GLib.idle_add(progress.update, update),
+                    on_copy_progress=lambda update: GLib.idle_add(self._update_copy, progress, update, priority=GLib.PRIORITY_DEFAULT),
                     bytes_per_second=copy_speed_limit(),
                     listing=self.rows,
                 )
@@ -2542,13 +2817,47 @@ class Preview(Gtk.Window):
                     path = write_log(self.job.profile, log_body(self.job.profile, changes, report, choice=choice))
                 except Exception as exc:
                     report.errors.append(f"log: {exc}")
-            GLib.idle_add(self._finished, progress, report, path)
+            GLib.idle_add(self._finished, progress, report, path, priority=GLib.PRIORITY_DEFAULT)
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _update_copy(self, progress: ProgressWindow, event: CopyProgress) -> bool:
+        if progress is not self._copy_progress:
+            return False
+        progress.update(event)
+        if event.rel and event.completed > self._last_copy_done:
+            self._last_copy_done = event.completed
+            change = self._copy_planned.get(event.rel)
+            if change is not None and event.errors == self._last_copy_errors:
+                label = {
+                    Action.COPY_LEFT_TO_RIGHT: "Copied",
+                    Action.COPY_RIGHT_TO_LEFT: "Copied",
+                    Action.MOVE_ON_LEFT: "Moved",
+                    Action.MOVE_ON_RIGHT: "Moved",
+                    Action.DELETE_LEFT: "Deleted",
+                    Action.DELETE_RIGHT: "Deleted",
+                    Action.ASK: "Skipped",
+                }[change.action]
+                for rel in (change.rel, change.dest_rel):
+                    if not rel:
+                        continue
+                    self._completed_rows[rel] = f"{label} · {change.reason}"
+                    tree_iter = self._file_iters.get(rel)
+                    if tree_iter is not None:
+                        self.tree_store.set_value(tree_iter, 3, self._completed_rows[rel])
+                        self.tree_store.set_value(tree_iter, 5, True)
+        self._last_copy_errors = event.errors
+        return False
+
     def _finished(self, progress: ProgressWindow, report: ApplyReport, path: Path | None) -> bool:
         progress.allow_close()
-        app = self.owner.get_application()
+        if self.copy_details is not None:
+            self.copy_details.set_expanded(False)
+            self.copy_details.set_label("Copy complete")
+        if self._copy_progress is not None:
+            self._copy_progress.pause_button.set_sensitive(False)
+            self._copy_progress.cancel_button.set_sensitive(False)
+        app = _owner_application(self.owner)
         if isinstance(app, SfsApplication):
             app.release_profile(self.job.profile.name)
         self._running = False
@@ -2560,10 +2869,14 @@ class Preview(Gtk.Window):
         power_note = ""
         if action != "none":
             label = self.completion_action.get_selected_item().get_string().lower()
-            app = self.owner.get_application()
+            app = _owner_application(self.owner)
             active_copies = [
                 window for window in (app.get_windows() if app is not None else [])
-                if isinstance(window, ProgressWindow) and window is not progress and not window._allow_close
+                if (
+                    isinstance(window, ProgressWindow) and window is not progress and not window._allow_close
+                ) or (
+                    isinstance(window, Preview) and window is not self and window._running
+                )
             ]
             if report.cancelled or report.errors:
                 power_note = f" {label.capitalize()} was not run because the copy was canceled or had errors."
@@ -2690,6 +3003,8 @@ class ScanWindow(Gtk.Window):
         return False
 
     def update_stats(self, name: str, side: str, rel: str, values) -> bool:
+        if self._allow_close:
+            return False
         self._update_location(name, side, rel)
         self._stats[side] = {
             "discovered": values.discovered,
@@ -3193,12 +3508,14 @@ class BulkEditWindow(Gtk.Window):
         for side in ("start", "end", "top", "bottom"):
             getattr(root, f"set_margin_{side}")(12)
         self.field = Gtk.DropDown.new_from_strings([item.label for item in FIELDS])
+        self.field.set_enable_search(True)
+        self.field.set_tooltip_text("Choose a setting or type to search. Destination metadata cache has explicit Off and On choices; the other fields stay unchanged.")
         self.field.connect("notify::selected", lambda *_: self._show_value())
         self.value_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.value_widget: Gtk.Widget | None = None
         self.mask_operation: Gtk.DropDown | None = None
         self.preview = Gtk.Label(xalign=0, wrap=True)
-        self.preview.set_text(f"{len(profiles)} checked profiles. Choose one field to change; other fields are preserved.")
+        self.preview.set_text(f"{len(profiles)} checked profiles. Choose one field to change; other fields are preserved. Type cache in Field to change to find persistent destination metadata caching, then choose Off or On.")
         self.apply = Gtk.Button(label="Preview Changes…")
         self.apply.add_css_class("suggested-action")
         self.apply.connect("clicked", self._preview_changes)

@@ -60,8 +60,10 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Scan progress separates profile and reading side from the path. A fixed-height, theme-aware path panel uses bounded middle truncation instead of wrap-driven resizing. Full path text remains selectable/copyable and available in the tooltip. Statistics, progress, and controls have consistent spacing.
 - Scan progress includes discovered/filtered/added counts, elapsed time, and entries per second.
 - The first completed scan has no ETA. Later scans show an approximate history-based `~` ETA, refined using current discovery pace and expected remaining entries. Paused time is excluded, and skipped or canceled scans do not replace a previous estimate.
-- Each profile's scan window has independent **Pause**, **Skip Rest**, and **Cancel** controls. They affect that profile only; unrelated parallel scans continue.
+- Each profile's live preview has independent **Pause**, **Skip Rest**, and **Cancel** controls. It fills a pending metadata tree in bounded batches, with live Ignore/Exclude across the remaining walk, queued rows, and final plan. Start and power choices stay disabled before a complete comparison. Scan controls collapse at completion while remaining available for expansion. Temporary exclusions do not overwrite persistent cache/history with incomplete walks. Closing the main overview still preserves detached results and their operation safeguards. Unrelated parallel scans continue.
 - **Skip Rest** preserves discovered entries in a clearly marked **Partial scan (review only)** preview. Add permanent or session exclusions there, then choose **Rescan**. Copying/deleting and power actions are disabled, no history/cache/ETA estimate is replaced, and CLI `--apply` also refuses partial results. **Cancel** produces no partial preview; neither action writes a copy log.
+
+- Normal comparison copying shares the preview page and an independently collapsible byte/progress panel. Completed rows are labeled and use subdued styling without disappearing or changing the plan. Closing active work requests cancellation and retains the page until its safe boundary; canceled partial copies and failed entries are not falsely marked successful.
 
 ## Destination metadata cache
 
