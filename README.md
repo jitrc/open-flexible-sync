@@ -4,6 +4,10 @@ OFS is a GTK 4 desktop application for synchronizing local and OS-mounted folder
 
 ## Features
 
+![OFS overview with synthetic profiles, nested groups, and themed rows](docs/ofs-overview.png)
+
+*The screenshot uses fictional profiles and placeholder paths. It shows the current source interface, including custom subgroups, themed row separation, and the header appearance toggle.*
+
 ### Profile overview
 
 - Imported/name-derived profiles with a shared first-word prefix form collapsible groups; singleton prefixes remain ordinary ungrouped rows. An optional **Group / subgroups** field in Edit allows arbitrary custom groups even for single profiles.
