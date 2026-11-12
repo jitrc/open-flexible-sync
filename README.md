@@ -24,17 +24,15 @@ Use local folders or OS-mounted NAS, SMB/CIFS, NFS, SSHFS, and rclone storage.
 
 ## Install
 
-> **Version note:** the currently published `v0.2.0` downloads predate many features above. [Run the current source](#source-and-testing) for those additions.
-
 OFS needs **Python 3.11+ and GTK 4 on the machine**; neither is bundled.
 
 ### AppImage
 
-**[Download OFS-0.2.0 for x86_64](https://github.com/jitrc/open-flexible-sync/releases/download/v0.2.0/OFS-0.2.0-x86_64.AppImage)**
+**[Download OFS-0.3.0 for x86_64](https://github.com/jitrc/open-flexible-sync/releases/download/v0.3.0/OFS-0.3.0-x86_64.AppImage)**
 
 ```bash
-chmod +x OFS-0.2.0-x86_64.AppImage
-./OFS-0.2.0-x86_64.AppImage
+chmod +x OFS-0.3.0-x86_64.AppImage
+./OFS-0.3.0-x86_64.AppImage
 ```
 
 If GTK support is missing on Debian/Ubuntu:
@@ -51,11 +49,11 @@ sudo dnf install python3-gobject gtk4
 
 ### Tar archive
 
-For machines without AppImage, download `OFS-0.2.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/jitrc/open-flexible-sync/releases):
+For machines without AppImage, download `OFS-0.3.0-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/jitrc/open-flexible-sync/releases):
 
 ```bash
-tar -xzf OFS-0.2.0-linux-x86_64.tar.gz
-./OFS-0.2.0/ofs
+tar -xzf OFS-0.3.0-linux-x86_64.tar.gz
+./OFS-0.3.0/ofs
 ```
 
 ## Overview
