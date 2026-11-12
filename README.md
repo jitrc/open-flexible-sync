@@ -59,7 +59,7 @@ tar -xzf OFS-0.2.0-linux-x86_64.tar.gz
 
 ## Overview
 
-![OFS overview with synthetic profiles, nested groups, and themed rows](docs/ofs-overview.png)
+![OFS overview with symbolic header icons, synthetic profiles, nested groups, and themed rows](docs/ofs-overview.png)
 
 *The screenshot uses fictional profiles and placeholder paths. It shows the current source interface.*
 

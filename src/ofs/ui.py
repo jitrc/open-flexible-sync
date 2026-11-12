@@ -99,6 +99,21 @@ def _fixed_path_label(text: str) -> Gtk.Label:
     return label
 
 
+def _button_icon(button, label: str, icon_name: str, *, icon_only: bool = False) -> None:
+    """Use a symbolic icon without losing the action's accessible name."""
+
+    button.update_property([Gtk.AccessibleProperty.LABEL], [label])
+    if icon_only:
+        button.set_icon_name(icon_name)
+        return
+    image = Gtk.Image.new_from_icon_name(icon_name)
+    image.set_icon_size(Gtk.IconSize.NORMAL)
+    content = Gtk.Box(spacing=6)
+    content.append(image)
+    content.append(Gtk.Label(label=label))
+    button.set_child(content)
+
+
 def open_uri(path: Path) -> None:
     if not path.exists():
         return
@@ -140,12 +155,15 @@ class MainWindow(Gtk.ApplicationWindow):
 
         header = Gtk.HeaderBar()
         self.set_titlebar(header)
-        new_button = Gtk.Button(label="New profile")
+        new_button = Gtk.Button()
+        _button_icon(new_button, "New profile", "document-new-symbolic")
         new_button.connect("clicked", self._new_profile)
-        restore_button = Gtk.Button(label="Restore Older…")
+        restore_button = Gtk.Button()
+        _button_icon(restore_button, "Restore Older…", "document-revert-symbolic")
         restore_button.set_tooltip_text("Restore an archived file to a separate folder")
         restore_button.connect("clicked", self._restore_older)
-        self.profiles_menu = Gtk.MenuButton(label="Profiles")
+        self.profiles_menu = Gtk.MenuButton()
+        _button_icon(self.profiles_menu, "Profiles", "open-menu-symbolic")
         self.profiles_menu.set_tooltip_text("Import, export, and edit checked profiles")
         popover = Gtk.Popover()
         choices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
@@ -172,20 +190,26 @@ class MainWindow(Gtk.ApplicationWindow):
             choices.append(button)
         popover.set_child(choices)
         self.profiles_menu.set_popover(popover)
-        self.appearance_button = Gtk.ToggleButton(label="Dark")
+        self.appearance_button = Gtk.ToggleButton()
+        _button_icon(self.appearance_button, "Toggle dark mode", "weather-clear-symbolic", icon_only=True)
         self.appearance_button.connect("toggled", self._toggle_appearance)
         gtk_settings = Gtk.Settings.get_default()
         if gtk_settings is not None:
             gtk_settings.connect("notify::gtk-application-prefer-dark-theme", lambda *_: self._refresh_appearance())
             gtk_settings.connect("notify::gtk-theme-name", lambda *_: self._refresh_appearance())
         self._refresh_appearance()
-        self.run_button = Gtk.Button(label="Run checked")
+        self.run_button = Gtk.Button()
+        _button_icon(self.run_button, "Run checked", "media-playback-start-symbolic")
+        self.run_button.set_tooltip_text("Scan the checked profiles")
         self.run_button.add_css_class("run")
         self.run_button.connect("clicked", self._run)
-        self.uncached_button = Gtk.Button(label="Run uncached")
+        self.uncached_button = Gtk.Button()
+        _button_icon(self.uncached_button, "Run uncached", "view-refresh-symbolic")
         self.uncached_button.set_tooltip_text("Freshly scan checked profiles without destination caches; saved cache settings stay enabled")
         self.uncached_button.connect("clicked", self._run_uncached)
-        settings_button = Gtk.Button(label="Settings")
+        settings_button = Gtk.Button()
+        _button_icon(settings_button, "Settings", "emblem-system-symbolic", icon_only=True)
+        settings_button.set_tooltip_text("Settings")
         settings_button.connect("clicked", self._settings)
         header.pack_start(new_button)
         header.pack_start(self.profiles_menu)
@@ -591,6 +615,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._updating_appearance = True
         try:
             self.appearance_button.set_active(dark)
+            self.appearance_button.set_icon_name("weather-clear-night-symbolic" if dark else "weather-clear-symbolic")
             state = "on" if dark else "off"
             self.appearance_button.set_tooltip_text(f"Dark mode is {state}. Click for the opposite appearance; System mode is available in Settings.")
         finally:

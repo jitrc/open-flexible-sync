@@ -75,12 +75,14 @@ def test_settings_save_applies_light_dark_and_system(tmp_path, monkeypatch):
             seen["dark"] = appearance_is_dark()
             seen["dark_foreground"] = _foreground(window.search)
             seen["toggle_dark"] = window.appearance_button.get_active()
+            seen["dark_icon"] = window.appearance_button.get_icon_name()
             seen["saved_dark"] = theme()
             appearance.set_selected(1)  # Light
             save.emit("clicked")
             seen["light"] = appearance_is_dark()
             seen["light_foreground"] = _foreground(window.search)
             seen["toggle_light"] = window.appearance_button.get_active()
+            seen["light_icon"] = window.appearance_button.get_icon_name()
             seen["saved_light"] = theme()
             window.appearance_button.emit("clicked")
             seen["quick_dark"] = (window.appearance_button.get_active(), appearance_is_dark(), theme())
@@ -100,6 +102,8 @@ def test_settings_save_applies_light_dark_and_system(tmp_path, monkeypatch):
     assert seen["dark_foreground"] > 0.8
     assert seen["light_foreground"] < 0.5
     assert seen["toggle_dark"] is True and seen["toggle_light"] is False
+    assert seen["dark_icon"] == "weather-clear-night-symbolic"
+    assert seen["light_icon"] == "weather-clear-symbolic"
     assert seen["quick_dark"] == (True, True, "dark")
     assert seen["quick_light"] == (False, False, "light")
     assert seen["system"] in {True, False}

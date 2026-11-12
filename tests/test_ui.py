@@ -50,14 +50,17 @@ def _buttons(widget) -> list[Gtk.Button]:
 
 
 def _run_buttons_are_marked(widget) -> bool:
-    runs = [button for button in _buttons(widget) if button.get_label() in {"Run", "Run checked"}]
+    runs = [button for button in _buttons(widget) if "run" in button.get_css_classes()]
     return bool(runs) and all("run" in button.get_css_classes() for button in runs)
 
 
 def _button_labels(widget) -> list[str]:
     found = []
-    if isinstance(widget, Gtk.Button) and widget.get_label():
-        found.append(widget.get_label())
+    if isinstance(widget, (Gtk.Button, Gtk.MenuButton)):
+        if widget.get_label():
+            found.append(widget.get_label())
+        else:
+            found.extend(item.get_label() for item in _widgets(widget) if isinstance(item, Gtk.Label) and item.get_label())
     visited = []
     child = widget.get_first_child()
     while child is not None:
@@ -907,7 +910,8 @@ def test_different_profiles_scan_in_parallel_but_same_profile_cannot_duplicate(t
                 return original_show_results(results)
 
             window._show_results = record_results
-            seen["uncached_button"] = window.uncached_button.get_label()
+            seen["uncached_button"] = _button_labels(window.uncached_button)[0]
+            seen["uncached_icon"] = next(item.get_icon_name() for item in _widgets(window.uncached_button) if isinstance(item, Gtk.Image))
             seen["uncached_tooltip"] = window.uncached_button.get_tooltip_text()
             window._run_names({"alpha"})
             seen["alpha_status"] = window._labels["alpha"].get_text()
@@ -929,6 +933,7 @@ def test_different_profiles_scan_in_parallel_but_same_profile_cannot_duplicate(t
 
     assert App().run(None) == 0
     assert seen["uncached_button"] == "Run uncached"
+    assert seen["uncached_icon"] == "view-refresh-symbolic"
     assert "without destination caches" in seen["uncached_tooltip"]
     assert seen["alpha_status"] == "Scanning…"
     assert "already scanning" in seen["duplicate_status"]
@@ -1058,6 +1063,8 @@ def test_row_run_scans_that_profile_only(tmp_path, monkeypatch):
             seen["runs"] = _button_labels(window).count("Run")
             seen["title"] = window.get_title()
             seen["run_class"] = "run" in window.run_button.get_css_classes() and _run_buttons_are_marked(window)
+            seen["run_icon"] = next(item.get_icon_name() for item in _widgets(window.run_button) if isinstance(item, Gtk.Image))
+            seen["settings_icon"] = next(button.get_icon_name() for button in _buttons(window.get_titlebar()) if button.get_icon_name() == "emblem-system-symbolic")
             window._run_one(None, "beta quiet")
             ticks = {"n": 0}
 
@@ -1076,6 +1083,8 @@ def test_row_run_scans_that_profile_only(tmp_path, monkeypatch):
     assert seen["runs"] == 2
     assert seen["title"] == "OFS"
     assert seen["run_class"]
+    assert seen["run_icon"] == "media-playback-start-symbolic"
+    assert seen["settings_icon"] == "emblem-system-symbolic"
     assert seen["status"].startswith("Scanned 1.")
     assert "0 files, 0 B to copy" in seen["status"]
 
