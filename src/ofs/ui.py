@@ -9,7 +9,7 @@ import subprocess
 import threading
 import time
 from collections import Counter
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import gi
 
@@ -24,10 +24,12 @@ from ofs.archive import older_files, restore_version
 from ofs.bulk import FIELDS, bulk_preview, prepare_bulk_edit
 from ofs.compare import Action, Change, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
+from ofs.folder_copy import FolderCopyOutcome, copy_new_folder
 from ofs.history import delete_history
 from ofs.legacy import import_cfg, import_global_masks
 from ofs.masks import included, path_matches, split_masks
 from ofs.model import Direction, ExclusionMode, Profile, SizeConflict, SymlinkMode, SyncMode, TimestampRules, parse_size
+from ofs.power import PowerActionError, run_completion_action
 from ofs.review import (
     SAFETY_SECONDS,
     Listed,
@@ -44,7 +46,7 @@ from ofs.review import (
     without_deletes,
     write_log,
 )
-from ofs.scan import invalidate_cached_destinations, remember
+from ofs.scan import ScanResult, invalidate_cached_destinations, remember
 from ofs.settings import (
     compare_command,
     global_exclusion_mode,
@@ -149,6 +151,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._scan_running: set[str] = set()
         self._scan_batches: dict[int, dict] = {}
         self._next_scan_batch = 0
+        self._folder_copy_running: set[str] = set()
         self._path_available: dict[str, bool] = {}
         self._visible_count = 0
         self._updating_appearance = False
@@ -181,6 +184,7 @@ class MainWindow(Gtk.ApplicationWindow):
         choices.append(Gtk.Separator())
         choices.append(Gtk.Label(label="Checked profiles", xalign=0, css_classes=["dim-label"]))
         for label, callback in (
+            ("Copy new folder…", self._copy_new_folder),
             ("Multi Edit checked profiles…", self._multi_edit),
             ("Replace paths in checked profiles…", self._replace_paths),
             ("Rename checked profiles…", self._rename_checked),
@@ -918,10 +922,23 @@ class MainWindow(Gtk.ApplicationWindow):
         hint.add_css_class("dim-label")
         box.append(entry)
         box.append(hint)
-        box.append(Gtk.Label(label="Copy speed limit (MiB/s; 0 = unlimited)", xalign=0))
+        box.append(Gtk.Label(label="Copy speed limit (MiB/s)", xalign=0))
         speed = Gtk.SpinButton.new_with_range(0, 1024, 0.1)
         speed.set_value(copy_speed_limit() / (1024 * 1024))
-        speed.set_tooltip_text("One shared limit for the whole copy run")
+        speed.set_tooltip_text("One shared limit for the whole copy run: mebibytes per second, not network megabits")
+        speed_presets = Gtk.DropDown.new_from_strings(["Unlimited", "1 MiB/s", "10 MiB/s", "100 MiB/s", "Custom"])
+        preset_values = [0.0, 1.0, 10.0, 100.0]
+
+        def choose_speed(*_args) -> None:
+            selected = speed_presets.get_selected()
+            speed.set_sensitive(selected == len(preset_values))
+            if selected < len(preset_values):
+                speed.set_value(preset_values[selected])
+
+        speed_presets.set_selected(next((index for index, value in enumerate(preset_values) if speed.get_value() == value), len(preset_values)))
+        speed_presets.connect("notify::selected", choose_speed)
+        choose_speed()
+        box.append(speed_presets)
         box.append(speed)
         box.append(Gtk.Label(label="Global exclusions", xalign=0))
         masks = Gtk.TextView()
@@ -1031,11 +1048,45 @@ class MainWindow(Gtk.ApplicationWindow):
         max_size = Gtk.Entry(text="" if existing is None or not existing.max_size else str(existing.max_size))
         min_age = Gtk.Entry(text="" if existing is None or not existing.min_age_days else str(existing.min_age_days))
         max_age = Gtk.Entry(text="" if existing is None or not existing.max_age_days else str(existing.max_age_days))
+        def browse_directory(_button, entry: Gtk.Entry, title: str) -> None:
+            chooser = Gtk.FileChooserDialog(
+                title=f"Choose {title} folder",
+                transient_for=window,
+                modal=True,
+                action=Gtk.FileChooserAction.SELECT_FOLDER,
+            )
+            chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Choose folder", Gtk.ResponseType.ACCEPT)
+            current_path = Path(entry.get_text().strip())
+            if current_path.is_dir():
+                chooser.set_current_folder(Gio.File.new_for_path(str(current_path)))
+
+            def chosen(_dialog, response) -> None:
+                if response == Gtk.ResponseType.ACCEPT:
+                    selected_file = chooser.get_file()
+                    path = selected_file.get_path() if selected_file is not None else None
+                    if path:
+                        entry.set_text(path)
+                chooser.close()
+
+            chooser.connect("response", chosen)
+            chooser.present()
+
+        def directory_entry(entry: Gtk.Entry, title: str) -> Gtk.Box:
+            box = Gtk.Box(spacing=8, hexpand=True)
+            entry.set_hexpand(True)
+            browse = Gtk.Button()
+            _button_icon(browse, "Browse…", "folder-open-symbolic")
+            browse.set_tooltip_text(f"Choose an existing {title.lower()} local or mounted folder; typing a path is also supported")
+            browse.connect("clicked", browse_directory, entry, title)
+            box.append(entry)
+            box.append(browse)
+            return box
+
         rows = [
             ("Name", name),
             ("Group / subgroups", group),
-            ("Left", left),
-            ("Right", right),
+            ("Left", directory_entry(left, "Left")),
+            ("Right", directory_entry(right, "Right")),
             ("Left volume", left_volume),
             ("Right volume", right_volume),
             ("Mode", mode),
@@ -1138,6 +1189,132 @@ class MainWindow(Gtk.ApplicationWindow):
         window.set_child(editor_scroll)
         window.present()
         return window
+
+    def _copy_new_folder(self, *_args) -> Gtk.Window | None:
+        enabled = [profile for profile in self.profiles if profile.name in self.checked and not profile.disabled]
+        if len(enabled) != 1:
+            self.status.set_text("Check exactly one enabled profile, then choose its new source folder.")
+            return None
+        profile = enabled[0]
+        if profile.direction == Direction.BOTH:
+            self.status.set_text("Copy new folder needs a one-way profile, so the destination is unambiguous.")
+            return None
+        if profile.name in self._scan_running or profile.name in self._folder_copy_running:
+            self.status.set_text("This profile is already scanning or copying a new folder. Wait for it to finish first.")
+            return None
+        source_root = Path(profile.left if profile.direction == Direction.LEFT_TO_RIGHT else profile.right)
+        if not source_root.is_dir():
+            self.status.set_text("The selected profile's source folder is not available.")
+            return None
+        chooser = Gtk.FileChooserDialog(
+            title="Choose a new folder to copy without comparison",
+            transient_for=self,
+            modal=True,
+            action=Gtk.FileChooserAction.SELECT_FOLDER,
+        )
+        chooser.add_buttons("Cancel", Gtk.ResponseType.CANCEL, "Continue", Gtk.ResponseType.ACCEPT)
+        chooser.set_current_folder(Gio.File.new_for_path(str(source_root)))
+
+        def selected(_dialog, response) -> None:
+            if response != Gtk.ResponseType.ACCEPT:
+                chooser.close()
+                return
+            selected_file = chooser.get_file()
+            try:
+                path = Path(selected_file.get_path()).absolute()
+                relative = path.relative_to(source_root.absolute()).as_posix()
+            except (AttributeError, OSError, TypeError, ValueError):
+                self.status.set_text("Choose an existing subfolder inside the source side of the selected profile.")
+                return
+            chooser.close()
+            self._confirm_new_folder(profile, relative)
+
+        chooser.connect("response", selected)
+        chooser.present()
+        return chooser
+
+    def _confirm_new_folder(self, profile: Profile, relative: str) -> None:
+        source_root = Path(profile.left if profile.direction == Direction.LEFT_TO_RIGHT else profile.right)
+        destination_root = Path(profile.right if profile.direction == Direction.LEFT_TO_RIGHT else profile.left)
+        source = source_root / relative
+        destination = destination_root / relative
+        if not source.is_dir():
+            self.status.set_text("Choose an existing source subfolder inside the selected profile.")
+            return
+        if os.path.lexists(destination):
+            self.status.set_text("The matching destination already exists. Use a normal complete scan instead; nothing was changed.")
+            return
+        dialog = Gtk.AlertDialog()
+        dialog.set_message(f"Copy the whole new folder {relative!r}?")
+        dialog.set_detail(
+            f"From: {source}\nTo: {destination}\n\n"
+            "This explicit copy-only action does not compare source and destination files or delete anything. "
+            "The destination must be absent. Existing exclusions and symlink options apply. The copy streams internally in chunks to a temporary folder and uses an atomic no-replace rename only after completion."
+        )
+        dialog.set_buttons(["Cancel", "Copy new folder"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+        dialog.choose(self, None, self._new_folder_chosen, profile, relative)
+
+    def _new_folder_chosen(self, dialog, result, profile: Profile, relative: str) -> Gtk.Window | None:
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return None
+        if choice != 1:
+            return None
+        if profile.name in self._scan_running or profile.name in self._folder_copy_running:
+            self.status.set_text("The profile became active before this confirmation. Wait for the other operation to finish.")
+            return None
+        current = self._profile(profile.name)
+        if current is None or current.disabled:
+            self.status.set_text("The selected profile is no longer available or is disabled. Nothing was copied.")
+            return None
+        if current.left != profile.left or current.right != profile.right or current.direction != profile.direction:
+            self.status.set_text("The profile paths or direction changed after this confirmation. Nothing was copied; confirm the new folder again.")
+            return None
+        self._folder_copy_running.add(profile.name)
+        progress = WholeFolderWindow(self, current, relative)
+        progress.present()
+        skips = list(self.session_masks.get(profile.name, []))
+
+        def report_progress(event: CopyProgress) -> None:
+            GLib.idle_add(progress.update, event)
+
+        def work() -> None:
+            try:
+                outcome = copy_new_folder(
+                    current,
+                    relative,
+                    control=progress.control,
+                    on_progress=report_progress,
+                    session_masks=skips,
+                )
+            except Exception as exc:
+                outcome = FolderCopyOutcome(ApplyReport(errors=[f"{relative}: {exc}"]))
+            path = None
+            try:
+                # Rollback/cleanup failures may leave hidden temporary output behind,
+                # even though committed counters were reset to zero. Rescan fresh.
+                invalidate_cached_destinations(current)
+                remember(current)
+                path = write_log(current, log_body(current, outcome.changes, outcome.report, choice="explicit new folder; no comparison or overwrites"))
+            except Exception as exc:
+                outcome.report.errors.append(f"history/log: {exc}")
+            GLib.idle_add(self._whole_folder_finished, progress, outcome, path)
+
+        threading.Thread(target=work, daemon=True, name=f"OFS folder copy: {profile.name}").start()
+        return progress
+
+    def _whole_folder_finished(self, progress: WholeFolderWindow, outcome: FolderCopyOutcome, path: Path | None) -> bool:
+        progress.allow_close()
+        self._folder_copy_running.discard(progress.profile_name)
+        progress.job.profile.last_result = f"{time.strftime('%Y-%m-%d %H:%M')}  {outcome.report.summary()}"
+        save_profile(progress.job.profile)
+        self.reload()
+        self.status.set_text(f"{progress.profile_name}: new folder copy stopped." if outcome.report.cancelled else f"{progress.profile_name}: {outcome.report.summary()}.")
+        ResultsWindow(progress, outcome.report, path).present()
+        return False
 
     def _run_one(self, _button, name: str) -> None:
         self._run_names({name})
@@ -1242,10 +1419,17 @@ class MainWindow(Gtk.ApplicationWindow):
         bad = len(results) - ok
         planned = [change for job in results if job.result is not None for change in job.result.changes]
         summary_text = plan_summary(planned)
-        self._with_scan_activity(f"Scanned {ok}. {bad} skipped. {summary_text}" if bad else f"Scanned {ok}. {summary_text}")
+        partial = sum(bool(job.result and job.result.partial_sides) for job in results)
+        completion = f"Scanned {ok}. {bad} skipped. {summary_text}" if bad else f"Scanned {ok}. {summary_text}"
+        if partial:
+            completion += f" {partial} partial scan(s): review exclusions only, then Rescan; applying partial results is disabled."
+        self._with_scan_activity(completion)
         for job in results:
             if job.result is not None and job.profile.name in self._labels:
-                self._labels[job.profile.name].set_text(plan_summary(job.result.changes))
+                text = "Partial scan — review only" if job.result.partial_sides else plan_summary(job.result.changes)
+                self._labels[job.profile.name].set_text(text)
+                if job.result.partial_sides:
+                    self._labels[job.profile.name].set_tooltip_text(job.result.note)
         if len(results) == 1 and results[0].error is None and results[0].result is not None:
             self._preview(results[0])
             return False
@@ -1257,13 +1441,16 @@ class MainWindow(Gtk.ApplicationWindow):
         box.set_margin_top(12)
         box.set_margin_bottom(12)
         box.append(Gtk.Label(label=summary_text, xalign=0))
+        if partial:
+            box.append(Gtk.Label(label=f"{partial} partial scan(s) are review-only. Add exclusions, then rescan; no partial plan can be applied.", xalign=0, wrap=True, css_classes=["result-warn"]))
         for job in results:
             line = Gtk.Box(spacing=8)
             if job.error:
                 label = Gtk.Label(label=f"{job.profile.name}: {job.error}", xalign=0, hexpand=True)
             else:
                 assert job.result is not None
-                label = Gtk.Label(label=f"{job.profile.name}: {plan_summary(job.result.changes)}", xalign=0, hexpand=True)
+                result_text = "Partial scan — review only" if job.result.partial_sides else plan_summary(job.result.changes)
+                label = Gtk.Label(label=f"{job.profile.name}: {result_text}", xalign=0, hexpand=True)
                 button = Gtk.Button(label="Preview")
                 button.connect("clicked", lambda _b, item=job: self._preview(item))
                 line.append(button)
@@ -1334,6 +1521,36 @@ def _status_icon(last_result: str) -> Gtk.Image | None:
     icon.set_pixel_size(16)
     icon.set_tooltip_text(body)
     return icon
+
+
+def _failed_relative_paths(errors: list[str]) -> list[str]:
+    """Recover trusted Change.rel prefixes, never an absolute path from an OS error."""
+
+    paths = []
+    for message in errors:
+        rel, separator, _detail = message.partition(": ")
+        if not separator:
+            continue
+        rel = rel.replace("\\", "/").strip()
+        parts = PurePosixPath(rel).parts
+        if not rel or "\n" in rel or "\x00" in rel or rel.startswith("/") or ".." in parts:
+            continue
+        if rel not in paths:
+            paths.append(rel)
+    return paths
+
+
+def _failed_common_folder(paths: list[str]) -> str:
+    if not paths:
+        return ""
+    if len(paths) == 1:
+        parent = str(PurePosixPath(paths[0]).parent)
+        return "" if parent == "." else parent
+    try:
+        common = os.path.commonpath(paths)
+    except ValueError:
+        return ""
+    return "" if common in {"", "."} else common
 
 
 def _mask_kind(mask: str) -> str:
@@ -1512,6 +1729,8 @@ def _install_css() -> None:
 class Preview(Gtk.Window):
     def __init__(self, owner: MainWindow, job: JobResult):
         super().__init__(transient_for=owner, title=job.profile.name)
+        if owner.get_application() is not None:
+            self.set_application(owner.get_application())
         _install_css()
         self.owner = owner
         self.job = job
@@ -1539,6 +1758,9 @@ class Preview(Gtk.Window):
         self.store = Gio.ListStore.new(PlanRow)
         self._running = False
         self._popover: Gtk.Popover | None = None
+        self.partial = bool(job.result.partial_sides)
+        if self.partial:
+            self.set_title(f"{job.profile.name} — Partial scan (review only)")
         self._build()
         self._refill()
 
@@ -1549,6 +1771,17 @@ class Preview(Gtk.Window):
         sidebar.set_margin_top(12)
         sidebar.set_margin_bottom(12)
         sidebar.set_size_request(220, -1)
+        tree_controls = Gtk.Box(spacing=6)
+        self.expand_all_button = Gtk.Button(label="Expand all")
+        self.expand_all_button.set_tooltip_text("Show every nested folder and file")
+        self.expand_all_button.connect("clicked", lambda *_: self.view.expand_all())
+        self.collapse_all_button = Gtk.Button(label="Collapse all")
+        self.collapse_all_button.set_tooltip_text("Show only top-level folders and files; the copy plan does not change")
+        self.collapse_all_button.connect("clicked", lambda *_: self.view.collapse_all())
+        for button in (self.expand_all_button, self.collapse_all_button):
+            _compact(button)
+            tree_controls.append(button)
+        sidebar.append(tree_controls)
         sidebar.append(self._radios("State", "state", [
             ("Show All", "all"),
             ("Affected", "affected"),
@@ -1579,9 +1812,18 @@ class Preview(Gtk.Window):
         ]))
         self.shown = Gtk.Label(xalign=0, wrap=True)
         sidebar.append(self.shown)
-        self.start_button = Gtk.Button(label="Start")
+        sidebar.append(Gtk.Label(label="After completed copy", xalign=0, css_classes=["dim-label"]))
+        self.completion_action = Gtk.DropDown.new_from_strings(["Do nothing", "Sleep", "Hibernate", "Shut down"])
+        self.completion_values = ["none", "sleep", "hibernate", "shutdown"]
+        self.completion_action.set_selected(0)
+        self.completion_action.set_sensitive(not self.partial)
+        self.completion_action.set_tooltip_text("Apply only after this copy finishes without errors or cancellation. Other active copies prevent the power action.")
+        sidebar.append(self.completion_action)
+        self.start_button = Gtk.Button(label="Rescan" if self.partial else "Start")
         self.start_button.add_css_class("suggested-action")
-        self.start_button.connect("clicked", self._start)
+        self.start_button.connect("clicked", self._rescan if self.partial else self._start)
+        if self.partial:
+            self.start_button.set_tooltip_text("After adding exclusions, start a complete fresh scan. Partial results cannot be copied or deleted.")
         close_button = Gtk.Button(label="Close")
         close_button.connect("clicked", lambda *_: self.close())
         sidebar.append(self.start_button)
@@ -1593,6 +1835,14 @@ class Preview(Gtk.Window):
         header.set_margin_start(12)
         header.set_margin_end(12)
         header.set_margin_top(8)
+        if self.partial:
+            warning = Gtk.Label(
+                label="PARTIAL SCAN — REVIEW ONLY\nOnly entries discovered before Skip Rest are shown. Copying and deleting are disabled. Right-click a folder or file to add an exclusion, then choose Rescan.",
+                xalign=0,
+                wrap=True,
+                css_classes=["result-warn"],
+            )
+            header.append(warning)
         header.append(self._side_head("Left", self.job.profile.left, self.left_status))
         header.append(self._side_head("Right", self.job.profile.right, self.right_status))
 
@@ -1732,6 +1982,14 @@ class Preview(Gtk.Window):
             return
         self._popup(PlanRow(listed.change), self.view, x, y)
 
+    def _confirm_tree_folder_copy(self, relative: str) -> None:
+        """Only a complete preview can launch the separate guarded copy action."""
+
+        if self.partial:
+            self.detail.set_text("This skipped scan is review-only. Rescan before choosing a separate folder copy.")
+            return
+        self.owner._confirm_new_folder(self.job.profile, relative)
+
     def _popup_folder(self, rel: str, x: float, y: float) -> None:
         if self._popover is not None:
             self._popover.unparent()
@@ -1744,7 +2002,9 @@ class Preview(Gtk.Window):
         rect.height = 1
         popover.set_pointing_to(rect)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        actions = [
+        actions = ([] if self.partial else [
+            ("Copy whole new folder…", "Only when the matching destination is absent; uses no scanned plan and never overwrites or deletes", lambda: self._confirm_tree_folder_copy(rel)),
+        ]) + [
             ("L ──▶ R", "Copy this folder left to right", lambda: self._set_folder_direction(rel, "right")),
             ("L ◀── R", "Copy this folder right to left", lambda: self._set_folder_direction(rel, "left")),
             ("Open left folder", "", lambda: open_uri(Path(self.job.profile.left) / rel)),
@@ -1952,14 +2212,20 @@ class Preview(Gtk.Window):
         self.right_status.set_text(right)
         visible = [self.store.get_item(index) for index in range(self.store.get_n_items())]
         self.shown.set_text(shown_summary([Listed(item.change, False, False) for item in visible]))
-        text = plan_summary(planned)
+        if self.partial:
+            text = "Review only. Add permanent or session exclusions, then Rescan. Partial plans cannot be applied."
+        else:
+            text = plan_summary(planned) + "  Filters hide rows. Start runs the whole plan. Right-click a folder to point L ──▶ R or L ◀── R."
         if self.job.result is not None and self.job.result.note:
             text += "  " + self.job.result.note
-        self.detail.set_text(
-            text + "  Filters hide rows. Start runs the whole plan. Right-click a folder to point L ──▶ R or L ◀── R."
-        )
+        self.detail.set_text(text)
 
     def _start(self, *_args) -> None:
+        """A programmatic click must not make a partial listing into a file operation."""
+
+        if self.partial:
+            self.detail.set_text("This is a partial, review-only scan. Add exclusions, then choose Rescan.")
+            return
         if self._running:
             return
         changes = self._planned()
@@ -1972,6 +2238,10 @@ class Preview(Gtk.Window):
             self._begin(changes, "no deletions")
             return
         self._safety(warning, changes, blocked=bool(deletion_violations(self.job.profile, self.rows)))
+
+    def _rescan(self, *_args) -> None:
+        self.close()
+        self.owner._run_names({self.job.profile.name})
 
     def _safety(self, text: str, changes: list[Change], *, blocked: bool = False) -> Gtk.Window:
         window = Gtk.Window(transient_for=self, modal=True, title="Safety Confirmations Required")
@@ -2090,7 +2360,29 @@ class Preview(Gtk.Window):
         self.job.profile.last_result = f"{time.strftime('%Y-%m-%d %H:%M')}  {text}"
         save_profile(self.job.profile)
         self.owner.reload()
-        self.detail.set_text(text)
+        action = self.completion_values[self.completion_action.get_selected()]
+        power_note = ""
+        if action != "none":
+            label = self.completion_action.get_selected_item().get_string().lower()
+            app = self.owner.get_application()
+            active_copies = [
+                window for window in (app.get_windows() if app is not None else [])
+                if isinstance(window, ProgressWindow) and window is not progress and not window._allow_close
+            ]
+            if report.cancelled or report.errors:
+                power_note = f" {label.capitalize()} was not run because the copy was canceled or had errors."
+            elif active_copies:
+                power_note = f" {label.capitalize()} was not run because another copy is still active."
+            else:
+                try:
+                    run_completion_action(action)
+                except PowerActionError as exc:
+                    report.errors.append(f"after-completion power action: {exc}")
+                    text = report.summary()
+                    self.job.profile.last_result = f"{time.strftime('%Y-%m-%d %H:%M')}  {text}"
+                    save_profile(self.job.profile)
+                    self.owner.reload()
+        self.detail.set_text(text + power_note)
         ResultsWindow(self, report, path).present()
         return False
 
@@ -2100,6 +2392,8 @@ class ScanWindow(Gtk.Window):
 
     def __init__(self, owner: Gtk.Window, title: str = "Scanning", *, estimates: dict[str, tuple[int, float]] | None = None):
         super().__init__(transient_for=owner, modal=False, title=title)
+        if owner.get_application() is not None:
+            self.set_application(owner.get_application())
         self.set_default_size(700, 280)
         self.control = RunControl()
         self._allow_close = False
@@ -2274,6 +2568,8 @@ def _duration(seconds: float) -> str:
 class ProgressWindow(Gtk.Window):
     def __init__(self, owner: Preview, title: str):
         super().__init__(transient_for=owner, modal=True, title=f"Copying {title}")
+        if owner is not None and owner.get_application() is not None:
+            self.set_application(owner.get_application())
         self.set_default_size(680, 300)
         self.control = RunControl()
         self._allow_close = False
@@ -2292,6 +2588,7 @@ class ProgressWindow(Gtk.Window):
         self.file_bar = Gtk.ProgressBar(show_text=True)
         self.file_count = Gtk.Label(xalign=0)
         self.count_label = Gtk.Label(xalign=0)
+        self.count_label.add_css_class("monospace")
         self.bar = Gtk.ProgressBar(show_text=True)
         self.timing_label = Gtk.Label(xalign=0)
         self.timing_label.add_css_class("monospace")
@@ -2330,14 +2627,15 @@ class ProgressWindow(Gtk.Window):
     def _show_timing(self) -> None:
         elapsed = self._elapsed()
         if self.latest is None:
-            self.timing_label.set_text(f"Elapsed {_duration(elapsed)} · Speed 0 B/s · ETA --:--")
-            return
-        speed = self.latest.bytes_done / elapsed if elapsed > 0 and self.latest.bytes_done else 0.0
-        remaining = max(0, self.latest.bytes_total - self.latest.bytes_done)
-        eta = f"ETA {_duration(remaining / speed)}" if speed > 0 and remaining else "ETA --:--"
-        state = "Paused · " if self.control.paused else ""
+            speed = 0.0
+            eta = "--:--"
+        else:
+            speed = self.latest.bytes_done / elapsed if elapsed > 0 and self.latest.bytes_done else 0.0
+            remaining = max(0, self.latest.bytes_total - self.latest.bytes_done)
+            eta = _duration(remaining / speed) if speed > 0 and remaining else "--:--"
+        state = " · Paused" if self.control.paused else ""
         self.timing_label.set_text(
-            f"{state}Elapsed {_duration(elapsed)} · Speed {format_bytes(int(speed))}/s · {eta}"
+            f"Elapsed {_duration(elapsed):>8} · Speed {format_bytes(int(speed)):>10}/s · ETA {eta:>8}{state}"
         )
 
     def update(self, event: CopyProgress) -> bool:
@@ -2351,9 +2649,10 @@ class ProgressWindow(Gtk.Window):
         self.bar.set_tooltip_text(f"Overall: {format_bytes(event.bytes_done)} / {format_bytes(event.bytes_total)}")
         self.file_bar.set_tooltip_text(f"Current file: {format_bytes(event.current_bytes)} / {format_bytes(event.current_total)}")
         self.file_count.set_text(f"Current file: {format_bytes(event.current_bytes)} / {format_bytes(event.current_total)}")
+        digits = max(1, len(str(event.total)))
         self.count_label.set_text(
-            f"Operation {event.completed} / {event.total} · Processed {format_bytes(event.bytes_done)} / {format_bytes(event.bytes_total)}\n"
-            f"Copied {event.copied} · Deleted {event.deleted} · Moved {event.moved} · Errors {event.errors}"
+            f"Operation {event.completed:>{digits}} / {event.total} · Processed {format_bytes(event.bytes_done):>10} / {format_bytes(event.bytes_total)}\n"
+            f"Copied {event.copied:{digits}} · Deleted {event.deleted:{digits}} · Moved {event.moved:{digits}} · Errors {event.errors:{digits}}"
         )
         self._show_timing()
         return False
@@ -2390,9 +2689,50 @@ class ProgressWindow(Gtk.Window):
         return True
 
 
+class WholeFolderWindow(ProgressWindow):
+    """Progress for streaming an explicitly new tree whose total is unknown."""
+
+    def __init__(self, owner: MainWindow, profile: Profile, relative: str):
+        super().__init__(owner, f"new folder: {profile.name}")
+        self.owner = owner
+        self.profile_name = profile.name
+        self.job = JobResult(profile, ScanResult([]), None)
+        self.relative = relative
+        self.set_title(f"Copying new folder: {profile.name}")
+        self.bar.set_text("Copying new folder…")
+        self.bar.set_tooltip_text("Total size is not precomputed for a no-comparison folder copy")
+        self.count_label.set_text("Files copied        0 · Copied           0 B\nErrors               0")
+        self.file_label.set_text(relative)
+        self.file_label.set_tooltip_text(relative)
+
+    def update(self, event: CopyProgress) -> bool:
+        self.latest = event
+        prefix = "Paused. " if self.control.paused else ""
+        self.file_label.set_text(prefix + event.rel)
+        self.file_label.set_tooltip_text(event.rel)
+        self.file_bar.set_fraction(event.current_fraction)
+        self.file_bar.set_tooltip_text(f"Current file: {format_bytes(event.current_bytes)} / {format_bytes(event.current_total)}")
+        self.file_count.set_text(f"Current file: {format_bytes(event.current_bytes):<10} / {format_bytes(event.current_total)}")
+        self.count_label.set_text(
+            f"Files copied {event.copied:>8} · Copied {format_bytes(event.bytes_done):>10}\n"
+            f"Errors {event.errors:>15}"
+        )
+        self._show_timing()
+        self.bar.pulse()
+        return False
+
+    def _tick(self) -> bool:
+        if self._allow_close:
+            return False
+        self.bar.pulse()
+        self._show_timing()
+        return True
+
+
 class ResultsWindow(Gtk.Window):
     def __init__(self, owner: Preview, report: ApplyReport, log_path: Path | None):
         super().__init__(transient_for=owner, modal=True, title="Copying Results")
+        self.set_application(owner.get_application())
         _install_css()
         self.owner = owner
         self.profile_name = owner.job.profile.name
@@ -2437,6 +2777,22 @@ class ResultsWindow(Gtk.Window):
             errors = Gtk.Label(label="\n".join(report.errors), xalign=0, wrap=True)
             errors.add_css_class("error")
             root.append(errors)
+            failed_paths = _failed_relative_paths(report.errors)
+            common_folder = _failed_common_folder(failed_paths)
+            if failed_paths:
+                self.exclude_paths_button = Gtk.Button(label=f"Exclude {len(failed_paths)} failing path(s)…")
+                self.exclude_paths_button.set_tooltip_text("Add each failing path as a literal exclusion on this profile, after confirmation")
+                self.exclude_paths_button.connect("clicked", lambda *_: self._exclude_failed(failed_paths))
+                self.exclude_common_button = Gtk.Button(label="Exclude common folder…")
+                self.exclude_common_button.set_sensitive(bool(common_folder))
+                self.exclude_common_button.set_tooltip_text(f"Exclude {common_folder} and everything under it" if common_folder else "The failures have no common folder below the profile root")
+                self.exclude_common_button.connect("clicked", lambda *_: self._exclude_failed([common_folder], folder=True))
+                exclusions = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
+                exclusions.append(self.exclude_paths_button)
+                exclusions.append(self.exclude_common_button)
+                root.append(exclusions)
+            self.exclusion_notice = Gtk.Label(xalign=0, wrap=True, css_classes=["result-ok"])
+            root.append(self.exclusion_notice)
         root.append(buttons)
         self.set_child(root)
 
@@ -2445,6 +2801,39 @@ class ResultsWindow(Gtk.Window):
 
         self.owner.close()
         return False
+
+    def _exclude_failed(self, masks: list[str], *, folder: bool = False) -> None:
+        if not masks or not masks[0]:
+            return
+        dialog = Gtk.AlertDialog()
+        title = f"Exclude the common folder {masks[0]!r}?" if folder else f"Exclude {len(masks)} failing path(s)?"
+        dialog.set_message(title)
+        shown = "\n".join(masks[:12])
+        if len(masks) > 12:
+            shown += f"\n… and {len(masks) - 12} more"
+        dialog.set_detail(f"Add to {self.profile_name}'s permanent exclusions:\n\n{shown}\n\nNo files are deleted. Folder exclusions include everything under the folder. After saving, choose Retry Failed… to rescan.")
+        dialog.set_buttons(["Cancel", "Save exclusions"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+        dialog.choose(self, None, self._exclude_failed_chosen, masks)
+
+    def _exclude_failed_chosen(self, dialog, result, masks: list[str]) -> None:
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if choice != 1:
+            return
+        profile = self.owner.job.profile
+        added = [mask for mask in masks if mask and mask not in profile.exclusions]
+        profile.exclusions.extend(added)
+        save_profile(profile)
+        self.owner.owner.reload()
+        self.exclusion_notice.set_text(
+            f"Saved {len(added)} new exclusion(s) on this profile. Choose Retry Failed… for a fresh complete scan."
+        )
+        self.exclude_paths_button.set_sensitive(False)
+        self.exclude_common_button.set_sensitive(False)
 
     def _retry(self, *_args) -> None:
         dialog = Gtk.AlertDialog()

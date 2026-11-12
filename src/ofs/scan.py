@@ -28,6 +28,7 @@ class ScanResult:
     errors: list[str] = field(default_factory=list)
     note: str = ""
     cached: bool = False
+    partial_sides: tuple[str, ...] = ()
     listing: list[Listed] = field(default_factory=list)
 
 
@@ -105,6 +106,7 @@ def scan_profile(
         return report
 
     cache_notes = []
+    partial_sides = []
 
     def read_side(side: str, root: Path, destination: bool) -> dict[str, FileStat]:
         if destination and profile.cache_destination and not force_uncached:
@@ -113,23 +115,37 @@ def scan_profile(
                 files, saved = cached
                 cache_notes.append(f"Using cached {side.lower()} destination metadata ({int(time.time() - saved)}s old; use Run uncached to force a fresh read).")
                 walked[side] = len(files)
+                age_seconds = int(time.time() - saved)
                 if on_progress is not None:
-                    on_progress(side, "Cached destination metadata", len(files))
+                    on_progress(side, f"Cached destination metadata ({age_seconds}s old)", len(files))
                 if on_stats is not None:
                     from ofs.walk import WalkStats
 
-                    on_stats(side, ".", WalkStats(len(files), 0, len(files)))
+                    on_stats(side, f"Using cached destination metadata ({age_seconds}s old)", WalkStats(len(files), 0, len(files)))
                 return files
-        files = walk(
-            root,
-            lambda rel: _skip_dir(profile, rel, destination=destination, global_masks=masks, global_mode=mode),
-            skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
-            control=control,
-            on_progress=progress(side),
-            on_stats=stats(side),
-            symlinks=profile.symlinks.value,
-        )
-        if destination and profile.cache_destination:
+        try:
+            files = walk(
+                root,
+                lambda rel: _skip_dir(profile, rel, destination=destination, global_masks=masks, global_mode=mode),
+                skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
+                control=control,
+                on_progress=progress(side),
+                on_stats=stats(side),
+                symlinks=profile.symlinks.value,
+            )
+        except WalkSkipped as exc:
+            # Keep the known entries for exclusions, but never treat them as complete.
+            partial_sides.append(side)
+            files = _drop_global(exc.files, masks, mode)
+            walked[side] = exc.discovered
+            if on_stats is not None:
+                from ofs.walk import WalkStats
+
+                on_stats(side, ".", WalkStats(exc.discovered, exc.filtered, len(files)))
+            if control is not None:
+                control.clear_skip()
+            return files
+        if destination and profile.cache_destination and not partial_sides:
             try:
                 save_destination(profile, side, masks, mode, files)
             except OSError as exc:
@@ -151,7 +167,10 @@ def scan_profile(
         global_mode=mode,
     )
     note = ""
-    if profile.track:
+    if partial_sides:
+        sides = " and ".join(partial_sides)
+        note = f"Partial scan: skipped {sides} discovery. Review only; copying and deleting are disabled. Add exclusions, then rescan. No new cache manifest or file history was saved."
+    if profile.track and not partial_sides:
         history, note = load_history(profile)
         if history is None and not note:
             save_history(profile, left, right)
@@ -166,6 +185,7 @@ def scan_profile(
         discovered=sum(walked.values()),
         note=" ".join([part for part in (note, *cache_notes) if part]),
         cached=bool(cache_notes),
+        partial_sides=tuple(partial_sides),
         listing=build_listing(left, right, changes),
     )
 

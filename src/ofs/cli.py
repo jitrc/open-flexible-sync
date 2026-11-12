@@ -108,6 +108,9 @@ def _scan(name: str, *, apply: bool, uncached: bool = False) -> int:
         print(job.result.note)
     if not apply:
         return 0
+    if job.result.partial_sides:
+        print("partial scan is review-only; add exclusions and run a complete scan before applying", file=sys.stderr)
+        return 1
     from ofs.apply import apply_plan
 
     if any(change.action == Action.ASK for change in job.result.changes):

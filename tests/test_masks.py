@@ -61,3 +61,10 @@ def test_rooted_full_folder_path_matches_only_that_subtree():
 def test_trailing_slash_is_a_folder_mask_not_a_literal_slash():
     assert path_matches("cache/package-store/package/index.js", "*/package-store/")
     assert path_matches("cache/work-output/data/file", "*/work-output/")
+
+
+def test_leading_star_folder_mask_also_matches_at_profile_root():
+    for path in ("cache", "cache/package.deb", "nested/cache", "nested/cache/package.deb"):
+        assert path_matches(path, "*/cache")
+    assert path_matches("cache-other/file", "*/cache") is False
+    assert path_matches("other/cache.txt", "*/cache") is False

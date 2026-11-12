@@ -640,7 +640,7 @@ def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tm
             progress.update(CopyProgress(1, 4, "large.bin", 50, 100, 150, 300, 1, 0, 0, 0))
             seen["overall"] = progress.bar.get_fraction()
             seen["current"] = progress.file_bar.get_fraction()
-            seen["counts"] = progress.count_label.get_text()
+            seen["counts"] = " ".join(progress.count_label.get_text().split())
             seen["timing"] = progress.timing_label.get_text()
             progress._toggle()
             seen["paused"] = progress.control.paused
@@ -693,6 +693,286 @@ def test_copy_path_uses_two_lines_without_resizing_the_window(tmp_path, monkeypa
     assert seen["path"] == seen["tooltip"] == long_path
     assert seen["lines"] == 2
     assert seen["ellipsize"] == Pango.EllipsizeMode.MIDDLE
+
+
+def test_copy_stat_columns_have_stable_width_and_paused_state_does_not_shift_them(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestStableStats")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            progress = ProgressWindow(owner, "demo")
+            progress._started = time.monotonic() - 10
+            progress.update(CopyProgress(2, 26539, "a", 100, 1000, 32 * 1024 ** 2, 8 * 1024 ** 3, 2, 0, 0, 0))
+            seen["count_size"] = progress.count_label.get_layout().get_pixel_size()
+            seen["timing_size"] = progress.timing_label.get_layout().get_pixel_size()
+            progress.update(CopyProgress(20000, 26539, "b", 900, 1000, 4 * 1024 ** 3, 8 * 1024 ** 3, 20000, 12, 0, 1))
+            seen["large_count_size"] = progress.count_label.get_layout().get_pixel_size()
+            seen["large_timing_size"] = progress.timing_label.get_layout().get_pixel_size()
+            progress._toggle()
+            seen["paused_timing"] = progress.timing_label.get_text()
+            seen["monospace"] = "monospace" in progress.count_label.get_css_classes()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["count_size"] == seen["large_count_size"]
+    assert seen["timing_size"] == seen["large_timing_size"]
+    assert seen["paused_timing"].endswith("Paused")
+    assert "Elapsed" in seen["paused_timing"] and seen["monospace"] is True
+
+
+def test_after_copy_power_choice_is_per_run_and_guards_errors_and_cancel(tmp_path, monkeypatch):
+    import ofs.ui as ui
+    from ofs.apply import ApplyReport
+    from ofs.scan import ScanResult
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestPower")
+    profile = Profile(name="backup", left="/sample/left", right="/sample/right")
+    save_profile(profile)
+    calls = []
+
+    class ClosedProgress:
+        def allow_close(self):
+            pass
+
+    monkeypatch.setattr(ui, "run_completion_action", lambda action: calls.append(action))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            seen["default"] = preview.completion_action.get_selected()
+            seen["labels"] = [preview.completion_action.get_model().get_string(index) for index in range(preview.completion_action.get_model().get_n_items())]
+            preview._finished(ClosedProgress(), ApplyReport(), None)
+            preview.completion_action.set_selected(1)
+            preview._finished(ClosedProgress(), ApplyReport(copied=1), None)
+            preview.completion_action.set_selected(2)
+            preview._finished(ClosedProgress(), ApplyReport(errors=["copy failed"]), None)
+            preview.completion_action.set_selected(3)
+            preview._finished(ClosedProgress(), ApplyReport(cancelled=True), None)
+            other_copy = ProgressWindow(preview, "other")
+            seen["registered"] = other_copy in owner.get_application().get_windows()
+            preview.completion_action.set_selected(1)
+            preview._finished(ClosedProgress(), ApplyReport(copied=2), None)
+            seen["blocked"] = "another copy" in preview.detail.get_text()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["default"] == 0
+    assert seen["labels"] == ["Do nothing", "Sleep", "Hibernate", "Shut down"]
+    assert calls == ["sleep"]
+    assert seen["registered"] is True
+    assert seen["blocked"] is True
+
+
+def test_copy_speed_presets_cover_common_mib_per_second_limits(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestSpeedPresets")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            settings = owner._settings()
+            preset = next(item for item in _widgets(settings) if isinstance(item, Gtk.DropDown) and item.get_model().get_n_items() == 5 and item.get_model().get_string(1) == "1 MiB/s")
+            for index, speed_name in ((1, "one"), (2, "ten"), (3, "hundred")):
+                preset.set_selected(index)
+                seen[speed_name] = preset.get_selected_item().get_string()
+            seen["save"] = next(item for item in _widgets(settings) if isinstance(item, Gtk.Button) and item.get_label() == "Save")
+            seen["save"].emit("clicked")
+            self.quit()
+
+    assert App().run(None) == 0
+    assert (seen["one"], seen["ten"], seen["hundred"]) == ("1 MiB/s", "10 MiB/s", "100 MiB/s")
+    from ofs.settings import copy_speed_limit
+    assert copy_speed_limit() == 100 * 1024 ** 2
+
+
+def test_failed_results_can_exclude_paths_or_their_common_folder(tmp_path, monkeypatch):
+    from ofs.apply import ApplyReport
+    from ofs.scan import ScanResult
+    from ofs.ui import _failed_common_folder, _failed_relative_paths
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFailedExclusions")
+    errors = [
+        "project/service/volumes/redis/dump.db: Permission denied",
+        "project/service/volumes/app/modules.db: Permission denied",
+    ]
+    assert _failed_relative_paths(errors) == [
+        "project/service/volumes/redis/dump.db",
+        "project/service/volumes/app/modules.db",
+    ]
+    assert _failed_common_folder(_failed_relative_paths(errors)) == "project/service/volumes"
+    assert _failed_relative_paths(["/absolute/private/path: permission denied", "../escape: denied"]) == []
+    profile = Profile(name="failing job", left="/sample/left", right="/sample/right", exclusions=["existing"])
+    save_profile(profile)
+    seen = {}
+
+    class Dialog:
+        def __init__(self, choice):
+            self.choice = choice
+
+        def choose_finish(self, _result):
+            return self.choice
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            results = ResultsWindow(preview, ApplyReport(errors=errors), None)
+            seen["button"] = results.exclude_common_button.get_label()
+            results._exclude_failed_chosen(Dialog(0), None, ["project/service/volumes"])
+            seen["cancel"] = load_profiles()[0].exclusions
+            results._exclude_failed_chosen(Dialog(1), None, ["project/service/volumes"])
+            seen["saved"] = load_profiles()[0].exclusions
+            seen["notice"] = results.exclusion_notice.get_text()
+            seen["disabled"] = not results.exclude_paths_button.get_sensitive() and not results.exclude_common_button.get_sensitive()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["button"] == "Exclude common folder…"
+    assert seen["cancel"] == ["existing"]
+    assert seen["saved"] == ["existing", "project/service/volumes"]
+    assert "Retry Failed" in seen["notice"]
+    assert seen["disabled"] is True
+
+
+def test_confirmed_new_folder_copy_uses_chunked_engine_and_invalidates_cache(tmp_path, monkeypatch):
+    from ofs.cache import _path, save_destination
+    from ofs.store import config_dir
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestWholeFolder")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    (left / "inbox").mkdir(parents=True)
+    right.mkdir()
+    (left / "inbox" / "document.txt").write_text("new folder content")
+    profile = Profile(name="known new folder", left=str(left), right=str(right), cache_destination=True)
+    save_profile(profile)
+    save_destination(profile, "Right", [], profile.exclusion_mode, {})
+    seen = {}
+
+    class Dialog:
+        def __init__(self, choice):
+            self.choice = choice
+
+        def choose_finish(self, _result):
+            return self.choice
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["canceled"] = window._new_folder_chosen(Dialog(0), None, profile, "inbox")
+            seen["canceled_absent"] = not (right / "inbox").exists()
+            seen["progress"] = window._new_folder_chosen(Dialog(1), None, profile, "inbox")
+
+            def watch() -> bool:
+                if profile.name not in window._folder_copy_running:
+                    seen["status"] = window.status.get_text()
+                    seen["copied"] = (right / "inbox" / "document.txt").read_text()
+                    seen["cache_exists"] = _path(profile).exists()
+                    seen["logs"] = list((config_dir() / "logs").glob("*.log"))
+                    self.quit()
+                    return False
+                return True
+
+            GLib.timeout_add(20, watch)
+
+    assert App().run(None) == 0
+    assert seen["canceled"] is None
+    assert seen["canceled_absent"] is True
+    assert seen["progress"].relative == "inbox"
+    assert seen["progress"].bar.get_text() == "Copying new folder…"
+    assert seen["copied"] == "new folder content"
+    assert seen["cache_exists"] is False
+    assert seen["logs"] and "explicit new folder" in seen["logs"][0].read_text()
+    assert "1 copied" in seen["status"]
+
+
+def test_profile_left_and_right_browsers_choose_without_saving_automatically(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestBrowsePaths")
+    chosen = tmp_path / "chosen"
+    chosen.mkdir()
+    profile = Profile(name="browse paths", left="/sample/old-left", right="/sample/old-right")
+    save_profile(profile)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            editor = owner._editor(profile)
+            browsers = [button for button in _buttons(editor) if _button_labels(button) == ["Browse…"]]
+            seen["count"] = len(browsers)
+            browsers[0].emit("clicked")
+            chooser = next(Gtk.Window.get_toplevels().get_item(index) for index in range(Gtk.Window.get_toplevels().get_n_items()) if isinstance(Gtk.Window.get_toplevels().get_item(index), Gtk.FileChooserDialog))
+            seen["title"] = chooser.get_title()
+            chooser.set_file(Gio.File.new_for_path(str(chosen)))
+            while GLib.MainContext.default().pending():
+                GLib.MainContext.default().iteration(False)
+            selected_file = chooser.get_file()
+            seen["selected"] = selected_file is not None and selected_file.get_path() == str(chosen)
+            chooser.emit("response", Gtk.ResponseType.ACCEPT)
+            seen["entry_updated"] = any(isinstance(item, Gtk.Entry) and item.get_text() == str(chosen) for item in _widgets(editor))
+            seen["saved_left"] = load_profiles()[0].left
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["count"] == 2
+    assert seen["title"] == "Choose Left folder"
+    assert seen["selected"] is True
+    assert seen["entry_updated"] is True
+    assert seen["saved_left"] == "/sample/old-left"
+
+
+def test_whole_folder_error_still_invalidates_destination_cache(tmp_path, monkeypatch):
+    import ofs.ui as ui
+    from ofs.cache import _path, save_destination
+    from ofs.folder_copy import FolderCopyOutcome
+    from ofs.apply import ApplyReport
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFailedFolderCache")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    (left / "inbox").mkdir(parents=True)
+    right.mkdir()
+    profile = Profile(name="copy cache", left=str(left), right=str(right), cache_destination=True)
+    save_profile(profile)
+    save_destination(profile, "Right", [], profile.exclusion_mode, {})
+    outcome = FolderCopyOutcome(ApplyReport(errors=["inbox: cleanup failed; hidden temporary output remains"]))
+    monkeypatch.setattr(ui, "copy_new_folder", lambda *_args, **_kwargs: outcome)
+    seen = {}
+
+    class Dialog:
+        def choose_finish(self, _result):
+            return 1
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            owner._new_folder_chosen(Dialog(), None, profile, "inbox")
+
+            def watch() -> bool:
+                if profile.name not in owner._folder_copy_running:
+                    seen["cache_exists"] = _path(profile).exists()
+                    seen["errors"] = outcome.report.errors
+                    self.quit()
+                    return False
+                return True
+
+            GLib.timeout_add(20, watch)
+
+    assert App().run(None) == 0
+    assert seen["cache_exists"] is False
+    assert outcome.report.copied == 0 and outcome.report.folders_created == 0
+    assert "cleanup failed" in seen["errors"][0]
 
 
 def test_retry_requires_confirmation_and_rescans_instead_of_replaying(tmp_path, monkeypatch):
@@ -945,6 +1225,68 @@ def test_different_profiles_scan_in_parallel_but_same_profile_cannot_duplicate(t
     assert sorted(seen["batch_sizes"]) == [1, 2]
 
 
+def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, monkeypatch):
+    from ofs.apply import RunControl
+
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    (left / "cache").mkdir(parents=True)
+    right.mkdir()
+    (left / "cache" / "first.bin").write_text("one")
+    (left / "cache" / "second.bin").write_text("two")
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestPartialResults")
+    profile = Profile(name="partial job", left=str(left), right=str(right))
+    control = RunControl()
+
+    def skip_first(side: str, rel: str, count: int) -> None:
+        if side == "Left" and count == 0:
+            time.sleep(0.11)
+        if side == "Left" and count == 1:
+            control.skip_current()
+
+    result = scan_profile(profile, control=control, on_progress=skip_first)
+    assert result.partial_sides == ("Left",)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            preview = window._preview(JobResult(profile, result, None))
+            seen["title"] = preview.get_title()
+            seen["button"] = preview.start_button.get_label()
+            seen["power_disabled"] = not preview.completion_action.get_sensitive()
+            seen["listed"] = len(preview.rows)
+            preview._begin = lambda *_args: seen.setdefault("applied", True)
+            preview._start()
+            seen["blocked"] = "applied" not in seen
+            preview._save_exclusion("cache")
+            seen["saved"] = load_profiles()[0].exclusions
+            seen["remaining"] = len(preview.rows)
+            window._confirm_new_folder = lambda *_args: seen.setdefault("copy_requested", True)
+            preview._confirm_tree_folder_copy("cache")
+            seen["guarded_copy"] = "copy_requested" not in seen
+            preview._popup_folder("cache", 0, 0)
+            seen["folder_actions"] = [button.get_label() for button in _buttons(preview._popover)]
+            seen["rescan"] = None
+            window._run_names = lambda names: seen.update(rescan=names)
+            preview.start_button.emit("clicked")
+            self.quit()
+
+    assert App().run(None) == 0
+    assert "Partial scan" in seen["title"] and "review only" in seen["title"]
+    assert seen["button"] == "Rescan"
+    assert seen["power_disabled"] is True
+    assert seen["listed"] == 1
+    assert seen["blocked"] is True
+    assert seen["saved"] == ["cache"]
+    assert seen["remaining"] == 0
+    assert seen["guarded_copy"] is True
+    assert "Copy whole new folder…" not in seen["folder_actions"]
+    assert "Add this folder to exclusions" in seen["folder_actions"]
+    assert seen["rescan"] == {"partial job"}
+
+
 def test_folder_row_shows_size_and_can_be_ignored(tmp_path, monkeypatch):
     home = tmp_path / "home"
     left = tmp_path / "left"
@@ -968,6 +1310,13 @@ def test_folder_row_shows_size_and_can_be_ignored(tmp_path, monkeypatch):
             folder = preview.tree_store.get_iter_first()
             seen["label"] = preview.tree_store.get_value(folder, 0)
             seen["size"] = preview.tree_store.get_value(folder, 1)
+            planned = [change.rel for change in preview._planned()]
+            seen["initially_expanded"] = preview.view.row_expanded(Gtk.TreePath.new_first())
+            preview.collapse_all_button.emit("clicked")
+            seen["collapsed"] = not preview.view.row_expanded(Gtk.TreePath.new_first())
+            preview.expand_all_button.emit("clicked")
+            seen["expanded"] = preview.view.row_expanded(Gtk.TreePath.new_first())
+            seen["plan_unchanged"] = planned == [change.rel for change in preview._planned()]
             preview._ignore_folder("2019")
             seen["left"] = [item.change.rel for item in preview.rows]
             seen["session"] = list(window.session_masks["alpha notes"])
@@ -980,6 +1329,10 @@ def test_folder_row_shows_size_and_can_be_ignored(tmp_path, monkeypatch):
     assert seen["label"].startswith("2019")
     assert seen["size"]
     assert seen["size"] in seen["label"]
+    assert seen["initially_expanded"] is True
+    assert seen["collapsed"] is True
+    assert seen["expanded"] is True
+    assert seen["plan_unchanged"] is True
     assert seen["left"] == ["keep.txt"]
     assert seen["session"] == ["2019"]
     assert seen["saved"] == []

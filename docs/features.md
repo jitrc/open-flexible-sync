@@ -24,7 +24,8 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 ## Profile management and migration
 
 - **New profile** is the first header action.
-- The expanded **Profiles** menu organizes original 5.71 import, OFS profile import/export, Multi Edit, path replacement, and checked-profile renaming.
+- The expanded **Profiles** menu organizes original 5.71 import, OFS profile import/export, Multi Edit, path replacement, checked-profile renaming, and explicit known-new folder copying.
+- Profile Editor **Left** and **Right** entries have folder **Browse…** buttons for local/mounted folders. Choosing a folder updates the text field only; typed paths remain supported and the normal Save operation preserves imported flags/history behavior.
 - **Multi Edit** previews and confirms one field across checked profiles. Other fields remain unchanged. Masks can be added without duplicating existing rules or can replace the entire mask list.
 - **Replace paths in checked profiles…** handles changed mount points and moved folders:
   - Replace matching text in both paths, Left only, or Right only.
@@ -45,6 +46,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - **Ignore Totally** hides matches from copying and mirror deletion.
 - **Don't Copy** prevents transfer, while Exact Mirror can still remove an extra destination copy after the normal safety confirmation.
 - Global exclusions apply to every profile. The default behavior remains Ignore Totally; Settings can instead select Don't Copy.
+- Leading `*/folder` masks match both a root-level folder and nested copies: for example `*/cache` stops discovery at both `cache` and `folder/cache`, including their descendants.
 - Per-profile minimum/maximum size and minimum/maximum age limits leave out-of-range files under **Skipped**, without copying or deleting them.
 
 ## Scanning and comparison
@@ -58,7 +60,8 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Scan progress separates profile and reading side from the path. A fixed-height, theme-aware path panel uses bounded middle truncation instead of wrap-driven resizing. Full path text remains selectable/copyable and available in the tooltip. Statistics, progress, and controls have consistent spacing.
 - Scan progress includes discovered/filtered/added counts, elapsed time, and entries per second.
 - The first completed scan has no ETA. Later scans show an approximate history-based `~` ETA, refined using current discovery pace and expected remaining entries. Paused time is excluded, and skipped or canceled scans do not replace a previous estimate.
-- Each profile's scan window has independent **Pause**, **Skip Rest**, and **Cancel** controls. They affect that profile only; unrelated parallel scans continue. Neither skipping nor canceling opens a partial comparison or writes a copy log.
+- Each profile's scan window has independent **Pause**, **Skip Rest**, and **Cancel** controls. They affect that profile only; unrelated parallel scans continue.
+- **Skip Rest** preserves discovered entries in a clearly marked **Partial scan (review only)** preview. Add permanent or session exclusions there, then choose **Rescan**. Copying/deleting and power actions are disabled, no history/cache/ETA estimate is replaced, and CLI `--apply` also refuses partial results. **Cancel** produces no partial preview; neither action writes a copy log.
 
 ## Destination metadata cache
 
@@ -71,11 +74,12 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 
 ## Preview and one-run actions
 
-- The comparison is a folder tree with file sizes, `L ──▶ R` / `L ◀── R` direction diagrams, folder action counts, and per-side copy/move/delete byte totals.
+- The comparison is a folder tree with file sizes, `L ──▶ R` / `L ◀── R` direction diagrams, folder action counts, and per-side copy/move/delete byte totals. **Expand all / Collapse all** affect only the tree presentation, not filters or the plan.
 - State, existence, move, deletion, and adjust-side filters combine. Unchanged and skipped rows can be shown separately.
 - **Filters change visibility, not what Start applies.** Start runs the whole remaining reviewed plan, including hidden rows.
 - File and folder context menus can open paths, launch the configured external comparison command (Meld by default), add permanent exclusions, type a mask, or ignore an item only for this run.
 - One-run actions cover an individual file, an extension, or a folder subtree without changing saved profile rules.
+- **Copy new folder…** is a separate explicit workflow for a known-new subtree. Check exactly one enabled one-way profile and choose a source subfolder, or right-click a discovered folder. Confirmation shows the exact source and matching destination. It does not compare those trees or use a partial scanned plan; it refuses a destination that already exists. The tree streams through the existing chunked copier into a temporary sibling, honoring masks, include/size/age rules, symlinks, ownership options, Pause, and Cancel. Empty folders and directory metadata are retained. Final installation uses Linux `renameat2(..., RENAME_NOREPLACE)` so a concurrently created destination is not overwritten. Failure/cancel removes incomplete output. Unless/until a normal rescan confirms both trees, counts and generated logs do not prove regular synchronization has run.
 - Override a file or folder's direction, leave a file unchanged, or revert it to the scanned action.
 - `OFS_COMPARE` can override the saved comparison command for one launch. Deletion, size, and direction totals update when rows leave the plan.
 

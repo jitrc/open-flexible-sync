@@ -111,6 +111,17 @@ def test_invalidation_after_copy_removes_completed_manifest(tmp_path, monkeypatc
     assert not cache_module._path(profile).exists()
 
 
+def test_cached_destination_stats_show_what_is_being_used_not_a_dot(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    seen = []
+    scan_profile(profile)  # Build the fresh manifest; the next scan reuses it.
+    scan_profile(profile, on_stats=lambda side, rel, values: seen.append((side, rel)))
+    assert seen[-1][0] == "Right"
+    assert seen[-1][1].startswith("Using cached destination metadata (")
+    assert seen[-1][1].endswith("s old)")
+
+
 def test_destination_selection_supports_each_direction():
     left = Profile(name="left to right", left="l", right="r")
     right = Profile(name="right to left", left="l", right="r", direction=Direction.RIGHT_TO_LEFT)

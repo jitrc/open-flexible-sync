@@ -22,7 +22,13 @@ class WalkStopped(Exception):
 
 
 class WalkSkipped(Exception):
-    """Skip Rest asked to abandon this profile's incomplete scan."""
+    """Skip Rest preserves discovered metadata for a review-only listing."""
+
+    def __init__(self, files: dict[str, FileStat] | None = None, discovered: int = 0, filtered: int = 0):
+        super().__init__("scan skipped")
+        self.files = dict(files or {})
+        self.discovered = discovered
+        self.filtered = filtered
 
 
 @dataclass(frozen=True)
@@ -75,7 +81,7 @@ def walk(
             if not control.checkpoint():
                 raise WalkStopped
             if control.skipping:
-                raise WalkSkipped
+                raise WalkSkipped(found, discovered, filtered)
 
     def file_stat(info, path: Path, *, kind: str = "file", target: str = "") -> FileStat:
         return FileStat(info.st_size, info.st_mtime, kind, target, stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)

@@ -68,9 +68,10 @@ def run_checked(
             break
         else:
             error = None
-            try:
-                record_scan_estimate(profile.name, result.discovered, time.monotonic() - started)
-            except OSError as exc:
-                result.note = (result.note + " " if result.note else "") + f"Could not save the scan ETA estimate: {exc}"
+            if not result.partial_sides:
+                try:
+                    record_scan_estimate(profile.name, result.discovered, time.monotonic() - started)
+                except OSError as exc:
+                    result.note = (result.note + " " if result.note else "") + f"Could not save the scan ETA estimate: {exc}"
         results.append(JobResult(profile, result, error))
     return results

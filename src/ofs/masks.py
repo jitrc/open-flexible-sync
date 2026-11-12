@@ -76,10 +76,10 @@ def _path_matches(rel: str, mask: str) -> bool:
     for prefix in prefixes:
         pattern = _escape_brackets(mask)
         patterns = [pattern]
-        if mask.startswith("**/"):
-            # fnmatch's stars still require the slash, so **/.venv otherwise
-            # misses a .venv directly in the profile folder.
-            patterns.append(_escape_brackets(mask[3:]))
+        if mask.startswith(("**/", "*/")):
+            # fnmatch's stars still require the slash, so */cache otherwise
+            # misses a cache directly in the profile folder.
+            patterns.append(_escape_brackets(mask.split("/", 1)[1]))
         if any(fnmatch.fnmatch(prefix, item) for item in patterns):
             return True
         if component_mask and fnmatch.fnmatch(prefix.rsplit("/", 1)[-1], pattern):

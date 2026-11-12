@@ -118,38 +118,69 @@ def test_stopped_scan_does_not_start_the_next_profile(tmp_path):
     assert results[0].result is None
 
 
-def test_skip_rest_continues_with_the_next_profile(tmp_path, monkeypatch):
+def test_skip_rest_returns_review_only_results_and_continues(tmp_path, monkeypatch):
     from ofs.settings import scan_estimate
+    from ofs.cache import _path
+    from ofs.history import database_path
 
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     first_left = tmp_path / "a" / "left"
     second_left = tmp_path / "b" / "left"
     second_left.mkdir(parents=True)
     _write(first_left / "partial.txt", "not a usable plan")
+    _write(first_left / "not-yet-scanned.txt", "unknown")
     _write(second_left / "complete.txt", "scanned fully")
     right = tmp_path / "right"
     right.mkdir()
-    first = Profile(name="first", left=str(first_left), right=str(right))
+    first = Profile(name="first", left=str(first_left), right=str(right), track=True, cache_destination=True)
     second = Profile(name="second", left=str(second_left), right=str(right))
     control = RunControl()
     skipped: list[str] = []
 
-    def skip_first(name: str, _side: str, _rel: str, _count: int) -> None:
-        if name == "first" and name not in skipped:
+    def skip_first(name: str, side: str, rel: str, count: int) -> None:
+        if name == "first" and side == "Left" and count == 0:
+            time.sleep(0.11)
+        if name == "first" and side == "Left" and count == 1 and name not in skipped:
             skipped.append(name)
             control.skip_current()
 
     results = run_checked([first, second], checked={"first", "second"}, control=control, on_progress=skip_first)
     assert [job.profile.name for job in results] == ["first", "second"]
-    assert results[0].error == "scan skipped"
-    assert results[0].result is None
+    assert results[0].error is None
+    assert results[0].result is not None
+    assert results[0].result.partial_sides == ("Left",)
+    assert len(results[0].result.listing) == 1
+    assert "review only" in results[0].result.note.lower()
     assert results[1].error is None
     assert results[1].result is not None
+    assert results[1].result.partial_sides == ()
     assert [change.rel for change in results[1].result.changes] == ["complete.txt"]
     assert control.skipping is False
     assert scan_estimate("first") == (0, 0.0)
+    assert not _path(first).exists()
+    assert not database_path(first).exists()
     next_entries, next_seconds = scan_estimate("second")
     assert next_entries > 0 and next_seconds > 0
+
+
+def test_cli_never_applies_a_partial_scan(tmp_path, monkeypatch, capsys):
+    import ofs.cli as cli
+    from ofs.jobs import JobResult
+    from ofs.scan import ScanResult
+    from ofs.store import save_profile
+
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    _write(left / "known.txt", "known")
+    profile = Profile(name="partial", left=str(left), right=str(right))
+    save_profile(profile)
+    result = ScanResult([Change("known.txt", Action.COPY_LEFT_TO_RIGHT, "only on source", 5)], partial_sides=("Left",))
+    monkeypatch.setattr(cli, "run_checked", lambda *_args, **_kwargs: [JobResult(profile, result, None)])
+    assert cli.main(["run", "partial", "--apply"]) == 1
+    assert "review-only" in capsys.readouterr().err
+    assert not (right / "known.txt").exists()
 
 
 def test_missing_volume_raises(tmp_path):

@@ -61,7 +61,11 @@ tar -xzf OFS-0.2.0-linux-x86_64.tar.gz
 
 ![OFS overview with symbolic header icons, synthetic profiles, nested groups, and themed rows](docs/ofs-overview.png)
 
-*The screenshot uses fictional profiles and placeholder paths. It shows the current source interface.*
+![OFS comparison and copy progress with fixed-width counters, speed, ETA, Pause, and Cancel](docs/ofs-copy-progress.png)
+
+![OFS copying results: 2 synthetic files, 32 MiB copied successfully](docs/ofs-results.png)
+
+*Synthetic profile names and placeholder paths. Copy progress is captured from a small temporary test copy; the results report reflects its actual successful totals. No live data or power actions are used.*
 
 ## Documentation
 
