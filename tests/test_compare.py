@@ -109,6 +109,41 @@ def test_exact_mirror_leaves_same_size_files_unpaired():
     }
 
 
+def test_exact_mirror_does_not_infer_a_move_to_a_different_filename():
+    profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR, timestamps=rules(ignore_timestamp=True))
+    plan = {(item.rel, item.action) for item in build_plan(
+        profile,
+        {"new/song.mp3": FileStat(1000, 50)},
+        {"old/other.mp3": FileStat(1000, 10)},
+    )}
+    assert plan == {
+        ("new/song.mp3", Action.COPY_LEFT_TO_RIGHT),
+        ("old/other.mp3", Action.DELETE_RIGHT),
+    }
+
+
+def test_large_exact_mirror_move_set_is_indexed_by_identity(monkeypatch):
+    import ofs.compare as compare_module
+
+    profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR, timestamps=rules(ignore_timestamp=True))
+    count = 25_000
+    left = {f"new/file-{index}.dat": FileStat(index + 1, 50) for index in range(count)}
+    right = {f"old/file-{index}.dat": FileStat(index + 1, 10) for index in range(count)}
+    calls = 0
+    classify = compare_module.classify_time
+
+    def counted(*args):
+        nonlocal calls
+        calls += 1
+        return classify(*args)
+
+    monkeypatch.setattr(compare_module, "classify_time", counted)
+    plan = build_plan(profile, left, right)
+    assert len(plan) == count
+    assert all(item.action == Action.MOVE_ON_RIGHT for item in plan)
+    assert calls == count
+
+
 def test_standard_does_not_invent_a_move():
     profile = Profile(name="p", left="/l", right="/r", timestamps=rules(ignore_timestamp=True))
     plan = {(item.rel, item.action) for item in build_plan(

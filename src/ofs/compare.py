@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from collections import Counter
 from dataclasses import dataclass
 from enum import Enum
 from typing import Mapping
@@ -233,9 +234,9 @@ def _pair_mirror_moves(
     """Turn a unique copy-plus-delete pair into a move. No file database required.
 
     Exact Mirror would copy the new path and delete the old one. When one file
-    that exists only on the source matches one file that exists only on the
-    destination, under the profile's timestamp rules, that pair is a move.
-    Two files of the same size stay a copy and a delete.
+    that exists only on the source matches one same-named file that exists only
+    on the destination, under the profile's timestamp rules, that pair is a move.
+    Different filenames or ambiguous same-sized matches remain copy/delete.
     """
 
     if profile.mode != SyncMode.EXACT_MIRROR or profile.direction == Direction.BOTH:
@@ -254,24 +255,31 @@ def _pair_mirror_moves(
     copies = [change.rel for change in changes if change.action == copy_action and change.reason == "only on source"]
     deletes = [change.rel for change in changes if change.action == delete_action and change.reason == "only on destination"]
     pairs: list[tuple[str, str]] = []
+    # Moves preserve the filename. Group by all fields that timestamp equality
+    # also requires before applying the timestamp policy to remaining candidates.
+    # This avoids a potentially enormous all-copies-by-all-deletes comparison.
+    candidates: dict[tuple[str, str, str, int], list[str]] = {}
+    for new in copies:
+        new_stat = source.get(new)
+        if new_stat is None:
+            continue
+        key = (new.rsplit("/", 1)[-1], new_stat.kind, new_stat.target, new_stat.size)
+        candidates.setdefault(key, []).append(new)
+    pairs: list[tuple[str, str]] = []
     for old in deletes:
         old_stat = dest.get(old)
         if old_stat is None:
             continue
-        hits = []
-        for new in copies:
-            new_stat = source.get(new)
-            if new_stat is None:
-                continue
-            if new_stat.kind != old_stat.kind or new_stat.target != old_stat.target:
-                continue
-            state = classify_time(old_stat.mtime, new_stat.mtime, old_stat.size, new_stat.size, profile.timestamps)
-            if state == "equal":
-                hits.append(new)
+        key = (old.rsplit("/", 1)[-1], old_stat.kind, old_stat.target, old_stat.size)
+        hits = [
+            new
+            for new in candidates.get(key, [])
+            if classify_time(old_stat.mtime, source[new].mtime, old_stat.size, source[new].size, profile.timestamps) == "equal"
+        ]
         if len(hits) == 1:
             pairs.append((old, hits[0]))
-    used = [new for _, new in pairs]
-    unique = [(old, new) for old, new in pairs if used.count(new) == 1]
+    used = Counter(new for _, new in pairs)
+    unique = [(old, new) for old, new in pairs if used[new] == 1]
     if not unique:
         return changes
     drop_old = {old for old, _new in unique}

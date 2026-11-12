@@ -1663,6 +1663,7 @@ class ExclusionEditor(Gtk.Box):
         self._rules = list(masks)
         self.include_mode = include
         self._editing: int | None = None
+        self._refresh_generation = 0
         placeholder = "Include mask, for example *.jpg (keep (all) for everything)" if include else "Mask, for example .venv or */node_modules"
         self.entry = Gtk.Entry(placeholder_text=placeholder, hexpand=True)
         self.entry.connect("activate", lambda *_: self._save_rule())
@@ -1722,6 +1723,20 @@ class ExclusionEditor(Gtk.Box):
         self._refresh()
 
     def _refresh(self) -> None:
+        # Removing the focused Remove button can scroll both this list and the
+        # surrounding editor page. Restore their positions after GTK lays out
+        # the replacement rows, and discard obsolete restores after another edit.
+        self._refresh_generation += 1
+        generation = self._refresh_generation
+        positions: list[tuple[Gtk.Adjustment, float]] = []
+        # ListBox may sit behind an internal GtkViewport before its ScrolledWindow.
+        widget: Gtk.Widget | None = self.list
+        while widget is not None:
+            parent = widget.get_parent()
+            if isinstance(parent, Gtk.ScrolledWindow):
+                adjustment = parent.get_vadjustment()
+                positions.append((adjustment, adjustment.get_value()))
+            widget = parent
         while row := self.list.get_first_child():
             self.list.remove(row)
         for index, mask in enumerate(self._rules):
@@ -1744,6 +1759,15 @@ class ExclusionEditor(Gtk.Box):
                 line.append(widget)
             self.list.append(line)
         self._update_test()
+        GLib.idle_add(self._restore_refresh_scroll, generation, positions)
+
+    def _restore_refresh_scroll(self, generation: int, positions: list[tuple[Gtk.Adjustment, float]]) -> bool:
+        if generation != self._refresh_generation:
+            return False
+        for adjustment, value in positions:
+            maximum = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
+            adjustment.set_value(min(value, maximum))
+        return False
 
     def _update_test(self) -> None:
         path = self.test_entry.get_text().strip()

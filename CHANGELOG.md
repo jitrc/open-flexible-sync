@@ -4,6 +4,15 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+### Changed
+
+- Exact Mirror automatic move inference now requires the same filename. Different basenames remain explicit copy and delete operations.
+
+### Fixed
+
+- Indexed move candidates by filename, kind, link target, and size before applying timestamp rules, eliminating quadratic comparisons on large move sets and avoiding oversized same-profile comparison delays.
+- Adding, editing, or removing an include/exclusion rule retains the rule list and surrounding editor-page scroll positions, including when the focused Remove button is replaced.
+
 ## [0.3.0] - 2026-11-12
 
 ### Added

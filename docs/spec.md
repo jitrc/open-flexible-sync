@@ -92,7 +92,7 @@ These are the requirements added after the first draft, restated with the behavi
 
 ### Profile editor organization
 
-Organize the existing profile controls into General, Filters, Comparison, and Recovery & Safety notebook tabs. Individual tabs may scroll when necessary, but Cancel and Save remain in a fixed footer outside those scroll areas on every tab. Existing profile fields, imported flags, notes, path-change history behavior, and Restore Older stay intact. Cancel closes without saving; Enter can invoke the default Save except where a child editor handles its own activation.
+Organize the existing profile controls into General, Filters, Comparison, and Recovery & Safety notebook tabs. Individual tabs may scroll when necessary, but Cancel and Save remain in a fixed footer outside those scroll areas on every tab. Existing profile fields, imported flags, notes, path-change history behavior, and Restore Older stay intact. Cancel closes without saving; Enter can invoke the default Save except where a child editor handles its own activation. Inclusion/exclusion rule changes also preserve the rule list's own scroll adjustment and each scrolled ancestor adjustment, including the notebook page. Restore after layout, clamp to shortened content, and cancel superseded pending restores.
 
 ### Filters
 
@@ -197,7 +197,7 @@ Scanning has its own window, separate from the copying progress window.
 
 - Copy left to right, right to left, or both.
 - **Standard copying.** Copy new and changed files. Do not delete extras on the destination unless a profile option says so.
-- **Exact Mirror.** The destination matches the source, including deletions, subject to Ignore Totally and to the safety checks below. A file that is only on the source and a file that is only on the destination are a move when the timestamp rules say they are the same file and no other file shares that match. The file database is not required for that pair. Two extras of the same size stay a copy and a delete. Standard copying does not turn that pair into a move.
+- **Exact Mirror.** The destination matches the source, including deletions, subject to Ignore Totally and to the safety checks below. A file that is only on the source and a same-named file that is only on the destination are a move when the filename, kind, link target, size, and selected timestamp rules match and no other file shares that match. Different basenames always remain separate copy and delete decisions. The file database is not required for that pair. Ambiguous same-sized candidates stay a copy and a delete. Index candidates by filename/kind/link target/size instead of testing every addition against every deletion. Standard copying does not turn that pair into a move.
 
 ## P1 — required for the jobs to behave as they do now
 

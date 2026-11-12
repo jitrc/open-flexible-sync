@@ -441,6 +441,62 @@ def test_profile_editor_tabs_keep_save_and_cancel_fixed(tmp_path, monkeypatch):
     assert seen["saved"]["note"] == "preserve"
 
 
+def test_removing_exclusion_preserves_page_list_and_main_scroll(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestExclusionScroll")
+    for index in range(30):
+        rules = [f"build/cache-{rule}" for rule in range(50)] if index == 0 else []
+        save_profile(Profile(name=f"sample-{index:02d} profile", left=f"/sample/{index}", right=f"/backup/{index}", exclusions=rules))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    def outer_scroll(widget):
+        while widget is not None and not isinstance(widget, Gtk.ScrolledWindow):
+            widget = widget.get_parent()
+        return widget
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window.present()
+            settle()
+            main = window.profiles_scroll.get_vadjustment()
+            main.set_value((main.get_upper() - main.get_page_size()) * 0.4)
+            editor = window._editor(window.profiles[0])
+            editor.editor_tabs.set_current_page(1)
+            settle()
+            rules = next(item for item in _widgets(editor) if isinstance(item, ExclusionEditor) and not item.include_mode)
+            page = outer_scroll(rules).get_vadjustment()
+            row_list = outer_scroll(rules.list).get_vadjustment()
+            page.set_value((page.get_upper() - page.get_page_size()) * 0.4)
+            row_list.set_value((row_list.get_upper() - row_list.get_page_size()) * 0.6)
+            remove = next(item for item in _widgets(rules.list.get_row_at_index(10)) if isinstance(item, Gtk.Button) and item.get_label() == "Remove")
+            remove.grab_focus()
+            settle()
+            seen["before"] = (main.get_value(), page.get_value(), row_list.get_value())
+            remove.emit("clicked")
+            window.reload()
+            settle()
+            seen["after"] = (main.get_value(), page.get_value(), row_list.get_value())
+            seen["rules_left"] = len(rules.rules())
+            while len(rules.rules()) > 2:
+                rules._remove_rule(0)
+            settle()
+            seen["clamped"] = row_list.get_value() == 0 and row_list.get_upper() <= row_list.get_page_size()
+            editor.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert all(value > 0 for value in seen["before"])
+    for before, after in zip(seen["before"], seen["after"]):
+        assert after == pytest.approx(before, abs=1)
+    assert seen["rules_left"] == 49
+    assert seen["clamped"] is True
+
+
 def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestIncludeSave")

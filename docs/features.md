@@ -42,7 +42,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 ## Include rules and exclusions
 
 - Include filters use `(all)` for no restriction. Replacing `(all)` with masks limits both copying and mirror deletion to matching files.
-- Include and exclusion editors support typed add/edit/remove rules and relative-path matching tests before saving.
+- Include and exclusion editors support typed add/edit/remove rules and relative-path matching tests before saving. Rule changes retain the rule-list and surrounding page scroll positions after GTK layout, with newer edits superseding pending restores and short lists clamped to the valid range.
 - **Ignore Totally** hides matches from copying and mirror deletion.
 - **Don't Copy** prevents transfer, while Exact Mirror can still remove an extra destination copy after the normal safety confirmation.
 - Global exclusions apply to every profile. The default behavior remains Ignore Totally; Settings can instead select Don't Copy.
@@ -56,7 +56,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Cross-filesystem comparison uses filesystem-reported timestamps; OFS does not guess a remote server's clock offset.
 - Optional binary comparison directly compares candidate file bytes. This is not a stored SHA checksum database or automatic post-copy verification.
 - Optional per-profile SQLite history first records the trees, then helps identify later renames, moves, and deletions. Changed-on-both-sides and undecided rows remain explicit decisions rather than automatic overwrites.
-- Exact Mirror can pair a unique source addition and destination deletion as a move, even without the file database. Ambiguous or different-type pairs remain separate operations.
+- Exact Mirror can pair a unique source addition and destination deletion as a move when their filename, kind, link target, size, and timestamp policy match, even without the file database. Different filenames or ambiguous/different-type candidates remain separate copy and delete operations. Candidates are indexed by filename and metadata instead of comparing every addition with every deletion.
 - Scan progress separates profile and reading side from the path. A fixed-height, theme-aware path panel uses bounded middle truncation instead of wrap-driven resizing. Full path text remains selectable/copyable and available in the tooltip. Statistics, progress, and controls have consistent spacing.
 - Scan progress includes discovered/filtered/added counts, elapsed time, and entries per second.
 - The first completed scan has no ETA. Later scans show an approximate history-based `~` ETA, refined using current discovery pace and expected remaining entries. Paused time is excluded, and skipped or canceled scans do not replace a previous estimate.
