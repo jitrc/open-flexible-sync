@@ -10,10 +10,10 @@ Use local folders or OS-mounted NAS, SMB/CIFS, NFS, SSHFS, and rclone storage.
 
 | | What OFS gives you |
 |---|---|
-| 🗂️ **Organized profiles** | Custom groups and subgroups, search and filters, Multi Edit, profile export/import, and safe path replacement. A tabbed editor keeps Cancel and Save fixed on every page. |
+| 🗂️ **Organized profiles** | Custom groups and subgroups, search and filters, Multi Edit, profile export/import, and safe path replacement after a mount or folder move. |
 | 🔍 **Understandable scans** | Live discovery counts, elapsed time, repeat-scan ETA estimates, and Pause/Skip Rest/Cancel controls, followed by a clear file/folder preview. Optional destination metadata caching persists across backup rounds; **Run uncached** handles external changes. |
 | 🛡️ **Safe synchronization** | Copy-only or Exact Mirror, timestamp and optional binary comparison, reviewed deletions, configurable deletion limits, and atomic temporary-file replacement. |
-| 🪟 **Flexible windows** | Open additional main windows in one OFS process with shared per-profile operation locks. Closing an overview does not cancel its active scan or lose the completed preview. |
+| 🪟 **Flexible windows** | Open additional main windows with independent profile selections and coordinated job activity. |
 | 🗃️ **Recovery when needed** | Optional recovery of deleted files, retained replaced versions, and restoration into a separate destination without overwriting existing files. |
 | 🔗 **Links and metadata** | Follow, preserve, or skip symlinks; optional permission/owner comparison and safe owner/group preservation. |
 | ⚡ **Responsive progress** | Total and per-file bars, speed/ETA, pause/resume, cancellation, optional throttling, logs, results, and retry through a fresh scan. |
@@ -71,6 +71,7 @@ tar -xzf OFS-0.3.0-linux-x86_64.tar.gz
 - **[Complete feature reference](docs/features.md):** profiles, scanning, copying, recovery, metadata, and progress.
 - **[User guide](docs/usage.md):** profiles, previews, safety confirmation, settings, and CLI behavior.
 - **[Project specification](docs/spec.md):** implemented requirements, compatibility decisions, and future scope.
+- **[Changelog](CHANGELOG.md):** consolidated features, changes, and fixes by public release.
 
 ## Source and testing
 
