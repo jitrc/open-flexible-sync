@@ -289,8 +289,16 @@ class MainWindow(Gtk.ApplicationWindow):
         amount = str(count) if count == total else f"{count}/{total}"
         tally = Gtk.Label(label=f"{amount} profile" if total == 1 else f"{amount} profiles")
         tally.add_css_class("group-count")
+        selectable = [profile for profile in members if not profile.disabled]
+        group_check = Gtk.CheckButton()
+        group_check.set_sensitive(bool(selectable))
+        group_check.set_tooltip_text("Select or clear the whole group (only visible members when filtered)" if selectable else "All visible profiles in this group are disabled")
+        group_check.set_active(bool(selectable) and all(profile.name in self.checked for profile in selectable))
+        group_check.set_inconsistent(any(profile.name in self.checked for profile in selectable) and not all(profile.name in self.checked for profile in selectable))
+        group_check.connect("toggled", self._toggle_group, selectable)
         heading = Gtk.Box(spacing=12)
         heading.add_css_class("group-heading")
+        heading.append(group_check)
         heading.append(name)
         heading.append(tally)
         expander = Gtk.Expander()
@@ -308,6 +316,16 @@ class MainWindow(Gtk.ApplicationWindow):
             box.append(self._row(profile))
         expander.set_child(box)
         return expander
+
+    def _toggle_group(self, check: Gtk.CheckButton, members: list[Profile]) -> None:
+        if self._applying_groups:
+            return
+        names = {profile.name for profile in members}
+        if check.get_active():
+            self.checked.update(names)
+        else:
+            self.checked.difference_update(names)
+        self._rebuild()
 
     def _row(self, profile: Profile) -> Gtk.Widget:
         check = Gtk.CheckButton(label=profile.name)

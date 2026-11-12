@@ -24,6 +24,8 @@ def _group_titles(box) -> list[tuple[str, bool]]:
             heading = child.get_label_widget()
             if heading is not None:
                 label = heading.get_first_child()
+                while label is not None and not isinstance(label, Gtk.Label):
+                    label = label.get_next_sibling()
                 if isinstance(label, Gtk.Label):
                     title = label.get_label()
             found.append((title or child.get_label() or "", child.get_expanded()))
@@ -165,6 +167,59 @@ def test_groups_start_collapsed_and_toggle_together(tmp_path, monkeypatch):
     assert seen["search_miss"] == []
     assert seen["search"] == [("alpha", True)]
     assert seen["closed"] == [("alpha", False)]
+
+
+def test_group_checkbox_selects_visible_enabled_members_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestGroupChecks")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    save_profile(Profile(name="alpha one", left=str(left), right=str(right)))
+    save_profile(Profile(name="alpha two", left=str(left), right=str(right)))
+    save_profile(Profile(name="alpha offline", left=str(tmp_path / "offline"), right=str(right)))
+    save_profile(Profile(name="alpha disabled", left=str(left), right=str(right), disabled=True))
+    save_profile(Profile(name="beta other", left=str(left), right=str(right)))
+    seen = {}
+
+    class App(SfsApplication):
+        def alpha_check(self, window):
+            child = window.list_box.get_first_child()
+            while child is not None:
+                if isinstance(child, Gtk.Expander):
+                    heading = child.get_label_widget()
+                    label = heading.get_first_child()
+                    while label is not None and not isinstance(label, Gtk.Label):
+                        label = label.get_next_sibling()
+                    if isinstance(label, Gtk.Label) and label.get_text() == "alpha":
+                        return heading.get_first_child()
+                child = child.get_next_sibling()
+            raise AssertionError("alpha group not shown")
+
+        def do_activate(self):
+            window = MainWindow(self)
+            window.available_only.set_active(True)
+            window._set_groups(True)
+            check = self.alpha_check(window)
+            seen["initial"] = check.get_active()
+            check.set_active(True)
+            seen["selected"] = set(window.checked)
+            check = self.alpha_check(window)
+            seen["all"] = (check.get_active(), check.get_inconsistent())
+            check.set_active(False)
+            seen["cleared"] = set(window.checked)
+            window.checked.add("alpha one")
+            window._rebuild()
+            seen["partial"] = self.alpha_check(window).get_inconsistent()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["initial"] is False
+    assert seen["selected"] == {"alpha one", "alpha two"}
+    assert seen["all"] == (True, False)
+    assert seen["cleared"] == set()
+    assert seen["partial"] is True
 
 
 def test_overview_status_availability_filters_columns_and_ungrouped_rows(tmp_path, monkeypatch):
