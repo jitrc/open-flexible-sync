@@ -77,6 +77,10 @@ The text names the profile and, for each side that would lose files, the folder 
 
 If the window is still open after 120 seconds, the run continues without deletions. Enter is that same choice.
 
+The profile editor has three additional opt-in safeguards. Delete limit blocks Confirm Deletions when either side's planned deletions exceed the specified percentage of the complete remaining comparison; zero disables the limit. Block deletion of every file in a folder blocks confirmation when all scanned files on that side of any folder would be deleted. Ignore Totally files are invisible and do not count toward that folder. Never delete files blocks every file-delete action; ordinary empty-folder cleanup after moves remains possible. These are also Multi Edit fields.
+
+Blocked plans may still Continue Without Deletions, or the user can change the profile safeguards. Confirmation is disabled; the timeout cannot turn a blocked plan into a deletion run. The apply engine independently enforces these limits even outside the confirmation window. A direct apply without a complete listing is refused when a percentage or folder limit needs one. `run --apply` refuses a protected plan before any copies, moves, deletes, or logging. Existing/imported profiles retain their original safeguards by default.
+
 When the plan deletes nothing, Start goes straight to progress. The comparison list is the confirmation for those copies and moves.
 
 A row marked ask is skipped and reported as left undecided. `run --apply` refuses the whole run while any ask remains, and it writes no log in that case.

@@ -511,6 +511,43 @@ def test_profile_bundle_ui_exports_checked_and_imports_only_after_choice(tmp_pat
     assert "Exported 2" in seen["export_status"]
 
 
+def test_deletion_safeguard_disables_confirmation_but_allows_safe_continuation(tmp_path, monkeypatch):
+    from ofs.review import deletion_violations, safety_text
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestDeleteLimits")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "same").write_text("same")
+    (right / "same").write_bytes((left / "same").read_bytes())
+    (right / "extra one").write_text("one")
+    (right / "extra two").write_text("two")
+    profile = Profile(name="guarded", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR, max_delete_percent=10)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            result = scan_profile(profile)
+            preview = window._preview(JobResult(profile, result, None))
+            seen["violations"] = deletion_violations(profile, preview.rows)
+            safety = preview._safety(safety_text(profile, preview.rows), preview._planned(), blocked=bool(seen["violations"]))
+            labels = {button.get_label(): button for button in _buttons(safety)}
+            seen["confirm_sensitive"] = labels["Confirm Deletions"].get_sensitive()
+            seen["continue_sensitive"] = labels["Continue Without Deletions"].get_sensitive()
+            safety.close()
+            seen["extra_survives"] = (right / "extra one").exists()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["violations"]
+    assert seen["confirm_sensitive"] is False
+    assert seen["continue_sensitive"] is True
+    assert seen["extra_survives"] is True
+
+
 def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestCopyProgress")

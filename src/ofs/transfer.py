@@ -67,7 +67,7 @@ def _validate(data) -> Profile:
     for field in ("left", "right", "left_volume", "right_volume", "older_folder", "last_result", "note"):
         if field in data and not isinstance(data[field], str):
             raise ValueError(f"invalid {field} in profile {name}")
-    for field in ("keep_older", "keep_deleted", "binary_compare", "track", "always_copy", "disabled", "imported_settings"):
+    for field in ("keep_older", "keep_deleted", "binary_compare", "track", "always_copy", "disabled", "block_delete_all", "never_delete_files", "imported_settings"):
         if field in data and not isinstance(data[field], bool):
             raise ValueError(f"invalid {field} in profile {name}")
     for field in ("include", "exclusions"):

@@ -13,6 +13,7 @@ from pathlib import Path
 
 from ofs.compare import Action, Change
 from ofs.model import Profile
+from ofs.review import deletion_violations
 
 
 class ApplyError(Exception):
@@ -262,6 +263,7 @@ def apply_plan(
     on_progress=None,
     on_copy_progress=None,
     bytes_per_second: int = 0,
+    listing: list | None = None,
 ) -> ApplyReport:
     """Apply a serial plan with legacy operation events and byte-level copy events."""
 
@@ -271,6 +273,20 @@ def apply_plan(
     ordered = sorted(changes, key=_apply_order)
     progress = _CopyProgressReporter(ordered, report, on_progress, on_copy_progress)
     limiter = _RateLimiter(bytes_per_second)
+    deleting = any(change.action in (Action.DELETE_LEFT, Action.DELETE_RIGHT) for change in ordered)
+    if deleting and listing is None and (profile.max_delete_percent or profile.block_delete_all):
+        report.errors.append("Deletion protection requires the complete scan listing; no operations were applied.")
+        progress.finish()
+        return report
+    if deleting:
+        from ofs.review import Listed
+
+        policy_rows = listing if listing is not None else [Listed(change, False, False) for change in ordered]
+        violations = deletion_violations(profile, policy_rows)
+        if violations:
+            report.errors.extend(f"Deletion protection: {message}" for message in violations)
+            progress.finish()
+            return report
     for index, change in enumerate(ordered):
         progress.begin(index, change)
         if control is not None and not control.checkpoint():

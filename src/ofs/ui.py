@@ -36,6 +36,7 @@ from ofs.review import (
     result_rows,
     safety_text,
     build_tree,
+    deletion_violations,
     point_change,
     shown_summary,
     status_lines,
@@ -802,6 +803,10 @@ class MainWindow(Gtk.ApplicationWindow):
         binary = Gtk.CheckButton(label="Binary compare when size matches (reads file bytes)", active=bool(existing and existing.binary_compare))
         track = Gtk.CheckButton(label="Remember files and detect moves and deletions", active=bool(existing and existing.track))
         disabled = Gtk.CheckButton(label="Disabled — keep this profile but do not run it", active=bool(existing and existing.disabled))
+        delete_all = Gtk.CheckButton(label="Block deletion of every file in a folder", active=bool(existing and existing.block_delete_all))
+        never_delete = Gtk.CheckButton(label="Never delete files (existing empty-folder cleanup only)", active=bool(existing and existing.never_delete_files))
+        delete_limit = Gtk.SpinButton.new_with_range(0, 100, 1)
+        delete_limit.set_value(0 if existing is None else existing.max_delete_percent)
         include_editor = ExclusionEditor(["(all)"] if existing is None else existing.include, include=True)
         exclusion_editor = ExclusionEditor([] if existing is None else existing.exclusions)
         min_size = Gtk.Entry(text="" if existing is None or not existing.min_size else str(existing.min_size))
@@ -824,12 +829,13 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Min age (days)", min_age),
             ("Max age (days)", max_age),
             ("Older versions", older_keep),
+            ("Delete limit (%; 0 = off)", delete_limit),
         ]
         for index, (label, widget) in enumerate(rows):
             grid.attach(Gtk.Label(label=label, xalign=1), 0, index, 1, 1)
             grid.attach(widget, 1, index, 1, 1)
         checks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, disabled):
+        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, disabled, delete_all, never_delete):
             checks.append(widget)
         grid.attach(checks, 1, len(rows), 1, 1)
         save = Gtk.Button(label="Save")
@@ -875,6 +881,9 @@ class MainWindow(Gtk.ApplicationWindow):
                 binary_compare=binary.get_active(),
                 track=track.get_active(),
                 disabled=disabled.get_active(),
+                max_delete_percent=delete_limit.get_value_as_int(),
+                block_delete_all=delete_all.get_active(),
+                never_delete_files=never_delete.get_active(),
                 last_result="" if existing is None else existing.last_result,
                 note="" if existing is None else existing.note,
                 imported_settings=False if existing is None else existing.imported_settings,
@@ -1708,9 +1717,9 @@ class Preview(Gtk.Window):
         if warning is None:
             self._begin(changes, "no deletions")
             return
-        self._safety(warning, changes)
+        self._safety(warning, changes, blocked=bool(deletion_violations(self.job.profile, self.rows)))
 
-    def _safety(self, text: str, changes: list[Change]) -> None:
+    def _safety(self, text: str, changes: list[Change], *, blocked: bool = False) -> Gtk.Window:
         window = Gtk.Window(transient_for=self, modal=True, title="Safety Confirmations Required")
         window.set_default_size(760, 520)
         choice: dict[str, str | None] = {"value": None}
@@ -1753,6 +1762,9 @@ class Preview(Gtk.Window):
             window.close()
 
         confirm = Gtk.Button(label="Confirm Deletions")
+        confirm.set_sensitive(not blocked)
+        if blocked:
+            confirm.set_tooltip_text("A profile deletion safeguard blocks this plan. Continue without deletions or change the profile.")
         confirm.connect("clicked", lambda *_: choose("confirm"))
         skip = Gtk.Button(label="Continue Without Deletions")
         skip.connect("clicked", lambda *_: choose("without"))
@@ -1794,6 +1806,7 @@ class Preview(Gtk.Window):
                     control=progress.control,
                     on_copy_progress=lambda update: GLib.idle_add(progress.update, update),
                     bytes_per_second=copy_speed_limit(),
+                    listing=self.rows,
                 )
             except Exception as exc:
                 report.errors.append(str(exc))
@@ -2234,8 +2247,8 @@ class BulkEditWindow(Gtk.Window):
         if definition.kind == "choice":
             self.value_widget = Gtk.DropDown.new_from_strings([label for label, _value in definition.options])
         elif definition.kind == "number":
-            self.value_widget = Gtk.SpinButton.new_with_range(1, 99, 1)
-            self.value_widget.set_value(1)
+            self.value_widget = Gtk.SpinButton.new_with_range(definition.minimum, definition.maximum, 1)
+            self.value_widget.set_value(definition.minimum)
         else:
             self.value_widget = Gtk.Entry(hexpand=True)
             self.value_widget.set_placeholder_text("One or several masks separated by ; or newline")

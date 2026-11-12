@@ -21,6 +21,8 @@ class BulkField:
     label: str
     kind: str
     options: tuple[tuple[str, object], ...] = ()
+    minimum: int = 0
+    maximum: int = 0
 
 
 _ON_OFF = (("Off", False), ("On", True))
@@ -31,7 +33,10 @@ FIELDS = (
     BulkField("disabled", "Disabled", "choice", _ON_OFF),
     BulkField("keep_older", "Keep replaced files under Older", "choice", _ON_OFF),
     BulkField("keep_deleted", "Recoverable deletions under Older", "choice", _ON_OFF),
-    BulkField("older_keep", "Older version count", "number"),
+    BulkField("older_keep", "Older version count", "number", minimum=1, maximum=99),
+    BulkField("max_delete_percent", "Maximum deletion percentage (0 = off)", "number", maximum=100),
+    BulkField("block_delete_all", "Block deletion of every file in a folder", "choice", _ON_OFF),
+    BulkField("never_delete_files", "Never delete files", "choice", _ON_OFF),
     BulkField("binary_compare", "Binary comparison", "choice", _ON_OFF),
     BulkField("track", "Remember files and detect moves/deletions", "choice", _ON_OFF),
     BulkField("always_copy", "Always copy even when unchanged", "choice", _ON_OFF),
@@ -58,9 +63,9 @@ def prepare_bulk_edit(profiles: list[Profile], field: str, value, *, add_masks: 
         try:
             value = int(value)
         except (TypeError, ValueError) as exc:
-            raise ValueError("enter a whole number of Older versions") from exc
-        if not 1 <= value <= 99:
-            raise ValueError("Older version count must be between 1 and 99")
+            raise ValueError("enter a whole number") from exc
+        if not definition.minimum <= value <= definition.maximum:
+            raise ValueError(f"{definition.label} must be between {definition.minimum} and {definition.maximum}")
     masks: list[str] = []
     if definition.kind == "masks":
         masks = list(dict.fromkeys(split_masks(str(value))))

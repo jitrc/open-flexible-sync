@@ -283,6 +283,44 @@ def without_deletes(changes: list[Change]) -> list[Change]:
     return [change for change in changes if change.action not in DELETE]
 
 
+def deletion_violations(profile: Profile, rows: list[Listed]) -> list[str]:
+    """Limits are checked against the complete remaining listing, never filtered rows."""
+
+    deletes = [row for row in rows if row.change.action in DELETE]
+    if not deletes:
+        return []
+    if profile.never_delete_files:
+        return ["File deletion is disabled. Continue without deletions or enable deletion in the profile."]
+    violations = []
+    total = len(rows)
+    for side, action in (("Left", Action.DELETE_LEFT), ("Right", Action.DELETE_RIGHT)):
+        count = sum(row.change.action == action for row in deletes)
+        percent = 100.0 * count / total if total else 0.0
+        if count and profile.max_delete_percent and percent > profile.max_delete_percent:
+            violations.append(
+                f"{side}: {count} of {total} files ({percent:.2f}%) exceeds the "
+                f"{profile.max_delete_percent}% deletion limit."
+            )
+        if count and profile.block_delete_all:
+            totals: dict[str, int] = {}
+            removed: dict[str, int] = {}
+            for row in rows:
+                if action == Action.DELETE_LEFT and not row.on_left:
+                    continue
+                if action == Action.DELETE_RIGHT and not row.on_right:
+                    continue
+                folder = row.change.rel.rsplit("/", 1)[0] if "/" in row.change.rel else "."
+                totals[folder] = totals.get(folder, 0) + 1
+                if row.change.action == action:
+                    removed[folder] = removed.get(folder, 0) + 1
+            for folder in sorted(removed):
+                if removed[folder] == totals[folder]:
+                    violations.append(f"{side}: delete-all protection includes every scanned file in {folder}/")
+    if violations:
+        violations.append("Change the profile safeguards or continue without deletions.")
+    return violations
+
+
 def safety_text(profile: Profile, rows: list[Listed]) -> str | None:
     """Text for the deletion warning. None when this run deletes nothing."""
 
@@ -315,6 +353,9 @@ def safety_text(profile: Profile, rows: list[Listed]) -> str | None:
             lines.append(f"Folders with a large percentage of deletions: {len(folders)}")
             lines.extend(f"{folder}: {count} File(s)" for folder, count in folders)
         lines.append("")
+    violations = deletion_violations(profile, rows)
+    if violations:
+        lines.extend(["DELETION POLICY BLOCKS CONFIRM DELETIONS:", *violations, ""])
     lines.append(
         f"NOTE: in {SAFETY_SECONDS} seconds, the profile will continue without deletions."
     )

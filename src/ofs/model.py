@@ -80,6 +80,9 @@ class Profile:
     track: bool = False
     always_copy: bool = False
     disabled: bool = False
+    max_delete_percent: int = 0
+    block_delete_all: bool = False
+    never_delete_files: bool = False
     last_result: str = ""
     note: str = ""
     imported_settings: bool = False
@@ -116,6 +119,9 @@ class Profile:
             "track": self.track,
             "always_copy": self.always_copy,
             "disabled": self.disabled,
+            "max_delete_percent": self.max_delete_percent,
+            "block_delete_all": self.block_delete_all,
+            "never_delete_files": self.never_delete_files,
             "last_result": self.last_result,
             "note": self.note,
             "imported_settings": self.imported_settings,
@@ -147,6 +153,9 @@ class Profile:
             track=bool(data.get("track", False)),
             always_copy=bool(data.get("always_copy", False)),
             disabled=bool(data.get("disabled", False)),
+            max_delete_percent=min(100, _positive_int(data.get("max_delete_percent"), 0)),
+            block_delete_all=bool(data.get("block_delete_all", False)),
+            never_delete_files=bool(data.get("never_delete_files", False)),
             last_result=data.get("last_result") or "",
             note=data.get("note") or "",
             imported_settings=bool(data.get("imported_settings", False)),

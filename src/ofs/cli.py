@@ -115,7 +115,20 @@ def _scan(name: str, *, apply: bool) -> int:
 
     from ofs.settings import copy_speed_limit
 
-    report = apply_plan(profile, job.result.changes, bytes_per_second=copy_speed_limit())
+    from ofs.review import deletion_violations
+
+    violations = deletion_violations(profile, job.result.listing)
+    if violations:
+        for violation in violations:
+            print(f"deletion protection: {violation}", file=sys.stderr)
+        print("nothing was applied", file=sys.stderr)
+        return 1
+    report = apply_plan(
+        profile,
+        job.result.changes,
+        bytes_per_second=copy_speed_limit(),
+        listing=job.result.listing,
+    )
     remember(profile)
     profile.last_result = report.summary()
     save_profile(profile)
