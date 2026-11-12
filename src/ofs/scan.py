@@ -129,6 +129,7 @@ def scan_profile(
         return report
 
     cache_notes = []
+    cached_sides: set[str] = set()
     partial_sides = []
 
     def read_side(side: str, root: Path, destination: bool) -> dict[str, FileStat]:
@@ -136,6 +137,7 @@ def scan_profile(
             cached = load_destination(profile, side, masks, mode)
             if cached is not None:
                 files, saved = cached
+                cached_sides.add(side)
                 files = drop_session(files)
                 cache_notes.append(f"Using cached {side.lower()} destination metadata ({int(time.time() - saved)}s old; use Run uncached to force a fresh read).")
                 walked[side] = len(files)
@@ -223,7 +225,7 @@ def scan_profile(
         bytes_read,
         discovered=sum(walked.values()),
         note=" ".join([part for part in (note, *cache_notes) if part]),
-        cached=bool(cache_notes),
+        cached=bool(cached_sides),
         partial_sides=tuple(partial_sides),
         listing=build_listing(left, right, changes),
     )

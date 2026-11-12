@@ -10,6 +10,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Live Ignore/Exclude works across current discovery, queued rows, and final results, with synchronized temporary rules and separate cache/history protection.
 - Collapsible scan and copy panels provide more result-tree room. Completed operations are marked and use subdued rows without changing the plan.
 - Closing an active live preview requests safe cancellation rather than losing track of the running operation.
+- Live discovery now explicitly shows cache off, fresh discovery, uncached override, and actual cache reuse per destination side. Copy status shows when metadata has been invalidated.
 
 ### Changed
 

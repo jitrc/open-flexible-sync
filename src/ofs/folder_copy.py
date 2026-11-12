@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
 from ofs.apply import ApplyError, ApplyReport, CopyProgress, RunControl, _CopyStopped, _RateLimiter, _copy, _copy_checkpoint, _inside
+from ofs.cache import invalidate_destination
 from ofs.compare import Action, Change, FileStat, outside_filter
 from ofs.masks import included, path_matches
 from ofs.model import Direction, Profile, SymlinkMode
@@ -149,6 +150,7 @@ def copy_new_folder(
     if excluded(relative):
         raise FolderCopyError("The selected folder is excluded. Adjust the profile exclusions before using this action.")
 
+    invalidate_destination(profile)
     extra_parents = _create_destination_parents(destination_root, destination)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.ofs-", suffix=".new", dir=destination.parent))
     report = ApplyReport()

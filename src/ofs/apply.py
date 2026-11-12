@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ofs.cache import invalidate_destination
 from ofs.compare import Action, Change
 from ofs.model import Profile, SymlinkMode
 from ofs.review import deletion_violations
@@ -276,6 +277,21 @@ def apply_plan(
     ordered = sorted(changes, key=_apply_order)
     progress = _CopyProgressReporter(ordered, report, on_progress, on_copy_progress)
     limiter = _RateLimiter(bytes_per_second)
+    cache_invalidated = False
+
+    def invalidate_before_write() -> bool:
+        nonlocal cache_invalidated
+        if cache_invalidated:
+            return True
+        try:
+            invalidate_destination(profile)
+        except OSError as exc:
+            report.errors.append(f"Destination cache invalidation stopped the operation: {exc}")
+            progress.finish()
+            return False
+        cache_invalidated = True
+        return True
+
     deleting = any(change.action in (Action.DELETE_LEFT, Action.DELETE_RIGHT) for change in ordered)
     if deleting and listing is None and (profile.max_delete_percent or profile.block_delete_all):
         report.errors.append("Deletion protection requires the complete scan listing; no operations were applied.")
@@ -304,6 +320,9 @@ def apply_plan(
             report.skipped += 1
             progress.complete(index, change)
             continue
+        if change.action in {Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT, Action.MOVE_ON_RIGHT, Action.MOVE_ON_LEFT, Action.DELETE_RIGHT, Action.DELETE_LEFT}:
+            if not invalidate_before_write():
+                return report
         try:
             if change.action == Action.COPY_LEFT_TO_RIGHT:
                 _copy(profile, left_root, right_root, change.rel, report, "right", control, progress, limiter)

@@ -68,6 +68,8 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 ## Destination metadata cache
 
 - Enable **Cache destination metadata (until OFS changes it)** independently per profile. Existing/imported profiles default to uncached discovery. Multi Edit offers explicit Off/On for checked profiles.
+- Live discovery clearly distinguishes **cache off**, **fresh discovery**, **uncached override**, and **cache reused**, independently for each possible destination side. Actual reuse—not merely enabling cache or failing to save it—is reported as cached.
+- Copy, move, delete, and explicit new-folder transfers invalidate destination metadata at the first mutating operation, before targets change, rather than waiting for a whole batch. Failure to invalidate stops with an error. Pre-work cancellation, ASK/no-op rows, and rejected guarded plans do not falsely claim a write.
 - A completed destination walk is saved as an atomic JSON manifest under the OFS `cache/` directory. The manifest stores paths, timestamps, size, kind, link target, permissions, and UID/GID; it never stores file contents.
 - The following fresh destination scan can reuse that metadata and is labeled as cached. The other/source tree is always read fresh. In both-direction mode the two possible destinations have independently validated metadata snapshots.
 - The cache has no time-based expiry and survives restarts for later backup rounds. Its root path and filter settings must match; folder/mask changes or OFS copy/move/delete operations invalidate it. Canceled/skipped scans never become a cached manifest. An uncached refresh creates a fresh completed manifest.

@@ -22,6 +22,7 @@ from ofs.appearance import appearance_is_dark, apply_appearance
 from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
 from ofs.archive import older_files, restore_version
 from ofs.bulk import FIELDS, bulk_preview, prepare_bulk_edit
+from ofs.cache import destination_sides
 from ofs.compare import Action, Change, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
 from ofs.folder_copy import FolderCopyOutcome, copy_new_folder
@@ -1450,13 +1451,13 @@ class MainWindow(Gtk.ApplicationWindow):
         progress = ScanWindow(self, f"Scanning {profile.name}", estimates={profile.name: scan_estimate(profile.name)})
         progress.control.rules_lock = self._session_rule_lock(profile.name)
         preview = self._preview(JobResult(profile, ScanResult(changes=[]), None))
-        preview._begin_scan(progress)
+        preview._begin_scan(progress, uncached=uncached)
         self._scan_previews[profile.name] = preview
         # Closing the overview must not quit OFS before the result has a window.
         self._ofs_app.hold()
 
         def on_stats(name: str, side: str, rel: str, values) -> None:
-            GLib.idle_add(progress.update_stats, name, side, rel, values, priority=GLib.PRIORITY_DEFAULT)
+            GLib.idle_add(preview._record_scan_stats, name, side, rel, values, priority=GLib.PRIORITY_DEFAULT)
 
         def on_entry(name: str, side: str, rel: str, stat) -> None:
             if name == profile.name:
@@ -1914,6 +1915,11 @@ class Preview(Gtk.Window):
         self._entry_lock = threading.Lock()
         self._entry_refresh_scheduled = False
         self._live_refill_pending = False
+        self._force_uncached = False
+        self._cache_sides: set[str] = set()
+        self._cached_discovery: set[str] = set()
+        self._fresh_discovery: set[str] = set()
+        self._copy_cache_invalidated = False
         self._live_seen: set[str] = set()
         self._live_rows: dict[str, Listed] = {}
         self._live_permanent_masks: set[str] = set()
@@ -2086,10 +2092,14 @@ class Preview(Gtk.Window):
         self.operation_area.append(expander)
         return expander
 
-    def _begin_scan(self, progress: ScanWindow) -> None:
+    def _begin_scan(self, progress: ScanWindow, *, uncached: bool = False) -> None:
         self._scan_active = True
         self._scan_complete = False
         self._scan_progress = progress
+        self._force_uncached = uncached
+        self._cache_sides = set(destination_sides(self.job.profile))
+        self._cached_discovery.clear()
+        self._fresh_discovery.clear()
         self.scan_details = self._attach_operation_panel(progress, f"Scanning {self.job.profile.name}")
         self.start_button.set_label("Scanning…")
         self.start_button.set_sensitive(False)
@@ -2097,6 +2107,34 @@ class Preview(Gtk.Window):
         self.completion_action.set_sensitive(False)
         self.set_title(f"{self.job.profile.name} — Scanning")
         self._refresh_detail()
+
+    def _show_live_side(self, side: str) -> None:
+        if side not in self._cache_sides:
+            text = "Fresh source discovery; no source cache is used"
+        elif not self.job.profile.cache_destination:
+            text = "Destination cache: off · fresh discovery"
+        elif self._force_uncached:
+            text = "Cache enabled · uncached override · fresh discovery"
+        elif side in self._cached_discovery:
+            text = "Cache reused · saved destination metadata (age in scan details)"
+        elif side in self._fresh_discovery:
+            text = "Cache enabled · no compatible snapshot · fresh discovery"
+        else:
+            text = "Cache enabled · validating destination snapshot"
+        (self.left_status if side == "Left" else self.right_status).set_text(text)
+
+    def _record_scan_stats(self, name: str, side: str, rel: str, values) -> bool:
+        progress = self._scan_progress
+        if progress is None or progress._allow_close:
+            return False
+        progress.update_stats(name, side, rel, values)
+        if side in self._cache_sides:
+            if rel.startswith("Using cached destination metadata"):
+                self._cached_discovery.add(side)
+            else:
+                self._fresh_discovery.add(side)
+        self._show_live_side(side)
+        return False
 
     def _queue_entry(self, side: str, rel: str, stat) -> None:
         with self._entry_lock:
@@ -2651,8 +2689,8 @@ class Preview(Gtk.Window):
 
     def _refresh_detail(self) -> None:
         if self._scan_active:
-            self.left_status.set_text("Discovery in progress; no copy/delete decision yet")
-            self.right_status.set_text("Pending or cached metadata; final comparison follows")
+            self._show_live_side("Left")
+            self._show_live_side("Right")
             self.detail.set_text("Live discovery is review-only. Start is unlocked only after the complete comparison.")
             return
         if not self._scan_complete:
@@ -2783,6 +2821,7 @@ class Preview(Gtk.Window):
         self._copy_progress = progress
         self.copy_details = self._attach_operation_panel(progress, f"Copying {self.job.profile.name}")
         self._copy_planned = {change.rel: change for change in changes}
+        self._copy_cache_invalidated = False
         self._last_copy_done = 0
         self._last_copy_errors = 0
         if self.scan_details is not None:
@@ -2825,9 +2864,18 @@ class Preview(Gtk.Window):
         if progress is not self._copy_progress:
             return False
         progress.update(event)
+        change = self._copy_planned.get(event.rel)
+        mutating = change is not None and change.action in {
+            Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT,
+            Action.MOVE_ON_LEFT, Action.MOVE_ON_RIGHT,
+            Action.DELETE_LEFT, Action.DELETE_RIGHT,
+        }
+        if mutating and self.job.profile.cache_destination and not self._copy_cache_invalidated:
+            self._copy_cache_invalidated = True
+            if self.copy_details is not None:
+                self.copy_details.set_label(f"Copying {self.job.profile.name} · cache invalidated")
         if event.rel and event.completed > self._last_copy_done:
             self._last_copy_done = event.completed
-            change = self._copy_planned.get(event.rel)
             if change is not None and event.errors == self._last_copy_errors:
                 label = {
                     Action.COPY_LEFT_TO_RIGHT: "Copied",

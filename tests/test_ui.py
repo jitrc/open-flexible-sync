@@ -1324,6 +1324,68 @@ def test_live_preview_batches_entries_and_keeps_start_disabled_until_complete(tm
     assert seen["final_paths"] == ["root.txt"]
 
 
+def test_scan_reports_cache_off_fresh_and_reused_states(tmp_path, monkeypatch):
+    from ofs.walk import WalkStats
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestVisibleCacheState")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    (left / "entry.txt").write_text("same")
+    (right / "entry.txt").write_text("same")
+    profile = Profile(name="cache status", left=str(left), right=str(right), cache_destination=True)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            result = scan_profile(profile, on_stats=lambda side, rel, values: preview._record_scan_stats(profile.name, side, rel, values))
+            seen["fresh"] = preview.right_status.get_text()
+            progress.allow_close()
+            preview._finish_scan(JobResult(profile, result, None))
+            preview.close()
+
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            result = scan_profile(profile, on_stats=lambda side, rel, values: preview._record_scan_stats(profile.name, side, rel, values))
+            seen["reused"] = preview.right_status.get_text()
+            progress.allow_close()
+            preview._finish_scan(JobResult(profile, result, None))
+            preview.close()
+
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress, uncached=True)
+            preview._record_scan_stats(profile.name, "Right", "fresh/path", WalkStats(1, 0, 1))
+            seen["override"] = preview.right_status.get_text()
+            progress.allow_close()
+            preview._finish_scan(JobResult(profile, ScanResult([]), None))
+            preview.close()
+
+            profile.cache_destination = False
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            preview._record_scan_stats(profile.name, "Right", "fresh/path", WalkStats(1, 0, 1))
+            seen["off"] = preview.right_status.get_text()
+            progress.allow_close()
+            preview._finish_scan(JobResult(profile, ScanResult([]), None))
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert "no compatible snapshot" in seen["fresh"]
+    assert "Cache reused" in seen["reused"]
+    assert "uncached override" in seen["override"]
+    assert "cache: off" in seen["off"]
+
+
 def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanCounts")

@@ -53,6 +53,24 @@ def test_include_masks_recurse_into_folders_but_only_copy_matching_files(tmp_pat
     assert outcome.report.copied == 1
 
 
+def test_new_folder_transfer_invalidates_metadata_before_install(tmp_path, monkeypatch):
+    from ofs.cache import _path, save_destination
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    source = Path(profile.left) / "inbox"
+    source.mkdir()
+    (source / "photo.jpg").write_text("complete")
+    save_destination(profile, "Right", [], profile.exclusion_mode, {})
+    manifest = _path(profile)
+    events = []
+    outcome = copy_new_folder(profile, "inbox", on_progress=lambda event: events.append(manifest.exists()))
+    assert events and not any(events)
+    assert not manifest.exists()
+    assert outcome.report.copied == 1 and not outcome.report.errors
+    assert (Path(profile.right) / "inbox" / "photo.jpg").read_text() == "complete"
+
+
 def test_existing_destination_is_not_scanned_or_modified(tmp_path):
     profile = _profile(tmp_path)
     destination = Path(profile.right) / "inbox"

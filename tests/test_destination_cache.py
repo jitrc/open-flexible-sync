@@ -127,6 +127,43 @@ def test_uncached_cli_scan_refreshes_manifest(tmp_path, monkeypatch, capsys):
     assert json.loads(manifest.read_text())["saved"] == fresh_time
 
 
+def test_apply_invalidates_before_write_but_not_for_ask_or_prework_cancel(tmp_path, monkeypatch):
+    import ofs.apply as apply_module_aliased
+    from ofs.apply import RunControl
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    source = tmp_path / "left" / "a"
+    target = tmp_path / "right" / "a"
+    source.write_text("new")
+    target.write_text("old")
+    save_destination(profile, "Right", [], profile.exclusion_mode, {})
+    manifest = cache_module._path(profile)
+    events = []
+    invalidate = apply_module_aliased.invalidate_destination
+
+    def before_write(current_profile):
+        assert target.read_text() == "old"
+        assert manifest.exists()
+        events.append(current_profile.name)
+        invalidate(current_profile)
+
+    monkeypatch.setattr(apply_module_aliased, "invalidate_destination", before_write)
+    report = apply_plan(profile, [Change("a", Action.COPY_LEFT_TO_RIGHT, "target changed", 3)])
+    assert report.copied == 1 and not report.errors
+    assert events == [profile.name]
+    assert target.read_text() == "new"
+    assert not manifest.exists()
+
+    save_destination(profile, "Right", [], profile.exclusion_mode, {})
+    ignored = apply_plan(profile, [Change("a", Action.ASK, "undecided", 3)])
+    assert ignored.skipped == 1 and manifest.exists()
+    control = RunControl()
+    control.stop()
+    canceled = apply_plan(profile, [Change("a", Action.COPY_LEFT_TO_RIGHT, "canceled before copy", 3)], control=control)
+    assert canceled.cancelled and manifest.exists()
+
+
 def test_invalidation_after_copy_removes_completed_manifest(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     profile = _profile(tmp_path, cache_destination=True)
