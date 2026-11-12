@@ -4,7 +4,7 @@ import time
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk
+from gi.repository import Gio, GLib, Gtk
 
 from ofs.apply import CopyProgress
 from ofs.compare import Action
@@ -460,6 +460,55 @@ def test_multi_edit_previews_then_saves_only_the_checked_field(tmp_path, monkeyp
     assert seen["saved"]["alpha two"].mode == SyncMode.EXACT_MIRROR
     assert seen["saved"]["beta other"].mode == SyncMode.STANDARD
     assert seen["saved"]["alpha one"].exclusions == ["keep"]
+
+
+def test_profile_bundle_ui_exports_checked_and_imports_only_after_choice(tmp_path, monkeypatch):
+    from ofs.transfer import read_profile_bundle
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestTransfer")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    save_profile(Profile(name="alpha one", left=str(left), right=str(right), imported_settings=True))
+    save_profile(Profile(name="alpha two", left=str(left), right=str(right)))
+    save_profile(Profile(name="beta other", left=str(left), right=str(right)))
+    path = tmp_path / "profiles.json"
+    seen = {}
+
+    class LocalDialog:
+        def __init__(self, choice=None):
+            self.choice = choice
+
+        def save_finish(self, _result):
+            return Gio.File.new_for_path(str(path))
+
+        def choose_finish(self, _result):
+            return self.choice
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            chosen = [item for item in window.profiles if item.name.startswith("alpha ")]
+            window.checked = {item.name for item in chosen}
+            window._export_bundle_saved(LocalDialog(), None, chosen)
+            exported = read_profile_bundle(path)
+            seen["exported"] = [item.name for item in exported]
+            seen["export_status"] = window.status.get_text()
+            seen["before_cancel"] = [item.name for item in load_profiles()]
+            window._bundle_import_chosen(LocalDialog(0), None, exported)
+            seen["after_cancel"] = [item.name for item in load_profiles()]
+            window._bundle_import_chosen(LocalDialog(2), None, exported)
+            seen["after_rename"] = [item.name for item in load_profiles()]
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["exported"] == ["alpha one", "alpha two"]
+    assert seen["before_cancel"] == seen["after_cancel"]
+    assert "alpha one (imported)" in seen["after_rename"]
+    assert "alpha two (imported)" in seen["after_rename"]
+    assert "Exported 2" in seen["export_status"]
 
 
 def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tmp_path, monkeypatch):

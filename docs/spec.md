@@ -253,7 +253,7 @@ View Log opens that run's text file. A confirmed Start that begins copying write
 - Create, rename, delete, disable, enable, and duplicate a profile. Disabled is persistent, visible in Overview, and blocks GUI/CLI runs without deleting the profile, its paths, history, or results. A future scheduler must honor it too. Duplicate copies the job and leaves the file database behind. Delete asks, then removes the profile and its database. The folders on disk stay.
 - Multi Edit changes one field across the checked profiles. It previews affected names and resulting values, requires confirmation, and leaves every unselected field unchanged. Include/exclusion masks offer Add (union without duplicate additions) or Replace. Disabling removes affected names from the run selection; disabled profiles can still be re-enabled through Multi Edit.
 - Search and replace a path across the checked profiles. Ask before saving. Remove the file databases of the profiles that change, because those databases still describe the old folders.
-- Import and export the new profile format.
+- Export checked profiles or groups into a versioned JSON bundle, preserving OFS profile fields but not file databases or logs. Import validates the whole bundle before changes and requires confirmation and an explicit skip, rename, or replace policy for duplicate names. Replacement removes a stale file database if its folders changed. Neither operation touches the original 5.71 cfg.
 - Optional password before editing profiles.
 - Profile names are case-sensitive and must not contain `=`.
 

@@ -55,6 +55,7 @@ from ofs.settings import (
     set_global_exclusions,
 )
 from ofs.store import config_dir, delete_profile, duplicate_profile, install_imported, load_profiles, replace_in_paths, save_profile
+from ofs.transfer import export_profiles, install_profile_bundle, read_profile_bundle
 
 _CFG = Path.home() / ".SuperFlexibleSynchronizer" / "SuperFlexibleSynchronizer.cfg"
 
@@ -102,7 +103,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
         header = Gtk.HeaderBar()
         self.set_titlebar(header)
-        import_button = Gtk.Button(label="Import")
+        import_button = Gtk.Button(label="Import 5.71")
+        import_button.set_tooltip_text("Read the original SuperFlexibleSynchronizer.cfg without changing it")
         import_button.connect("clicked", self._import)
         new_button = Gtk.Button(label="New")
         new_button.connect("clicked", self._new_profile)
@@ -114,6 +116,15 @@ class MainWindow(Gtk.ApplicationWindow):
         restore_button = Gtk.Button(label="Restore Older…")
         restore_button.set_tooltip_text("Restore an archived file to a separate folder")
         restore_button.connect("clicked", self._restore_older)
+        transfer_menu = Gtk.MenuButton(label="OFS profiles")
+        transfer_popover = Gtk.Popover()
+        transfer_choices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        for label, callback in (("Import OFS profiles…", self._import_bundle), ("Export checked profiles…", self._export_bundle)):
+            button = Gtk.Button(label=label)
+            button.connect("clicked", lambda _b, fn=callback: (transfer_popover.popdown(), fn()))
+            transfer_choices.append(button)
+        transfer_popover.set_child(transfer_choices)
+        transfer_menu.set_popover(transfer_popover)
         self.run_button = Gtk.Button(label="Run checked")
         self.run_button.add_css_class("run")
         self.run_button.connect("clicked", self._run)
@@ -124,6 +135,7 @@ class MainWindow(Gtk.ApplicationWindow):
         header.pack_start(replace_button)
         header.pack_start(multi_button)
         header.pack_start(restore_button)
+        header.pack_start(transfer_menu)
         header.pack_end(self.run_button)
         header.pack_end(settings_button)
 
@@ -437,6 +449,87 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status.set_text(
             f"Imported {count} profiles. Filled direction, Exact Mirror, and timestamp rules that were still at the defaults.{globals_note}"
         )
+
+    def _import_bundle(self, *_args) -> None:
+        file_filter = Gtk.FileFilter()
+        file_filter.set_name("OFS profile bundles (*.json)")
+        file_filter.add_pattern("*.json")
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Import OFS profiles")
+        dialog.set_default_filter(file_filter)
+        dialog.open(self, None, self._import_bundle_opened)
+
+    def _import_bundle_opened(self, dialog: Gtk.FileDialog, result) -> None:
+        try:
+            file = dialog.open_finish(result)
+        except GLib.Error:
+            return
+        if file is None or file.get_path() is None:
+            self.status.set_text("Choose a local OFS JSON profile bundle.")
+            return
+        try:
+            profiles = read_profile_bundle(Path(file.get_path()))
+        except ValueError as exc:
+            self.status.set_text(str(exc))
+            return
+        self._confirm_bundle_import(profiles)
+
+    def _confirm_bundle_import(self, profiles: list[Profile]) -> None:
+        names = {profile.name for profile in self.profiles}
+        duplicates = sum(profile.name in names for profile in profiles)
+        dialog = Gtk.AlertDialog()
+        dialog.set_message(f"Import {len(profiles)} OFS profiles?")
+        dialog.set_detail(f"{duplicates} name(s) already exist. Choose how to handle them. The original 5.71 configuration is never changed.")
+        dialog.set_buttons(["Cancel", "Skip duplicates", "Rename duplicates", "Replace duplicates"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(1 if duplicates == 0 else 0)
+        dialog.choose(self, None, self._bundle_import_chosen, profiles)
+
+    def _bundle_import_chosen(self, dialog, result, profiles: list[Profile]) -> None:
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if choice == 0:
+            return
+        mode = {1: "skip", 2: "rename", 3: "replace"}[choice]
+        try:
+            summary = install_profile_bundle(profiles, duplicates=mode)
+        except (OSError, ValueError) as exc:
+            self.status.set_text(f"Import failed: {exc}")
+            return
+        self.checked.difference_update(profile.name for profile in profiles if profile.disabled)
+        self.reload()
+        self.status.set_text(f"Imported {summary.saved} OFS profiles; skipped {summary.skipped}; renamed {summary.renamed}.")
+
+    def _export_bundle(self, *_args) -> None:
+        chosen = [profile for profile in self.profiles if profile.name in self.checked]
+        if not chosen:
+            self.status.set_text("Check the profiles or groups to export.")
+            return
+        file_filter = Gtk.FileFilter()
+        file_filter.set_name("OFS profile bundles (*.json)")
+        file_filter.add_pattern("*.json")
+        dialog = Gtk.FileDialog()
+        dialog.set_title("Export checked OFS profiles")
+        dialog.set_initial_name("OFS-profiles.json")
+        dialog.set_default_filter(file_filter)
+        dialog.save(self, None, self._export_bundle_saved, chosen)
+
+    def _export_bundle_saved(self, dialog: Gtk.FileDialog, result, chosen: list[Profile]) -> None:
+        try:
+            file = dialog.save_finish(result)
+        except GLib.Error:
+            return
+        if file is None or file.get_path() is None:
+            self.status.set_text("Export needs a local destination file.")
+            return
+        try:
+            path = export_profiles(Path(file.get_path()), chosen)
+        except OSError as exc:
+            self.status.set_text(f"Could not export profiles: {exc}")
+            return
+        self.status.set_text(f"Exported {len(chosen)} checked profiles to {path}.")
 
     def _restore_older(self, *_args) -> None:
         checked = [profile for profile in self.profiles if profile.name in self.checked]
