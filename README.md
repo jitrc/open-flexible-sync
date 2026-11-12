@@ -6,11 +6,14 @@ OFS is a GTK 4 desktop application for synchronizing local and OS-mounted folder
 
 ### Profile overview
 
-- Profiles with a shared first-word prefix form collapsible groups. Singleton prefixes remain ordinary ungrouped rows.
+- Imported/name-derived profiles with a shared first-word prefix form collapsible groups; singleton prefixes remain ordinary ungrouped rows. An optional **Group / subgroups** field in Edit allows arbitrary custom groups even for single profiles.
+- Use a path such as `Work / Photos / Archive` for nested groups. Parent counts include subgroups, and each parent has its own tri-state selection checkbox. Grouping is organizational only: changing it does not modify sync paths or invalidate the file database. Clearing the custom field restores name-based grouping.
 - Groups start collapsed. **Expand all**, **Collapse all**, and search help navigate the profile list; search opens matching groups.
 - Each profile row shows its name, Left/Right paths, last OFS run, and color-coded result, with **Run**, **Edit**, **Duplicate**, and **Delete** actions.
 - Run an individual profile or scan only the enabled checked profiles.
-- Group heading checkboxes are tri-state. They select or clear visible enabled members; filtered-out members retain their selection, and Disabled profiles are never selected.
+- Group heading checkboxes are tri-state. Parents select or clear visible enabled descendants, including nested subgroups; filtered-out members retain their selection, and Disabled profiles are never selected.
+- Search can match custom group/subgroup names and opens each required ancestor. **Expand all** and **Collapse all** also apply to subgroups.
+- Profile rows have subtle separators and alternate theme-derived surfaces, including during Light/Dark switching. Row checks immediately refresh the parent group's partial-selection state.
 - Filter by status, never-run state, clean/stopped/error result, current selection, disabled state, minimum days since the last OFS result, or currently available paths. Filtering does not silently change the checked set.
 - A persistent **Disabled** setting blocks GUI, CLI, and batch execution without deleting the profile, its paths, history, exclusions, or last results.
 
@@ -99,7 +102,8 @@ Normal file copies preserve file mode and timestamps. Optional permission-bit an
 
 ### Appearance, progress, results, and logs
 
-- **Settings → Appearance** offers **System** (default), **Light**, and **Dark**. Saving applies the selection immediately and persists it for later launches. System follows the desktop color scheme where available; Light and Dark override it for OFS.
+- A **Dark** quick toggle in the header switches Light/Dark immediately, synchronizes with Settings, and persists the selection. No preceding Settings save is needed for the quick toggle.
+- **Settings → Appearance** offers **System** (default), **Light**, and **Dark**. System follows the desktop color scheme where available and restores the desktop's original GTK theme. Explicit Light/Dark overrides also select the appropriate named `-dark`/non-dark theme variant when the desktop uses named variants, rather than changing only a preference flag. These choices affect OFS, not the host desktop settings.
 - Copy progress includes a byte-weighted total bar, a current-file bar, operation counts, copied/deleted/moved/error totals, elapsed time, active-run speed, and ETA.
 - Move/delete-only plans use operation-count progress. Paused time is excluded from active-run speed and copy ETA calculations.
 - An optional shared copy speed limit is configured in MiB/s under Settings; zero means unlimited. It applies to GUI runs and `run --apply`.

@@ -93,12 +93,18 @@ class Profile:
     compare_permissions: bool = False
     compare_ownership: bool = False
     preserve_ownership: bool = False
+    group_override: str = ""
     last_result: str = ""
     note: str = ""
     imported_settings: bool = False
 
     @property
     def group(self) -> str:
+        """Custom group path, or the original import/name-derived grouping."""
+
+        custom = "/".join(part.strip() for part in self.group_override.strip().split("/") if part.strip())
+        if custom:
+            return custom
         stripped = self.name.strip()
         if not stripped:
             return ""
@@ -136,6 +142,7 @@ class Profile:
             "compare_permissions": self.compare_permissions,
             "compare_ownership": self.compare_ownership,
             "preserve_ownership": self.preserve_ownership,
+            "group_override": self.group_override,
             "last_result": self.last_result,
             "note": self.note,
             "imported_settings": self.imported_settings,
@@ -174,6 +181,7 @@ class Profile:
             compare_permissions=bool(data.get("compare_permissions", False)),
             compare_ownership=bool(data.get("compare_ownership", False)),
             preserve_ownership=bool(data.get("preserve_ownership", False)),
+            group_override=data.get("group_override") or "",
             last_result=data.get("last_result") or "",
             note=data.get("note") or "",
             imported_settings=bool(data.get("imported_settings", False)),

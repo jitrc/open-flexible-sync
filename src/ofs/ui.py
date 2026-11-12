@@ -18,7 +18,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
-from ofs.appearance import apply_appearance
+from ofs.appearance import appearance_is_dark, apply_appearance
 from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
 from ofs.archive import older_files, restore_version
 from ofs.bulk import FIELDS, bulk_preview, prepare_bulk_edit
@@ -82,6 +82,13 @@ def _days(text: str) -> float:
         return 0.0
 
 
+def _group_parts(profile: Profile) -> tuple[str, ...]:
+    custom = tuple(part.strip() for part in profile.group_override.strip().strip("/").split("/") if part.strip())
+    if custom:
+        return custom
+    return (profile.group,) if profile.group else ()
+
+
 def open_uri(path: Path) -> None:
     if not path.exists():
         return
@@ -115,6 +122,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._scan_label = ""
         self._path_available: dict[str, bool] = {}
         self._visible_count = 0
+        self._updating_appearance = False
 
         header = Gtk.HeaderBar()
         self.set_titlebar(header)
@@ -150,6 +158,13 @@ class MainWindow(Gtk.ApplicationWindow):
             choices.append(button)
         popover.set_child(choices)
         self.profiles_menu.set_popover(popover)
+        self.appearance_button = Gtk.ToggleButton(label="Dark")
+        self.appearance_button.connect("toggled", self._toggle_appearance)
+        gtk_settings = Gtk.Settings.get_default()
+        if gtk_settings is not None:
+            gtk_settings.connect("notify::gtk-application-prefer-dark-theme", lambda *_: self._refresh_appearance())
+            gtk_settings.connect("notify::gtk-theme-name", lambda *_: self._refresh_appearance())
+        self._refresh_appearance()
         self.run_button = Gtk.Button(label="Run checked")
         self.run_button.add_css_class("run")
         self.run_button.connect("clicked", self._run)
@@ -160,6 +175,7 @@ class MainWindow(Gtk.ApplicationWindow):
         header.pack_start(restore_button)
         header.pack_end(self.run_button)
         header.pack_end(settings_button)
+        header.pack_end(self.appearance_button)
 
         self.search = Gtk.SearchEntry(placeholder_text="Filter profiles")
         self.search.set_hexpand(True)
@@ -259,7 +275,8 @@ class MainWindow(Gtk.ApplicationWindow):
         self._rebuild()
 
     def _shown(self, profile: Profile, query: str, status: str) -> bool:
-        if query not in profile.name.lower() and query not in profile.group.lower():
+        group_text = " ".join(_group_parts(profile)).lower()
+        if query not in profile.name.lower() and query not in profile.group.lower() and query not in group_text:
             return False
         if self.available_only.get_active() and not self._available(profile):
             return False
@@ -293,18 +310,56 @@ class MainWindow(Gtk.ApplicationWindow):
             self.list_box.append(Gtk.Label(label=text, xalign=0))
             return
         group_sizes = Counter(profile.group for profile in self.profiles)
-        ungrouped = [profile for profile in shown if group_sizes[profile.group] == 1]
-        groups: dict[str, list[Profile]] = {}
+
+        def grouped(profile: Profile) -> bool:
+            return bool(profile.group_override.strip()) or group_sizes[profile.group] > 1
+
+        ungrouped = [profile for profile in shown if not _group_parts(profile) or not grouped(profile)]
+        root_sizes = Counter(
+            _group_parts(profile)[0]
+            for profile in self.profiles
+            if _group_parts(profile) and grouped(profile)
+        )
+        roots: dict[str, dict] = {}
+
+        def new_node() -> dict:
+            return {"profiles": [], "children": {}}
+
         for profile in shown:
-            if group_sizes[profile.group] > 1:
-                groups.setdefault(profile.group, []).append(profile)
+            parts = _group_parts(profile)
+            if not parts or not grouped(profile):
+                continue
+            node = roots.setdefault(parts[0], new_node())
+            for part in parts[1:]:
+                node = node["children"].setdefault(part, new_node())
+            node["profiles"].append(profile)
         for profile in ungrouped:
             self.list_box.append(self._row(profile))
+
+        def descendants(node: dict) -> list[Profile]:
+            members = list(node["profiles"])
+            for child in node["children"].values():
+                members.extend(descendants(child))
+            return members
+
+        def emit(node: dict, path: str, total: int) -> Gtk.Widget:
+            children = [
+                emit(node["children"][name], f"{path}/{name}", len(descendants(node["children"][name])))
+                for name in sorted(node["children"], key=str.lower)
+            ]
+            return self._group(
+                path.rsplit("/", 1)[-1],
+                node["profiles"],
+                total,
+                all_members=descendants(node),
+                children=children,
+                group_key=path,
+            )
+
         self._applying_groups = True
         try:
-            for group in sorted(groups, key=str.lower):
-                members = groups[group]
-                self.list_box.append(self._group(group, members, group_sizes[group]))
+            for root in sorted(roots, key=str.lower):
+                self.list_box.append(emit(roots[root], root, root_sizes[root]))
         finally:
             self._applying_groups = False
 
@@ -312,13 +367,17 @@ class MainWindow(Gtk.ApplicationWindow):
         query = self.search.get_text().strip().lower()
         if query:
             for profile in self.profiles:
-                if query in profile.name.lower() or query in profile.group.lower():
-                    self._group_expanded[profile.group] = True
+                if query in profile.name.lower() or query in profile.group.lower() or query in " ".join(_group_parts(profile)).lower():
+                    parts = _group_parts(profile)
+                    for index in range(1, len(parts) + 1):
+                        self._group_expanded["/".join(parts[:index])] = True
         self._rebuild()
 
     def _set_groups(self, expanded: bool) -> None:
         for profile in self.profiles:
-            self._group_expanded[profile.group] = expanded
+            parts = _group_parts(profile)
+            for index in range(1, len(parts) + 1):
+                self._group_expanded["/".join(parts[:index])] = expanded
         self._rebuild()
 
     def _remember_group(self, expander: Gtk.Expander, _pspec, group: str) -> None:
@@ -326,14 +385,26 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._group_expanded[group] = expander.get_expanded()
 
-    def _group(self, group: str, members: list[Profile], total: int) -> Gtk.Widget:
-        count = len(members)
+    def _group(
+        self,
+        group: str,
+        members: list[Profile],
+        total: int,
+        *,
+        all_members: list[Profile] | None = None,
+        children: list[Gtk.Widget] | None = None,
+        group_key: str | None = None,
+    ) -> Gtk.Widget:
+        group_key = group if group_key is None else group_key
+        all_members = members if all_members is None else all_members
+        children = children or []
+        count = len(all_members)
         name = Gtk.Label(label=group, xalign=0, hexpand=True)
         name.add_css_class("group-name")
         amount = str(count) if count == total else f"{count}/{total}"
         tally = Gtk.Label(label=f"{amount} profile" if total == 1 else f"{amount} profiles")
         tally.add_css_class("group-count")
-        selectable = [profile for profile in members if not profile.disabled]
+        selectable = [profile for profile in all_members if not profile.disabled]
         group_check = Gtk.CheckButton()
         group_check.set_sensitive(bool(selectable))
         group_check.set_tooltip_text("Select or clear the whole group (only visible members when filtered)" if selectable else "All visible profiles in this group are disabled")
@@ -350,14 +421,16 @@ class MainWindow(Gtk.ApplicationWindow):
         expander.set_hexpand(True)
         expander.set_label(f"{group}  ({count})")
         expander.set_label_widget(heading)
-        expander.connect("notify::expanded", self._remember_group, group)
-        expander.set_expanded(self._group_expanded.get(group, False))
+        expander.connect("notify::expanded", self._remember_group, group_key)
+        expander.set_expanded(self._group_expanded.get(group_key, False))
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         box.set_margin_start(28)
         box.set_margin_top(4)
         box.set_margin_bottom(8)
         for profile in members:
             box.append(self._row(profile))
+        for child in children:
+            box.append(child)
         expander.set_child(box)
         return expander
 
@@ -432,6 +505,9 @@ class MainWindow(Gtk.ApplicationWindow):
         for button in (run, edit, duplicate, delete):
             actions.append(button)
         row = Gtk.Box(spacing=4)
+        row.add_css_class("profile-row")
+        if len(self._labels) % 2:
+            row.add_css_class("profile-row-alt")
         row.set_margin_top(2)
         row.set_margin_bottom(2)
         text.set_hexpand(True)
@@ -449,7 +525,25 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.status_filter.get_selected() == 5:
             self._rebuild()
         else:
-            self._update_filter_count()
+            self._rebuild()
+
+    def _toggle_appearance(self, *_args) -> None:
+        if self._updating_appearance:
+            return
+        selected = "dark" if self.appearance_button.get_active() else "light"
+        set_theme(selected)
+        apply_appearance(selected)
+        self._refresh_appearance()
+
+    def _refresh_appearance(self) -> None:
+        dark = bool(appearance_is_dark())
+        self._updating_appearance = True
+        try:
+            self.appearance_button.set_active(dark)
+            state = "on" if dark else "off"
+            self.appearance_button.set_tooltip_text(f"Dark mode is {state}. Click for the opposite appearance; System mode is available in Settings.")
+        finally:
+            self._updating_appearance = False
 
     def _profile(self, name: str) -> Profile | None:
         for profile in self.profiles:
@@ -805,6 +899,9 @@ class MainWindow(Gtk.ApplicationWindow):
         grid.set_margin_bottom(12)
         name = Gtk.Entry(text="" if existing is None else existing.name)
         name.set_hexpand(True)
+        group = Gtk.Entry(text="" if existing is None else existing.group_override)
+        group.set_hexpand(True)
+        group.set_placeholder_text("Automatic from name; optional: Work / Photos / Archive")
         left = Gtk.Entry(text="" if existing is None else existing.left)
         right = Gtk.Entry(text="" if existing is None else existing.right)
         left_volume = Gtk.Entry(text="" if existing is None else existing.left_volume)
@@ -855,6 +952,7 @@ class MainWindow(Gtk.ApplicationWindow):
         max_age = Gtk.Entry(text="" if existing is None or not existing.max_age_days else str(existing.max_age_days))
         rows = [
             ("Name", name),
+            ("Group / subgroups", group),
             ("Left", left),
             ("Right", right),
             ("Left volume", left_volume),
@@ -895,6 +993,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 return
             updated = Profile(
                 name=chosen,
+                group_override=group.get_text().strip(),
                 left=left.get_text().strip(),
                 right=right.get_text().strip(),
                 left_volume=left_volume.get_text().strip(),
@@ -1294,6 +1393,9 @@ def _install_css() -> None:
         ".column-header { margin: 6px 12px 2px 12px; padding-bottom: 4px; border-bottom: 1px solid alpha(@theme_fg_color, 0.18); }"
         "label.column-heading { font-weight: 700; font-size: 0.9em; }"
         ".profile-disabled { opacity: 0.55; }"
+        "box.profile-row { padding: 7px 10px; border-bottom: 1px solid alpha(@theme_fg_color, 0.12); border-radius: 6px; }"
+        "box.profile-row-alt { background-color: alpha(@theme_fg_color, 0.035); }"
+        "box.profile-row:hover { background-color: alpha(@theme_selected_bg_color, 0.12); }"
         "label.result-ok { color: @success_color; }"
         "label.result-error { color: @error_color; }"
         "label.result-warn { color: @warning_color; }"
@@ -2403,9 +2505,12 @@ class BulkEditWindow(Gtk.Window):
             self.value_widget.set_value(definition.minimum)
         else:
             self.value_widget = Gtk.Entry(hexpand=True)
-            self.value_widget.set_placeholder_text("One or several masks separated by ; or newline")
-            self.mask_operation = Gtk.DropDown.new_from_strings(["Add to existing masks", "Replace existing masks"])
-            self.value_box.append(self.mask_operation)
+            if definition.kind == "masks":
+                self.value_widget.set_placeholder_text("One or several masks separated by ; or newline")
+                self.mask_operation = Gtk.DropDown.new_from_strings(["Add to existing masks", "Replace existing masks"])
+                self.value_box.append(self.mask_operation)
+            else:
+                self.value_widget.set_placeholder_text("Group / subgroup, or empty to use the name-derived group")
         self.value_box.append(self.value_widget)
 
     def _preview_changes(self, *_args) -> None:

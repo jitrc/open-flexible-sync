@@ -31,6 +31,7 @@ FIELDS = (
     BulkField("direction", "Direction", "choice", (("Left to right", Direction.LEFT_TO_RIGHT), ("Right to left", Direction.RIGHT_TO_LEFT), ("Both directions", Direction.BOTH))),
     BulkField("mode", "Sync mode", "choice", (("Copy only (no deletions)", SyncMode.STANDARD), ("Exact Mirror", SyncMode.EXACT_MIRROR))),
     BulkField("exclusion_mode", "Exclusion mode", "choice", (("Ignore Totally", ExclusionMode.IGNORE_TOTALLY), ("Don't Copy", ExclusionMode.DONT_COPY))),
+    BulkField("group_override", "Custom group / subgroups", "text"),
     BulkField("disabled", "Disabled", "choice", _ON_OFF),
     BulkField("keep_older", "Keep replaced files under Older", "choice", _ON_OFF),
     BulkField("keep_deleted", "Recoverable deletions under Older", "choice", _ON_OFF),
@@ -71,6 +72,8 @@ def prepare_bulk_edit(profiles: list[Profile], field: str, value, *, add_masks: 
             raise ValueError("enter a whole number") from exc
         if not definition.minimum <= value <= definition.maximum:
             raise ValueError(f"{definition.label} must be between {definition.minimum} and {definition.maximum}")
+    if definition.kind == "text":
+        value = str(value).strip()
     masks: list[str] = []
     if definition.kind == "masks":
         masks = list(dict.fromkeys(split_masks(str(value))))
@@ -113,6 +116,8 @@ def bulk_preview(changed: list[Profile], field: str, *, limit: int = 16) -> str:
         value = _value(profile, field)
         if definition.kind == "masks":
             value = "; ".join(value) or "(none)"
+        elif definition.key == "group_override":
+            value = value or "(automatic from name)"
         lines.append(f"{profile.name}: {value}")
     if len(changed) > limit:
         lines.append(f"… and {len(changed) - limit} more profiles")

@@ -64,7 +64,7 @@ def _validate(data) -> Profile:
     name = data.get("name")
     if not isinstance(name, str) or not name.strip() or "=" in name:
         raise ValueError("profile names must be nonempty and cannot contain '='")
-    for field in ("left", "right", "left_volume", "right_volume", "older_folder", "last_result", "note"):
+    for field in ("left", "right", "left_volume", "right_volume", "older_folder", "group_override", "last_result", "note"):
         if field in data and not isinstance(data[field], str):
             raise ValueError(f"invalid {field} in profile {name}")
     for field in ("keep_older", "keep_deleted", "binary_compare", "track", "always_copy", "disabled", "block_delete_all", "never_delete_files", "compare_permissions", "compare_ownership", "preserve_ownership", "imported_settings"):
