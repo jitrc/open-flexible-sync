@@ -44,6 +44,19 @@ def compare_command() -> str:
     return saved or _COMPARE_DEFAULT
 
 
+def theme() -> str:
+    """Desktop appearance: system, light, or dark. Older settings use system."""
+
+    value = load_settings().get("theme", "system")
+    return value if value in {"system", "light", "dark"} else "system"
+
+
+def set_theme(value: str) -> None:
+    if value not in {"system", "light", "dark"}:
+        raise ValueError("appearance must be system, light, or dark")
+    _save("theme", value)
+
+
 def set_compare_command(command: str) -> None:
     _save("compare_command", command.strip() or _COMPARE_DEFAULT)
 

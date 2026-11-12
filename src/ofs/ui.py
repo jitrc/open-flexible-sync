@@ -18,6 +18,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
+from ofs.appearance import apply_appearance
 from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
 from ofs.archive import older_files, restore_version
 from ofs.bulk import FIELDS, bulk_preview, prepare_bulk_edit
@@ -54,6 +55,8 @@ from ofs.settings import (
     set_copy_speed_limit,
     set_global_exclusion_mode,
     set_global_exclusions,
+    set_theme,
+    theme,
 )
 from ofs.store import (
     config_dir,
@@ -724,14 +727,20 @@ class MainWindow(Gtk.ApplicationWindow):
         self.session_masks.pop(name, None)
         self.reload()
 
-    def _settings(self, *_args) -> None:
+    def _settings(self, *_args) -> Gtk.Window:
         window = Gtk.Window(transient_for=self, modal=True, title="Settings")
-        window.set_default_size(560, 480)
+        window.set_default_size(560, 520)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
         box.set_margin_top(12)
         box.set_margin_bottom(12)
+        box.append(Gtk.Label(label="Appearance", xalign=0))
+        appearance = Gtk.DropDown.new_from_strings(["System", "Light", "Dark"])
+        appearance_values = ["system", "light", "dark"]
+        appearance.set_selected(appearance_values.index(theme()))
+        appearance.set_tooltip_text("System follows the desktop color preference where available; Light and Dark override it for OFS.")
+        box.append(appearance)
         box.append(Gtk.Label(label="Compare files with", xalign=0))
         entry = Gtk.Entry(text=compare_command())
         hint = Gtk.Label(xalign=0, wrap=True)
@@ -764,6 +773,9 @@ class MainWindow(Gtk.ApplicationWindow):
         save = Gtk.Button(label="Save")
 
         def on_save(*_args) -> None:
+            selected_theme = appearance_values[appearance.get_selected()]
+            set_theme(selected_theme)
+            apply_appearance(selected_theme)
             set_compare_command(entry.get_text())
             set_copy_speed_limit(speed.get_value() * 1024 * 1024)
             buffer = masks.get_buffer()
@@ -780,6 +792,7 @@ class MainWindow(Gtk.ApplicationWindow):
         box.append(save)
         window.set_child(box)
         window.present()
+        return window
 
     def _editor(self, profile: Profile | None) -> Gtk.Window:
         existing = profile
@@ -2491,6 +2504,7 @@ class SfsApplication(Gtk.Application):
         super().__init__(application_id=os.environ.get("OFS_APP_ID") or os.environ.get("SFS_APP_ID") or "com.ofs.LocalSync")
 
     def do_activate(self) -> None:
+        apply_appearance(theme())
         window = self.props.active_window
         if window is None:
             window = MainWindow(self)
