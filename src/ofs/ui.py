@@ -55,7 +55,18 @@ from ofs.settings import (
     set_global_exclusion_mode,
     set_global_exclusions,
 )
-from ofs.store import config_dir, delete_profile, duplicate_profile, install_imported, load_profiles, replace_in_paths, save_profile
+from ofs.store import (
+    config_dir,
+    delete_profile,
+    duplicate_profile,
+    install_imported,
+    load_profiles,
+    name_replacements,
+    path_replacements,
+    rename_profiles,
+    save_profile,
+    validate_name_replacements,
+)
 from ofs.transfer import export_profiles, install_profile_bundle, read_profile_bundle
 
 _CFG = Path.home() / ".SuperFlexibleSynchronizer" / "SuperFlexibleSynchronizer.cfg"
@@ -104,39 +115,46 @@ class MainWindow(Gtk.ApplicationWindow):
 
         header = Gtk.HeaderBar()
         self.set_titlebar(header)
-        import_button = Gtk.Button(label="Import 5.71")
-        import_button.set_tooltip_text("Read the original SuperFlexibleSynchronizer.cfg without changing it")
-        import_button.connect("clicked", self._import)
-        new_button = Gtk.Button(label="New")
+        new_button = Gtk.Button(label="New profile")
         new_button.connect("clicked", self._new_profile)
-        replace_button = Gtk.Button(label="Replace paths")
-        replace_button.connect("clicked", self._replace_paths)
-        multi_button = Gtk.Button(label="Multi Edit…")
-        multi_button.set_tooltip_text("Change one setting on all checked profiles")
-        multi_button.connect("clicked", self._multi_edit)
         restore_button = Gtk.Button(label="Restore Older…")
         restore_button.set_tooltip_text("Restore an archived file to a separate folder")
         restore_button.connect("clicked", self._restore_older)
-        transfer_menu = Gtk.MenuButton(label="OFS profiles")
-        transfer_popover = Gtk.Popover()
-        transfer_choices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        for label, callback in (("Import OFS profiles…", self._import_bundle), ("Export checked profiles…", self._export_bundle)):
+        self.profiles_menu = Gtk.MenuButton(label="Profiles")
+        self.profiles_menu.set_tooltip_text("Import, export, and edit checked profiles")
+        popover = Gtk.Popover()
+        choices = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(choices, f"set_margin_{side}")(8)
+        choices.append(Gtk.Label(label="Import / export", xalign=0, css_classes=["dim-label"]))
+        for label, callback in (
+            ("Import 5.71 profiles…", self._import),
+            ("Import OFS profiles…", self._import_bundle),
+            ("Export checked profiles…", self._export_bundle),
+        ):
             button = Gtk.Button(label=label)
-            button.connect("clicked", lambda _b, fn=callback: (transfer_popover.popdown(), fn()))
-            transfer_choices.append(button)
-        transfer_popover.set_child(transfer_choices)
-        transfer_menu.set_popover(transfer_popover)
+            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
+            choices.append(button)
+        choices.append(Gtk.Separator())
+        choices.append(Gtk.Label(label="Checked profiles", xalign=0, css_classes=["dim-label"]))
+        for label, callback in (
+            ("Multi Edit checked profiles…", self._multi_edit),
+            ("Replace paths in checked profiles…", self._replace_paths),
+            ("Rename checked profiles…", self._rename_checked),
+        ):
+            button = Gtk.Button(label=label)
+            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
+            choices.append(button)
+        popover.set_child(choices)
+        self.profiles_menu.set_popover(popover)
         self.run_button = Gtk.Button(label="Run checked")
         self.run_button.add_css_class("run")
         self.run_button.connect("clicked", self._run)
         settings_button = Gtk.Button(label="Settings")
         settings_button.connect("clicked", self._settings)
-        header.pack_start(import_button)
         header.pack_start(new_button)
-        header.pack_start(replace_button)
-        header.pack_start(multi_button)
+        header.pack_start(self.profiles_menu)
         header.pack_start(restore_button)
-        header.pack_start(transfer_menu)
         header.pack_end(self.run_button)
         header.pack_end(settings_button)
 
@@ -589,86 +607,81 @@ class MainWindow(Gtk.ApplicationWindow):
         self.reload()
         self.status.set_text(f"Multi Edit updated {len(changed)} profiles. Unselected fields were preserved.")
 
-    def _replace_paths(self, *_args) -> None:
+    def _replace_paths(self, *_args) -> CheckedReplacementWindow | None:
         chosen = [profile for profile in self.profiles if profile.name in self.checked]
         if not chosen:
             self.status.set_text("Check the profiles whose paths should change.")
-            return
-        window = Gtk.Window(transient_for=self, modal=True, title="Replace paths")
-        window.set_default_size(560, 220)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        find = Gtk.Entry()
-        replace = Gtk.Entry()
-        preview = Gtk.Label(xalign=0, wrap=True)
-        preview.set_text(f"{len(chosen)} checked profiles. Type the folder text to replace.")
-
-        def refresh(*_args) -> None:
-            needle = find.get_text()
-            count = 0
-            sample = ""
-            for profile in chosen:
-                left = profile.left.replace(needle, replace.get_text()) if needle else profile.left
-                right = profile.right.replace(needle, replace.get_text()) if needle else profile.right
-                if needle and (left != profile.left or right != profile.right):
-                    count += 1
-                    if not sample:
-                        sample = f"{profile.left}  →  {left}"
-            preview.set_text(f"{count} of {len(chosen)} checked profiles would change. {sample}".strip())
-
-        find.connect("changed", refresh)
-        replace.connect("changed", refresh)
-        apply = Gtk.Button(label="Replace")
-
-        def on_apply(*_args) -> None:
-            needle = find.get_text()
-            if not needle:
-                return
-            changed = []
-            for profile in chosen:
-                if replace_in_paths(profile, needle, replace.get_text()):
-                    changed.append(profile)
-            if not changed:
-                preview.set_text("No paths contained that text.")
-                return
-            window.close()
-            self._confirm_path_replace(changed, needle, replace.get_text())
-
-        apply.connect("clicked", on_apply)
-        for label, widget in (("Find", find), ("Replace", replace)):
-            box.append(Gtk.Label(label=label, xalign=0))
-            box.append(widget)
-        box.append(preview)
-        box.append(apply)
-        window.set_child(box)
+            return None
+        window = CheckedReplacementWindow(self, chosen, "paths")
         window.present()
+        return window
 
-    def _confirm_path_replace(self, changed: list[Profile], find: str, replace: str) -> None:
+    def _rename_checked(self, *_args) -> CheckedReplacementWindow | None:
+        chosen = [profile for profile in self.profiles if profile.name in self.checked]
+        if not chosen:
+            self.status.set_text("Check the profiles or groups to rename.")
+            return None
+        window = CheckedReplacementWindow(self, chosen, "names")
+        window.present()
+        return window
+
+    def _confirm_path_replacements(self, pending: list[tuple[Profile, dict[str, str]]]) -> None:
         dialog = Gtk.AlertDialog()
-        dialog.set_message(f"Replace paths in {len(changed)} profiles?")
-        names = ", ".join(profile.name for profile in changed[:8])
-        extra = "" if len(changed) <= 8 else f" and {len(changed) - 8} more"
+        dialog.set_message(f"Replace paths in {len(pending)} profiles?")
+        names = ", ".join(profile.name for profile, _updates in pending[:8])
+        extra = "" if len(pending) <= 8 else f" and {len(pending) - 8} more"
         dialog.set_detail(
-            f"“{find}” becomes “{replace}” in {names}{extra}. "
-            "Their file databases are removed so the next run records the new folders."
+            f"Apply the full path preview to {names}{extra}. Only the selected Left/Right fields change. "
+            "Folders are not moved on disk. The file databases are removed because they describe the old paths."
         )
-        dialog.set_buttons(["Cancel", "Replace"])
+        dialog.set_buttons(["Cancel", "Replace Paths"])
         dialog.set_cancel_button(0)
         dialog.set_default_button(0)
-        dialog.choose(self, None, self._path_replace_chosen, changed)
+        dialog.choose(self, None, self._path_replace_chosen, pending)
 
-    def _path_replace_chosen(self, dialog, result, changed: list[Profile]) -> None:
+    def _path_replace_chosen(self, dialog, result, pending: list[tuple[Profile, dict[str, str]]]) -> None:
         try:
             choice = dialog.choose_finish(result)
         except GLib.Error:
             return
         if choice != 1:
-            self.reload()
             return
+        changed = []
+        for profile, updates in pending:
+            for side, value in updates.items():
+                if side not in {"left", "right"}:
+                    raise ValueError("only Left and Right paths can be replaced")
+                setattr(profile, side, value)
+            changed.append(profile)
         self._save_replaced_paths(changed)
+
+    def _confirm_name_replacements(self, changes: list[tuple[str, str]]) -> None:
+        dialog = Gtk.AlertDialog()
+        dialog.set_message(f"Rename {len(changes)} checked profiles?")
+        preview = "\n".join(f"{old} → {new}" for old, new in changes[:12])
+        extra = "" if len(changes) <= 12 else f"\n… and {len(changes) - 12} more"
+        dialog.set_detail(preview + extra + "\n\nPaths and all other profile settings are preserved. The old file database is removed.")
+        dialog.set_buttons(["Cancel", "Rename Profiles"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+        dialog.choose(self, None, self._name_replace_chosen, changes)
+
+    def _name_replace_chosen(self, dialog, result, changes: list[tuple[str, str]]) -> None:
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if choice != 1:
+            return
+        try:
+            rename_profiles(changes)
+        except (OSError, ValueError) as exc:
+            self.status.set_text(f"Could not rename profiles: {exc}")
+            return
+        renamed = dict(changes)
+        self.checked = {renamed.get(name, name) for name in self.checked}
+        self.reload()
+        self.status.set_text(f"Renamed {len(changes)} checked profiles. No paths or other settings were changed.")
 
     def _save_replaced_paths(self, changed: list[Profile]) -> None:
         from ofs.history import delete_history
@@ -2225,6 +2238,111 @@ class ResultsWindow(Gtk.Window):
         scrolled.set_child(view)
         window.set_child(scrolled)
         window.present()
+
+
+class CheckedReplacementWindow(Gtk.Window):
+    """Live, read-only previews for checked profile path or name replacements."""
+
+    def __init__(self, owner: MainWindow, profiles: list[Profile], operation: str):
+        names = operation == "names"
+        super().__init__(transient_for=owner, modal=True, title="Rename checked profiles" if names else "Replace checked profile paths")
+        self.owner = owner
+        self.profiles = profiles
+        self.operation = operation
+        self.set_default_size(720, 480)
+        self.find = Gtk.Entry(hexpand=True, placeholder_text="Old profile text" if names else "Old mount point or folder, for example /mnt/old-disk")
+        self.replace = Gtk.Entry(hexpand=True, placeholder_text="New profile text" if names else "New mount point or folder, for example /mnt/new-disk")
+        self.scope = Gtk.DropDown.new_from_strings(["Left and Right paths", "Left only", "Right only"]) if not names else None
+        self.sides = ["both", "left", "right"]
+        self.prefix = Gtk.CheckButton(label="Only match at the beginning of the name" if names else "Only replace a leading folder path (not a partial folder name)")
+        self.summary = Gtk.Label(xalign=0, wrap=True)
+        self.items = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.items.set_margin_bottom(8)
+        scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=180)
+        scroll.set_child(self.items)
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.set_text(
+            "Only profile names change. Paths, masks, and other settings are preserved. The old file database is removed because it belongs to the old name."
+            if names
+            else "Only profile configuration changes; folders or volumes are not moved on disk. Preview every affected side before confirming. The old file database is removed. Volume labels are unchanged."
+        )
+        hint.add_css_class("dim-label")
+        self.review = Gtk.Button(label="Review Changes…")
+        self.review.add_css_class("suggested-action")
+        self.review.connect("clicked", self._review)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        for side in ("start", "end", "top", "bottom"):
+            getattr(root, f"set_margin_{side}")(12)
+        for label, widget in (("Find", self.find), ("Replace with", self.replace)):
+            root.append(Gtk.Label(label=label, xalign=0))
+            root.append(widget)
+        if self.scope is not None:
+            root.append(self.scope)
+            self.scope.connect("notify::selected", lambda *_: self._refresh())
+        root.append(self.prefix)
+        root.append(self.summary)
+        root.append(scroll)
+        root.append(hint)
+        root.append(self.review)
+        self.set_child(root)
+        self.find.connect("changed", lambda *_: self._refresh())
+        self.replace.connect("changed", lambda *_: self._refresh())
+        self.prefix.connect("toggled", lambda *_: self._refresh())
+        self._refresh()
+
+    def _changes(self) -> list[tuple[Profile, dict[str, str]]]:
+        if self.operation == "paths":
+            sides = self.sides[self.scope.get_selected()]
+            prefix = self.prefix.get_active()
+            return [
+                (profile, updates)
+                for profile in self.profiles
+                if (updates := path_replacements(profile, self.find.get_text(), self.replace.get_text(), sides=sides, prefix_only=prefix))
+            ]
+        renamed = name_replacements(
+            self.profiles,
+            self.find.get_text(),
+            self.replace.get_text(),
+            prefix_only=self.prefix.get_active(),
+        )
+        validate_name_replacements(renamed, self.owner.profiles)
+        names = dict(renamed)
+        return [(profile, {"name": names[profile.name]}) for profile in self.profiles if profile.name in names]
+
+    def _refresh(self) -> None:
+        while child := self.items.get_first_child():
+            self.items.remove(child)
+        if not self.find.get_text():
+            self.summary.set_text(f"{len(self.profiles)} checked profiles. Enter text to replace.")
+            return
+        try:
+            changes = self._changes()
+        except ValueError as exc:
+            self.summary.set_text(str(exc))
+            return
+        for profile, updates in changes:
+            for field, updated in updates.items():
+                original = getattr(profile, field)
+                label = "Name" if field == "name" else field.title()
+                row = Gtk.Label(xalign=0, wrap=True, selectable=True)
+                row.set_text(f"{profile.name} · {label}\n{original}\n→ {updated}")
+                self.items.append(row)
+        self.summary.set_text(f"{len(changes)} of {len(self.profiles)} checked profiles would change. Every changed side is listed below.")
+
+    def _review(self, *_args) -> None:
+        try:
+            changes = self._changes()
+        except ValueError as exc:
+            self.summary.set_text(str(exc))
+            return
+        if not changes:
+            self.summary.set_text("No profile would change with these options.")
+            return
+        if self.operation == "names":
+            self.owner._confirm_name_replacements([(profile.name, changes_by_side["name"]) for profile, changes_by_side in changes])
+        else:
+            self.owner._confirm_path_replacements(changes)
+        self.close()
 
 
 class BulkEditWindow(Gtk.Window):

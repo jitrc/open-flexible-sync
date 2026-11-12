@@ -1010,6 +1010,80 @@ def test_row_actions_and_profile_delete(tmp_path, monkeypatch):
     assert seen["names"] == ["alpha notes"]
 
 
+def test_profile_menu_path_options_and_batch_rename_previews(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestProfileReplacements")
+    first = Profile(name="alpha one", left="/mnt/old/photos", right="/mnt/old-archive/photos")
+    second = Profile(name="alpha two", left="/local", right="/mnt/old/photos")
+    save_profile(first)
+    save_profile(second)
+    seen = {}
+
+    class Dialog:
+        def __init__(self, choice):
+            self.choice = choice
+
+        def choose_finish(self, _result):
+            return self.choice
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            seen["toolbar"] = _button_labels(window.get_titlebar())
+            seen["menu"] = _button_labels(window.profiles_menu.get_popover())
+            window.checked = {first.name, second.name}
+            paths = window._replace_paths()
+            paths.scope.set_selected(1)
+            paths.prefix.set_active(True)
+            paths.find.set_text("/mnt/old")
+            paths.replace.set_text("/mnt/new")
+            preview = "\n".join(item.get_text() for item in _widgets(paths.items) if isinstance(item, Gtk.Label))
+            seen["left_preview"] = preview
+            seen["left_preview_count"] = paths.summary.get_text()
+            seen["left_before_review"] = [(item.left, item.right) for item in load_profiles()]
+            window._confirm_path_replacements = lambda pending: seen.update(pending=pending)
+            paths.review.emit("clicked")
+            seen["left_after_review"] = [(item.left, item.right) for item in load_profiles()]
+            paths.scope.set_selected(2)
+            paths.review.emit("clicked")
+            seen["right_pending"] = seen["pending"]
+            window._path_replace_chosen(Dialog(1), None, seen["pending"])
+            seen["path_after_save"] = [(item.left, item.right) for item in load_profiles()]
+            rename = window._rename_checked()
+            rename.prefix.set_active(True)
+            rename.find.set_text("alpha")
+            rename.replace.set_text("photos")
+            window._confirm_name_replacements = lambda changes: seen.update(names=changes)
+            rename.review.emit("clicked")
+            seen["before_cancel"] = [item.name for item in load_profiles()]
+            window._name_replace_chosen(Dialog(0), None, seen["names"])
+            seen["after_cancel"] = [item.name for item in load_profiles()]
+            window._name_replace_chosen(Dialog(1), None, seen["names"])
+            seen["after_rename"] = [item.name for item in load_profiles()]
+            seen["checked"] = set(window.checked)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["toolbar"][0] == "New profile"
+    assert "Import 5.71 profiles…" in seen["menu"]
+    assert "Import OFS profiles…" in seen["menu"]
+    assert "Export checked profiles…" in seen["menu"]
+    assert "Multi Edit checked profiles…" in seen["menu"]
+    assert "Replace paths in checked profiles…" in seen["menu"]
+    assert "Rename checked profiles…" in seen["menu"]
+    assert "/mnt/old/photos\n→ /mnt/new/photos" in seen["left_preview"]
+    assert "old-archive" not in seen["left_preview"]
+    assert "1 of 2" in seen["left_preview_count"]
+    assert seen["left_before_review"] == seen["left_after_review"]
+    assert [item.name for item, _updates in seen["right_pending"]] == ["alpha two"]
+    assert seen["right_pending"][0][1] == {"right": "/mnt/new/photos"}
+    assert seen["path_after_save"] == [("/mnt/old/photos", "/mnt/old-archive/photos"), ("/local", "/mnt/new/photos")]
+    assert seen["names"] == [("alpha one", "photos one"), ("alpha two", "photos two")]
+    assert seen["before_cancel"] == seen["after_cancel"]
+    assert seen["after_rename"] == ["photos one", "photos two"]
+    assert seen["checked"] == {"photos one", "photos two"}
+
+
 def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
     from ofs.compare import FileStat
     from ofs.history import database_path, save_history
