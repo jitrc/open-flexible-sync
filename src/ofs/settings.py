@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 
 from ofs.masks import split_masks
 from ofs.model import ExclusionMode
@@ -20,17 +21,23 @@ DEFAULT_GLOBAL_EXCLUSIONS = [
 ]
 
 
+_SETTINGS_LOCK = threading.RLock()
+
+
 def load_settings() -> dict:
-    path = config_dir() / "settings.json"
-    if not path.exists():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return data
+    """Serialize reads with writes so parallel scans never see a partial JSON file."""
+
+    with _SETTINGS_LOCK:
+        path = config_dir() / "settings.json"
+        if not path.exists():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        return data
 
 
 def compare_command() -> str:
@@ -109,10 +116,12 @@ def set_copy_speed_limit(bytes_per_second: float) -> None:
 def record_scan_estimate(name: str, entries: int, seconds: float) -> None:
     if entries <= 0 or seconds <= 0:
         return
-    estimates = load_settings().get("scan_estimates")
-    estimates = dict(estimates) if isinstance(estimates, dict) else {}
-    estimates[name] = {"entries": int(entries), "seconds": float(seconds)}
-    _save("scan_estimates", estimates)
+    # This read-modify-write must be one transaction, not separate locked calls.
+    with _SETTINGS_LOCK:
+        estimates = load_settings().get("scan_estimates")
+        estimates = dict(estimates) if isinstance(estimates, dict) else {}
+        estimates[name] = {"entries": int(entries), "seconds": float(seconds)}
+        _save("scan_estimates", estimates)
 
 
 def scan_estimate(name: str) -> tuple[int, float]:
@@ -129,8 +138,10 @@ def scan_estimate(name: str) -> tuple[int, float]:
 
 
 def _save(key: str, value) -> None:
-    folder = config_dir()
-    folder.mkdir(parents=True, exist_ok=True)
-    data = load_settings()
-    data[key] = value
-    (folder / "settings.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    # Completed parallel scans can record their estimates at the same time.
+    with _SETTINGS_LOCK:
+        folder = config_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        data = load_settings()
+        data[key] = value
+        (folder / "settings.json").write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

@@ -11,7 +11,8 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Use a path such as `Work / Photos / Archive` for nested groups. Parent counts include subgroups, and each parent has its own tri-state selection checkbox. Grouping is organizational only: changing it does not modify sync paths or invalidate the file database. Clearing the custom field restores name-based grouping.
 - Groups start collapsed. **Expand all**, **Collapse all**, and search help navigate the profile list; search opens matching groups.
 - Each profile row shows its name, Left/Right paths, last OFS run, and color-coded result, with **Run**, **Edit**, **Duplicate**, and **Delete** actions.
-- Run an individual profile or scan only the enabled checked profiles.
+- Run an individual profile or scan only the enabled checked profiles. Different profiles scan in parallel. A profile already scanning shows **Scanning…**, its row button becomes **Running** and is disabled, and duplicate requests are ignored. A checked batch retains one combined summary when its parallel scans finish.
+- **Run uncached** is a visible header action for checked profiles. It performs fresh discovery without changing their saved cache preferences.
 - Group heading checkboxes are tri-state. Parents select or clear visible enabled descendants, including nested subgroups; filtered-out members retain their selection, and Disabled profiles are never selected.
 - Search can match custom group/subgroup names and opens each required ancestor. **Expand all** and **Collapse all** also apply to subgroups.
 - Profile rows have subtle separators and alternate theme-derived surfaces, including during Light/Dark switching. Row checks immediately refresh the parent group's partial-selection state.
@@ -56,8 +57,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Scan progress separates profile and reading side from the path. A fixed-height, theme-aware path panel uses bounded middle truncation instead of wrap-driven resizing. Full path text remains selectable/copyable and available in the tooltip. Statistics, progress, and controls have consistent spacing.
 - Scan progress includes discovered/filtered/added counts, elapsed time, and entries per second.
 - The first completed scan has no ETA. Later scans show an approximate history-based `~` ETA, refined using current discovery pace and expected remaining entries. Paused time is excluded, and skipped or canceled scans do not replace a previous estimate.
-- **Pause** holds discovery between entries. **Skip Rest** skips only the current incomplete scan and continues with the next checked profile. **Cancel** stops the checked batch. Neither action opens a partial comparison or writes a copy log.
-- Additional requested scans wait in order rather than concurrently scanning the same trees and making the GUI unresponsive.
+- Each profile's scan window has independent **Pause**, **Skip Rest**, and **Cancel** controls. They affect that profile only; unrelated parallel scans continue. Neither skipping nor canceling opens a partial comparison or writes a copy log.
 
 ## Destination metadata cache
 
@@ -65,7 +65,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - A completed destination walk is saved as an atomic JSON manifest under the OFS `cache/` directory. The manifest stores paths, timestamps, size, kind, link target, permissions, and UID/GID; it never stores file contents.
 - The following fresh destination scan can reuse that metadata and is labeled as cached. The other/source tree is always read fresh. In both-direction mode the two possible destinations have independently validated metadata snapshots.
 - The cache expires after five minutes. Its root path and filter settings must match; folder/mask changes or OFS copy/move/delete operations invalidate it. Canceled/skipped scans never become a cached manifest. An uncached refresh creates a fresh completed manifest.
-- **Cached metadata can miss changes made by other programs while the cache is valid.** After external changes, choose **Profiles → Run checked (uncached)**, or use `scan NAME --uncached` / `run NAME --uncached [--apply]`. This is a one-run override and does not turn off the saved setting.
+- **Cached metadata can miss changes made by other programs while the cache is valid.** After external changes, choose **Run uncached** in the header, or use `scan NAME --uncached` / `run NAME --uncached [--apply]`. This is a one-run override and does not turn off the saved setting.
 - A cache is not the file-history SQLite database, stored hashes, content-addressed storage, or post-copy verification. Metadata-only comparison cannot prove equal contents; optional binary comparison still performs its direct byte comparison on candidates.
 
 ## Preview and one-run actions

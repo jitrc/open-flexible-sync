@@ -67,6 +67,19 @@ def test_copy_speed_limit_persists_in_bytes_per_second(tmp_path, monkeypatch):
     assert copy_speed_limit() == 0
 
 
+def test_parallel_scan_estimates_do_not_overwrite_each_other(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from ofs.settings import load_settings, record_scan_estimate
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    names = [f"profile-{index}" for index in range(30)]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda name: record_scan_estimate(name, 100, 2.5), names))
+    estimates = load_settings()["scan_estimates"]
+    assert set(estimates) == set(names)
+    assert all(values == {"entries": 100, "seconds": 2.5} for values in estimates.values())
+
+
 def test_compare_command_uses_the_setting_unless_the_environment_wins(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path))
     monkeypatch.delenv("OFS_COMPARE", raising=False)

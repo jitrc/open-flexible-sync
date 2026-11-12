@@ -131,10 +131,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._group_sizes: Counter = Counter()
         self._group_expanded: dict[str, bool] = {}
         self._applying_groups = False
-        self._scan_active = False
-        self._scan_queue: list[set[str]] = []
-        self._scan_uncached: list[bool] = []
-        self._scan_label = ""
+        self._scan_running: set[str] = set()
+        self._scan_batches: dict[int, dict] = {}
+        self._next_scan_batch = 0
         self._path_available: dict[str, bool] = {}
         self._visible_count = 0
         self._updating_appearance = False
@@ -167,7 +166,6 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Multi Edit checked profiles…", self._multi_edit),
             ("Replace paths in checked profiles…", self._replace_paths),
             ("Rename checked profiles…", self._rename_checked),
-            ("Run checked (uncached)", self._run_uncached),
         ):
             button = Gtk.Button(label=label)
             button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
@@ -184,12 +182,16 @@ class MainWindow(Gtk.ApplicationWindow):
         self.run_button = Gtk.Button(label="Run checked")
         self.run_button.add_css_class("run")
         self.run_button.connect("clicked", self._run)
+        self.uncached_button = Gtk.Button(label="Run uncached")
+        self.uncached_button.set_tooltip_text("Freshly scan checked profiles without destination caches; saved cache settings stay enabled")
+        self.uncached_button.connect("clicked", self._run_uncached)
         settings_button = Gtk.Button(label="Settings")
         settings_button.connect("clicked", self._settings)
         header.pack_start(new_button)
         header.pack_start(self.profiles_menu)
         header.pack_start(restore_button)
         header.pack_end(self.run_button)
+        header.pack_end(self.uncached_button)
         header.pack_end(settings_button)
         header.pack_end(self.appearance_button)
 
@@ -515,6 +517,7 @@ class MainWindow(Gtk.ApplicationWindow):
             text.add_css_class("profile-disabled")
 
         when, body, tone = _result_parts(profile.last_result, profile.note)
+        scanning = profile.name in self._scan_running
         stamp = Gtk.Label(xalign=0, valign=Gtk.Align.CENTER)
         stamp.add_css_class("monospace")
         stamp.add_css_class(tone)
@@ -524,15 +527,18 @@ class MainWindow(Gtk.ApplicationWindow):
         result.set_ellipsize(Pango.EllipsizeMode.END)
         result.set_max_width_chars(40)
         result.set_size_request(_RESULT_WIDTH, -1)
-        result.set_tooltip_text(body)
-        result.add_css_class(tone)
-        result.set_text(body)
+        result.add_css_class("result-running" if scanning else tone)
+        result.set_text("Scanning…" if scanning else body)
+        result.set_tooltip_text("This profile is already scanning. Run will be available when it finishes." if scanning else body)
         self._labels[profile.name] = result
 
-        run = Gtk.Button(label="Run")
+        run = Gtk.Button(label="Running" if scanning else "Run")
         run.add_css_class("run")
-        run.set_sensitive(not profile.disabled)
-        run.set_tooltip_text("Enable the profile in Edit before running it" if profile.disabled else None)
+        run.set_sensitive(not profile.disabled and not scanning)
+        run.set_tooltip_text(
+            "This profile is already scanning; a duplicate cannot be started."
+            if scanning else "Enable the profile in Edit before running it" if profile.disabled else None
+        )
         _compact(run)
         run.connect("clicked", self._run_one, profile.name)
         edit = Gtk.Button(label="Edit")
@@ -1126,42 +1132,41 @@ class MainWindow(Gtk.ApplicationWindow):
         self._run_names(chosen, uncached=True)
 
     def _run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
-        chosen.difference_update(profile.name for profile in self.profiles if profile.disabled)
-        if not chosen:
-            self.status.set_text("The selected profile is disabled. Enable it in Edit first.")
+        profiles = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
+        already_running = {profile.name for profile in profiles} & self._scan_running
+        profiles = [profile for profile in profiles if profile.name not in already_running]
+        if not profiles:
+            if already_running:
+                self.status.set_text("This profile is already scanning; no duplicate was started." if len(already_running) == 1 else "These profiles are already scanning; no duplicates were started.")
+            else:
+                self.status.set_text("The selected profile is disabled. Enable it in Edit first.")
             return
-        self._scan_queue.append(set(chosen))
-        self._scan_uncached.append(uncached)
-        if self._scan_active:
-            self._note_scan_queue()
-            return
-        self._start_next_scan()
 
-    def _note_scan_queue(self) -> None:
-        waiting = len(self._scan_queue)
-        base = self._scan_label or "Scanning…"
-        if waiting:
-            noun = "scan" if waiting == 1 else "scans"
-            self.status.set_text(f"{base}  {waiting} {noun} waiting.")
-        else:
-            self.status.set_text(base)
+        batch_id = self._next_scan_batch
+        self._next_scan_batch += 1
+        self._scan_batches[batch_id] = {"remaining": {profile.name for profile in profiles}, "results": []}
+        self._scan_running.update(profile.name for profile in profiles)
+        self._rebuild()
+        started = f"Started {len(profiles)} parallel scans." if len(profiles) > 1 else f"Scanning {profiles[0].name}…"
+        if already_running:
+            started += f" {len(already_running)} already-running profile(s) were not duplicated."
+        self._with_scan_activity(started)
 
-    def _start_next_scan(self) -> None:
-        if self._scan_active or not self._scan_queue:
-            return
-        chosen = self._scan_queue.pop(0)
-        uncached = self._scan_uncached.pop(0)
-        self._scan_active = True
-        if len(chosen) == 1:
-            self._scan_label = f"Scanning {next(iter(chosen))}…"
-        else:
-            self._scan_label = f"Scanning {len(chosen)} checked profiles…"
-        self._note_scan_queue()
-        profiles = list(self.profiles)
-        skips = {name: set(values) for name, values in self.session_skips.items()}
-        masks = {name: list(values) for name, values in self.session_masks.items()}
-        estimates = {name: scan_estimate(name) for name in chosen}
-        progress = ScanWindow(self, self._scan_label.removesuffix("…"), estimates=estimates)
+        # Independent windows and controls keep Skip/Cancel scoped to one profile.
+        for profile in profiles:
+            self._start_profile_scan(profile, batch_id, uncached)
+
+    def _with_scan_activity(self, text: str) -> None:
+        count = len(self._scan_running)
+        if count:
+            noun = "scan" if count == 1 else "scans"
+            text += f"  {count} {noun} still running."
+        self.status.set_text(text)
+
+    def _start_profile_scan(self, profile: Profile, batch_id: int, uncached: bool) -> None:
+        skips = {profile.name: set(self.session_skips.get(profile.name, set()))}
+        masks = {profile.name: list(self.session_masks.get(profile.name, []))}
+        progress = ScanWindow(self, f"Scanning {profile.name}", estimates={profile.name: scan_estimate(profile.name)})
         progress.present()
 
         def on_stats(name: str, side: str, rel: str, values) -> None:
@@ -1170,8 +1175,8 @@ class MainWindow(Gtk.ApplicationWindow):
         def work() -> None:
             try:
                 results = run_checked(
-                    profiles,
-                    checked=chosen,
+                    [profile],
+                    checked={profile.name},
                     session_skips=skips,
                     session_masks=masks,
                     control=progress.control,
@@ -1179,32 +1184,45 @@ class MainWindow(Gtk.ApplicationWindow):
                     force_uncached=uncached,
                 )
             except Exception as exc:
-                failed = next(profile for profile in profiles if profile.name in chosen)
-                results = [JobResult(failed, None, str(exc))]
-            GLib.idle_add(self._show_results, results, progress)
+                results = [JobResult(profile, None, str(exc))]
+            GLib.idle_add(self._scan_finished, batch_id, profile.name, results, progress)
 
-        threading.Thread(target=work, daemon=True).start()
+        threading.Thread(target=work, daemon=True, name=f"OFS scan: {profile.name}").start()
 
-    def _show_results(self, results: list[JobResult], progress: ScanWindow | None = None) -> bool:
-        if progress is not None:
-            progress.allow_close()
-        self._scan_active = False
-        self._scan_label = ""
+    def _scan_finished(self, batch_id: int, name: str, results: list[JobResult], progress: ScanWindow) -> bool:
+        batch = self._scan_batches.get(batch_id)
+        progress.allow_close()
+        self._scan_running.discard(name)
+        self._rebuild()
+        if batch is None:
+            return False
+        batch["remaining"].discard(name)
+        batch["results"].extend(results)
+        if batch["remaining"]:
+            self._with_scan_activity(f"Scanned {name}; other selected profiles are still running.")
+            return False
+
+        completed = batch["results"]
+        del self._scan_batches[batch_id]
+        order = {profile.name: index for index, profile in enumerate(self.profiles)}
+        completed.sort(key=lambda job: order.get(job.profile.name, len(order)))
+        self._show_results(completed)
+        return False
+
+    def _show_results(self, results: list[JobResult]) -> bool:
         if results and all(job.error == "scan stopped" for job in results):
-            self.status.set_text("Scan stopped.")
-            self._start_next_scan()
+            self._with_scan_activity("Scan stopped.")
             return False
         ok = sum(1 for job in results if job.error is None)
         bad = len(results) - ok
         planned = [change for job in results if job.result is not None for change in job.result.changes]
         summary_text = plan_summary(planned)
-        self.status.set_text(f"Scanned {ok}. {bad} skipped. {summary_text}" if bad else f"Scanned {ok}. {summary_text}")
+        self._with_scan_activity(f"Scanned {ok}. {bad} skipped. {summary_text}" if bad else f"Scanned {ok}. {summary_text}")
         for job in results:
             if job.result is not None and job.profile.name in self._labels:
                 self._labels[job.profile.name].set_text(plan_summary(job.result.changes))
         if len(results) == 1 and results[0].error is None and results[0].result is not None:
             self._preview(results[0])
-            self._start_next_scan()
             return False
         summary = Gtk.Window(transient_for=self, title="Scan")
         summary.set_default_size(760, 420)
@@ -1230,7 +1248,6 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._labels[job.profile.name].set_text(job.error)
         summary.set_child(box)
         summary.present()
-        self._start_next_scan()
         return False
 
     def _preview(self, job: JobResult) -> None:
@@ -1461,6 +1478,7 @@ def _install_css() -> None:
         "label.result-ok { color: @success_color; }"
         "label.result-error { color: @error_color; }"
         "label.result-warn { color: @warning_color; }"
+        "label.result-running { color: @accent_color; font-weight: 700; }"
     )
     Gtk.StyleContext.add_provider_for_display(display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     _CSS_INSTALLED = True

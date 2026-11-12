@@ -868,29 +868,76 @@ def test_scan_path_truncation_keeps_the_dialog_height_stable(tmp_path, monkeypat
     assert seen["lines"] == 2
 
 
-def test_a_second_scan_waits_behind_the_one_already_running(tmp_path, monkeypatch):
+def test_different_profiles_scan_in_parallel_but_same_profile_cannot_duplicate(tmp_path, monkeypatch):
+    import threading
+    import ofs.ui as ui
+    from ofs.scan import ScanResult
+
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
-    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanQueue")
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestParallelScans")
+    for name in ("alpha", "beta", "gamma"):
+        save_profile(Profile(name=name, left=str(left), right=str(right)))
+    started = {name: threading.Event() for name in ("alpha", "beta", "gamma")}
+    release = threading.Event()
+    calls = []
+    uncached = {}
     seen = {}
+
+    def controlled_scan(profiles, **kwargs):
+        name = profiles[0].name
+        calls.append(name)
+        uncached[name] = kwargs["force_uncached"]
+        started[name].set()
+        assert release.wait(5), name
+        return [JobResult(profiles[0], ScanResult(changes=[]), None)]
+
+    monkeypatch.setattr(ui, "run_checked", controlled_scan)
 
     class App(SfsApplication):
         def do_activate(self):
             window = MainWindow(self)
-            window._scan_active = True
-            window._scan_label = "Scanning alpha…"
-            window._run_names({"beta"})
-            window._run_names({"gamma", "delta"})
-            seen["waiting"] = [set(item) for item in window._scan_queue]
-            seen["status"] = window.status.get_text()
-            seen["run_enabled"] = window.run_button.get_sensitive()
-            window._scan_active = False
-            window._scan_queue.clear()
-            self.quit()
+            original_show_results = window._show_results
+
+            def record_results(results):
+                seen.setdefault("batch_sizes", []).append(len(results))
+                return original_show_results(results)
+
+            window._show_results = record_results
+            seen["uncached_button"] = window.uncached_button.get_label()
+            seen["uncached_tooltip"] = window.uncached_button.get_tooltip_text()
+            window._run_names({"alpha"})
+            seen["alpha_status"] = window._labels["alpha"].get_text()
+            window._run_names({"alpha"})
+            seen["duplicate_status"] = window.status.get_text()
+            window._run_names({"beta", "gamma"}, uncached=True)
+            seen["running_buttons"] = [button for button in _buttons(window) if button.get_label() == "Running"]
+
+            def watch() -> bool:
+                if all(event.is_set() for event in started.values()):
+                    seen["parallel"] = True
+                    release.set()
+                if release.is_set() and not window._scan_running:
+                    self.quit()
+                    return False
+                return True
+
+            GLib.timeout_add(20, watch)
 
     assert App().run(None) == 0
-    assert seen["waiting"] == [{"beta"}, {"gamma", "delta"}]
-    assert seen["status"] == "Scanning alpha…  2 scans waiting."
-    assert seen["run_enabled"] is True
+    assert seen["uncached_button"] == "Run uncached"
+    assert "without destination caches" in seen["uncached_tooltip"]
+    assert seen["alpha_status"] == "Scanning…"
+    assert "already scanning" in seen["duplicate_status"]
+    assert len(seen["running_buttons"]) == 3
+    assert all(not button.get_sensitive() for button in seen["running_buttons"])
+    assert seen["parallel"] is True
+    assert sorted(calls) == ["alpha", "beta", "gamma"]
+    assert uncached == {"alpha": False, "beta": True, "gamma": True}
+    assert sorted(seen["batch_sizes"]) == [1, 2]
 
 
 def test_folder_row_shows_size_and_can_be_ignored(tmp_path, monkeypatch):
