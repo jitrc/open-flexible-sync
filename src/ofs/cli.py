@@ -29,10 +29,12 @@ def main(argv: list[str] | None = None) -> int:
 
     scan_cmd = sub.add_parser("scan", help="dry-run one profile")
     scan_cmd.add_argument("name")
+    scan_cmd.add_argument("--uncached", action="store_true", help="ignore and refresh destination metadata caches")
 
     run_cmd = sub.add_parser("run", help="apply one profile")
     run_cmd.add_argument("name")
     run_cmd.add_argument("--apply", action="store_true", help="copy and delete. Without this, the command only prints the plan.")
+    run_cmd.add_argument("--uncached", action="store_true", help="ignore and refresh destination metadata caches")
 
     args = parser.parse_args(argv)
     if args.cmd == "import":
@@ -40,9 +42,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "list":
         return _list()
     if args.cmd == "scan":
-        return _scan(args.name, apply=False)
+        return _scan(args.name, apply=False, uncached=args.uncached)
     if args.cmd == "run":
-        return _scan(args.name, apply=args.apply)
+        return _scan(args.name, apply=args.apply, uncached=args.uncached)
     return 2
 
 
@@ -78,13 +80,13 @@ def _find(name: str) -> Profile | None:
     return None
 
 
-def _scan(name: str, *, apply: bool) -> int:
+def _scan(name: str, *, apply: bool, uncached: bool = False) -> int:
     profile = _find(name)
     if profile is None:
         print(f"no profile named {name!r}", file=sys.stderr)
         return 1
     try:
-        results = run_checked([profile], checked={profile.name})
+        results = run_checked([profile], checked={profile.name}, force_uncached=uncached)
     except MissingVolume as exc:
         print(f"volume is not mounted: {exc.path}", file=sys.stderr)
         return 1
@@ -111,7 +113,7 @@ def _scan(name: str, *, apply: bool) -> int:
     if any(change.action == Action.ASK for change in job.result.changes):
         print("unresolved size conflicts; nothing was applied", file=sys.stderr)
         return 1
-    from ofs.scan import remember
+    from ofs.scan import invalidate_cached_destinations, remember
 
     from ofs.settings import copy_speed_limit
 
@@ -129,6 +131,8 @@ def _scan(name: str, *, apply: bool) -> int:
         bytes_per_second=copy_speed_limit(),
         listing=job.result.listing,
     )
+    if report.copied or report.deleted or report.moved:
+        invalidate_cached_destinations(profile)
     remember(profile)
     profile.last_result = report.summary()
     save_profile(profile)

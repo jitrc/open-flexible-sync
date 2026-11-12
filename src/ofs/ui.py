@@ -44,7 +44,7 @@ from ofs.review import (
     without_deletes,
     write_log,
 )
-from ofs.scan import remember
+from ofs.scan import invalidate_cached_destinations, remember
 from ofs.settings import (
     compare_command,
     global_exclusion_mode,
@@ -89,6 +89,16 @@ def _group_parts(profile: Profile) -> tuple[str, ...]:
     return (profile.group,) if profile.group else ()
 
 
+def _fixed_path_label(text: str) -> Gtk.Label:
+    label = Gtk.Label(xalign=0, selectable=True, wrap=True, lines=2)
+    label.set_wrap_mode(Pango.WrapMode.WORD_CHAR)
+    label.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+    label.set_max_width_chars(76)
+    label.set_tooltip_text(text)
+    label.set_text(text)
+    return label
+
+
 def open_uri(path: Path) -> None:
     if not path.exists():
         return
@@ -123,6 +133,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._applying_groups = False
         self._scan_active = False
         self._scan_queue: list[set[str]] = []
+        self._scan_uncached: list[bool] = []
         self._scan_label = ""
         self._path_available: dict[str, bool] = {}
         self._visible_count = 0
@@ -156,6 +167,7 @@ class MainWindow(Gtk.ApplicationWindow):
             ("Multi Edit checked profiles…", self._multi_edit),
             ("Replace paths in checked profiles…", self._replace_paths),
             ("Rename checked profiles…", self._rename_checked),
+            ("Run checked (uncached)", self._run_uncached),
         ):
             button = Gtk.Button(label=label)
             button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
@@ -965,6 +977,11 @@ class MainWindow(Gtk.ApplicationWindow):
         compare_ownership = Gtk.CheckButton(label="Compare file owner and group", active=bool(existing and existing.compare_ownership))
         preserve_ownership = Gtk.CheckButton(label="Preserve owner and group when permitted", active=bool(existing and existing.preserve_ownership))
         preserve_ownership.set_tooltip_text("If the filesystem does not permit this, the copy fails safely instead of silently dropping ownership.")
+        cache_destination = Gtk.CheckButton(
+            label="Cache destination metadata (up to 5 minutes)",
+            active=bool(existing and existing.cache_destination),
+        )
+        cache_destination.set_tooltip_text("For repeat discovery. OFS changes invalidate it; cached metadata can miss external changes, so use Run uncached when needed.")
         disabled = Gtk.CheckButton(label="Disabled — keep this profile but do not run it", active=bool(existing and existing.disabled))
         delete_all = Gtk.CheckButton(label="Block deletion of every file in a folder", active=bool(existing and existing.block_delete_all))
         never_delete = Gtk.CheckButton(label="Never delete files (existing empty-folder cleanup only)", active=bool(existing and existing.never_delete_files))
@@ -1008,7 +1025,7 @@ class MainWindow(Gtk.ApplicationWindow):
             grid.attach(Gtk.Label(label=label, xalign=1), 0, index, 1, 1)
             grid.attach(widget, 1, index, 1, 1)
         checks = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, always_copy, compare_permissions, compare_ownership, preserve_ownership, disabled, delete_all, never_delete):
+        for widget in (small, hour, seconds, ignore_time, larger, older, keep_deleted, binary, track, always_copy, compare_permissions, compare_ownership, preserve_ownership, cache_destination, disabled, delete_all, never_delete):
             checks.append(widget)
         grid.attach(checks, 1, len(rows), 1, 1)
         save = Gtk.Button(label="Save")
@@ -1060,6 +1077,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 compare_permissions=compare_permissions.get_active(),
                 compare_ownership=compare_ownership.get_active(),
                 preserve_ownership=preserve_ownership.get_active(),
+                cache_destination=cache_destination.get_active(),
                 max_delete_percent=delete_limit.get_value_as_int(),
                 block_delete_all=delete_all.get_active(),
                 never_delete_files=never_delete.get_active(),
@@ -1100,12 +1118,20 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         self._run_names(chosen)
 
-    def _run_names(self, chosen: set[str]) -> None:
+    def _run_uncached(self, *_args) -> None:
+        chosen = {profile.name for profile in self.profiles if profile.name in self.checked}
+        if not chosen:
+            self.status.set_text("Check one or more profiles to scan without destination caches.")
+            return
+        self._run_names(chosen, uncached=True)
+
+    def _run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
         chosen.difference_update(profile.name for profile in self.profiles if profile.disabled)
         if not chosen:
             self.status.set_text("The selected profile is disabled. Enable it in Edit first.")
             return
         self._scan_queue.append(set(chosen))
+        self._scan_uncached.append(uncached)
         if self._scan_active:
             self._note_scan_queue()
             return
@@ -1124,6 +1150,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if self._scan_active or not self._scan_queue:
             return
         chosen = self._scan_queue.pop(0)
+        uncached = self._scan_uncached.pop(0)
         self._scan_active = True
         if len(chosen) == 1:
             self._scan_label = f"Scanning {next(iter(chosen))}…"
@@ -1149,6 +1176,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     session_masks=masks,
                     control=progress.control,
                     on_stats=on_stats,
+                    force_uncached=uncached,
                 )
             except Exception as exc:
                 failed = next(profile for profile in profiles if profile.name in chosen)
@@ -1993,6 +2021,11 @@ class Preview(Gtk.Window):
                 )
             except Exception as exc:
                 report.errors.append(str(exc))
+            if report.copied or report.deleted or report.moved:
+                try:
+                    invalidate_cached_destinations(self.job.profile)
+                except OSError as exc:
+                    report.errors.append(f"destination cache: {exc}")
             try:
                 remember(self.job.profile)
             except Exception as exc:
@@ -2042,12 +2075,11 @@ class ScanWindow(Gtk.Window):
         heading = Gtk.Box(spacing=12)
         heading.append(self.profile_label)
         heading.append(self.side_label)
-        self.file_label = Gtk.Label(xalign=0, selectable=True, wrap=False, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.file_label.set_max_width_chars(76)
-        self.file_label.set_lines(1)
+        self.file_label = _fixed_path_label(self._place)
         self.file_label.set_text(self._place)
         path_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         path_box.add_css_class("scan-path")
+        path_box.set_size_request(-1, 78)
         path_caption = Gtk.Label(xalign=0, label="Current path")
         path_caption.add_css_class("dim-label")
         path_box.append(path_caption)
@@ -2206,8 +2238,14 @@ class ProgressWindow(Gtk.Window):
         self._paused_at: float | None = None
         self._paused_total = 0.0
         self.latest: CopyProgress | None = None
-        self.file_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.file_label.set_text("Starting…")
+        self.file_label = _fixed_path_label("Starting…")
+        path_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        path_box.add_css_class("scan-path")
+        path_box.set_size_request(-1, 78)
+        path_caption = Gtk.Label(xalign=0, label="Current file")
+        path_caption.add_css_class("dim-label")
+        path_box.append(path_caption)
+        path_box.append(self.file_label)
         self.file_bar = Gtk.ProgressBar(show_text=True)
         self.file_count = Gtk.Label(xalign=0)
         self.count_label = Gtk.Label(xalign=0)
@@ -2224,7 +2262,7 @@ class ProgressWindow(Gtk.Window):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         for side in ("start", "end", "top", "bottom"):
             getattr(root, f"set_margin_{side}")(12)
-        root.append(self.file_label)
+        root.append(path_box)
         root.append(self.file_bar)
         root.append(self.file_count)
         root.append(self.bar)
@@ -2264,7 +2302,9 @@ class ProgressWindow(Gtk.Window):
         self.bar.set_fraction(event.overall_fraction)
         self.file_bar.set_fraction(event.current_fraction)
         prefix = "Paused. " if self.control.paused else ""
-        self.file_label.set_text(prefix + (event.rel or "Finishing…"))
+        path = event.rel or "Finishing…"
+        self.file_label.set_text(prefix + path)
+        self.file_label.set_tooltip_text(path)
         self.bar.set_tooltip_text(f"Overall: {format_bytes(event.bytes_done)} / {format_bytes(event.bytes_total)}")
         self.file_bar.set_tooltip_text(f"Current file: {format_bytes(event.current_bytes)} / {format_bytes(event.current_total)}")
         self.file_count.set_text(f"Current file: {format_bytes(event.current_bytes)} / {format_bytes(event.current_total)}")

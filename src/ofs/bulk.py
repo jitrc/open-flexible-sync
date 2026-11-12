@@ -45,6 +45,7 @@ FIELDS = (
     BulkField("preserve_ownership", "Preserve owner/group on copy/restore", "choice", _ON_OFF),
     BulkField("binary_compare", "Binary comparison", "choice", _ON_OFF),
     BulkField("track", "Remember files and detect moves/deletions", "choice", _ON_OFF),
+    BulkField("cache_destination", "Destination metadata cache (5 minutes)", "choice", _ON_OFF),
     BulkField("always_copy", "Always copy even when unchanged", "choice", _ON_OFF),
     BulkField("timestamps.ignore_small", "Ignore 2-second differences", "choice", _ON_OFF),
     BulkField("timestamps.ignore_exact_hour", "Ignore exact-hour differences", "choice", _ON_OFF),

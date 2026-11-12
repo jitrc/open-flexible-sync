@@ -661,6 +661,37 @@ def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tm
     assert seen["delete_move_overall"] == 0.5
 
 
+def test_copy_path_uses_two_lines_without_resizing_the_window(tmp_path, monkeypatch):
+    from gi.repository import Pango
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestCopyPath")
+    seen = {}
+    long_path = "Projects / A long descriptive folder / Archived files / " * 3 + "final file.txt"
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            progress = ProgressWindow(window, "demo")
+            progress.present()
+            progress.update(CopyProgress(0, 1, "short.txt", 0, 10, 0, 10, 0, 0, 0, 0))
+            seen["short"] = progress.get_height()
+            progress.update(CopyProgress(0, 1, long_path, 0, 10, 0, 10, 0, 0, 0, 0))
+            seen["long"] = progress.get_height()
+            seen["path"] = progress.file_label.get_text()
+            seen["tooltip"] = progress.file_label.get_tooltip_text()
+            seen["lines"] = progress.file_label.get_lines()
+            seen["ellipsize"] = progress.file_label.get_ellipsize()
+            progress.allow_close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["short"] == seen["long"]
+    assert seen["path"] == seen["tooltip"] == long_path
+    assert seen["lines"] == 2
+    assert seen["ellipsize"] == Pango.EllipsizeMode.MIDDLE
+
+
 def test_retry_requires_confirmation_and_rescans_instead_of_replaying(tmp_path, monkeypatch):
     from ofs.apply import ApplyReport
     from ofs.scan import ScanResult
@@ -790,7 +821,7 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
     assert "ETA after first completed scan" in seen["counts"]
     assert seen["place"] == "album"
     assert seen["reading"] == "Reading right"
-    assert seen["path_wrap"] is False
+    assert seen["path_wrap"] is True
     assert seen["skip"].startswith("Skipping rest")
     assert seen["skipping"] is True
     assert seen["skip_enabled"] is False
@@ -834,7 +865,7 @@ def test_scan_path_truncation_keeps_the_dialog_height_stable(tmp_path, monkeypat
     assert seen["short_height"] == seen["long_height"]
     assert seen["full_path"] == seen["tooltip"] == long_path
     assert seen["ellipsize"] == Pango.EllipsizeMode.MIDDLE
-    assert seen["lines"] == 1
+    assert seen["lines"] == 2
 
 
 def test_a_second_scan_waits_behind_the_one_already_running(tmp_path, monkeypatch):

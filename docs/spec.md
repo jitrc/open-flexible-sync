@@ -277,7 +277,7 @@ Recorded so a later version can add them without a new discovery pass. Nothing h
 - Detect renamed files from timestamp plus size.
 - Conflicts when both sides changed: rename and keep both, copy the newer file, or always prefer one side. If the renamed name already exists, follow a second rule.
 - The database can be read-only, rebuilt, or rejected when its paths do not match the profile.
-- Cache the destination listing in the database so the next scan does not re-list that tree.
+- An optional per-profile destination metadata cache uses a separate atomic JSON manifest, not the history database or file contents. Use is opt-in, expires after five minutes, includes the raw destination path and filter/mask identity, and is invalidated after OFS writes. Source scans and bidirectional counterpart validation are not silently omitted. Completed scans refresh it; skipped/canceled scans never create it. Cached status/age and the external-change staleness caveat are explicit. `Run checked (uncached)` and CLI `--uncached` perform a fresh refresh without changing the saved preference.
 - First run only fills the database. It must not be required for Standard or Exact Mirror. Exact Mirror already shows a unique moved file from the two folders alone. The database adds moves and deletes that can only be seen against the previous run.
 
 ### Real-time

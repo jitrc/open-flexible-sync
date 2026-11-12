@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from ofs.apply import files_identical
+from ofs.cache import destination_sides, invalidate_destination, load_destination, save_destination
 from ofs.compare import Change, FileStat, build_plan, classify_time
 from ofs.history import adjust_plan, load_history, save_history
 from ofs.masks import any_match
@@ -25,6 +27,7 @@ class ScanResult:
     discovered: int = 0
     errors: list[str] = field(default_factory=list)
     note: str = ""
+    cached: bool = False
     listing: list[Listed] = field(default_factory=list)
 
 
@@ -76,6 +79,7 @@ def scan_profile(
     control=None,
     on_progress=None,
     on_stats=None,
+    force_uncached: bool = False,
 ) -> ScanResult:
     masks = global_exclusions()
     mode = global_exclusion_mode()
@@ -100,32 +104,40 @@ def scan_profile(
 
         return report
 
-    left = _drop_global(
-        walk(
-            left_root,
-            lambda rel: _skip_dir(profile, rel, destination=False, global_masks=masks, global_mode=mode),
+    cache_notes = []
+
+    def read_side(side: str, root: Path, destination: bool) -> dict[str, FileStat]:
+        if destination and profile.cache_destination and not force_uncached:
+            cached = load_destination(profile, side, masks, mode)
+            if cached is not None:
+                files, saved = cached
+                cache_notes.append(f"Using cached {side.lower()} destination metadata ({int(time.time() - saved)}s old; use Run uncached to force a fresh read).")
+                walked[side] = len(files)
+                if on_progress is not None:
+                    on_progress(side, "Cached destination metadata", len(files))
+                if on_stats is not None:
+                    from ofs.walk import WalkStats
+
+                    on_stats(side, ".", WalkStats(len(files), 0, len(files)))
+                return files
+        files = walk(
+            root,
+            lambda rel: _skip_dir(profile, rel, destination=destination, global_masks=masks, global_mode=mode),
             skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
             control=control,
-            on_progress=progress("Left"),
-            on_stats=stats("Left"),
+            on_progress=progress(side),
+            on_stats=stats(side),
             symlinks=profile.symlinks.value,
-        ),
-        masks,
-        mode,
-    )
-    right = _drop_global(
-        walk(
-            right_root,
-            lambda rel: _skip_dir(profile, rel, destination=True, global_masks=masks, global_mode=mode),
-            skip_file=lambda rel: _skip_file(profile, rel, global_masks=masks, global_mode=mode),
-            control=control,
-            on_progress=progress("Right"),
-            on_stats=stats("Right"),
-            symlinks=profile.symlinks.value,
-        ),
-        masks,
-        mode,
-    )
+        )
+        if destination and profile.cache_destination:
+            try:
+                save_destination(profile, side, masks, mode, files)
+            except OSError as exc:
+                cache_notes.append(f"Could not save the destination cache: {exc}")
+        return files
+
+    left = _drop_global(read_side("Left", left_root, False), masks, mode)
+    right = _drop_global(read_side("Right", right_root, True), masks, mode)
     bytes_read = 0
     if profile.binary_compare:
         bytes_read = _equalize_identical(profile, left_root, right_root, left, right, control=control)
@@ -152,20 +164,21 @@ def scan_profile(
         len(right),
         bytes_read,
         discovered=sum(walked.values()),
-        note=note,
+        note=" ".join([part for part in (note, *cache_notes) if part]),
+        cached=bool(cache_notes),
         listing=build_listing(left, right, changes),
     )
 
 
 def remember(profile: Profile) -> None:
-    """Store the trees as they are on disk after a run."""
+    """Record history and invalidate cached destinations after any OFS changes."""
 
-    if not profile.track:
-        return
     masks = global_exclusions()
     mode = global_exclusion_mode()
     left_root = ensure_dir(profile.left)
     right_root = ensure_dir(profile.right)
+    if not profile.track:
+        return
     left = _drop_global(
         walk(
             left_root,
@@ -187,6 +200,12 @@ def remember(profile: Profile) -> None:
         mode,
     )
     save_history(profile, left, right)
+
+
+def invalidate_cached_destinations(profile: Profile) -> None:
+    """Invalidate both possible destinations, regardless of the current direction."""
+
+    invalidate_destination(profile)
 
 
 def _equalize_identical(

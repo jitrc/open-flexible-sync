@@ -27,6 +27,7 @@ def run_checked(
     control=None,
     on_progress=None,
     on_stats=None,
+    force_uncached: bool = False,
 ) -> list[JobResult]:
     skips = session_skips or {}
     masks = session_masks or {}
@@ -52,6 +53,7 @@ def run_checked(
                 control=control,
                 on_progress=report,
                 on_stats=report_stats,
+                force_uncached=force_uncached,
             )
         except MissingVolume as exc:
             result = None

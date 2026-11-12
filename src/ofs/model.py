@@ -94,6 +94,7 @@ class Profile:
     compare_ownership: bool = False
     preserve_ownership: bool = False
     group_override: str = ""
+    cache_destination: bool = False
     last_result: str = ""
     note: str = ""
     imported_settings: bool = False
@@ -143,6 +144,7 @@ class Profile:
             "compare_ownership": self.compare_ownership,
             "preserve_ownership": self.preserve_ownership,
             "group_override": self.group_override,
+            "cache_destination": self.cache_destination,
             "last_result": self.last_result,
             "note": self.note,
             "imported_settings": self.imported_settings,
@@ -182,6 +184,7 @@ class Profile:
             compare_ownership=bool(data.get("compare_ownership", False)),
             preserve_ownership=bool(data.get("preserve_ownership", False)),
             group_override=data.get("group_override") or "",
+            cache_destination=bool(data.get("cache_destination", False)),
             last_result=data.get("last_result") or "",
             note=data.get("note") or "",
             imported_settings=bool(data.get("imported_settings", False)),

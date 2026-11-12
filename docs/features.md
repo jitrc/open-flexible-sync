@@ -59,6 +59,15 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - **Pause** holds discovery between entries. **Skip Rest** skips only the current incomplete scan and continues with the next checked profile. **Cancel** stops the checked batch. Neither action opens a partial comparison or writes a copy log.
 - Additional requested scans wait in order rather than concurrently scanning the same trees and making the GUI unresponsive.
 
+## Destination metadata cache
+
+- Enable **Cache destination metadata (up to 5 minutes)** independently per profile. Existing/imported profiles default to uncached discovery.
+- A completed destination walk is saved as an atomic JSON manifest under the OFS `cache/` directory. The manifest stores paths, timestamps, size, kind, link target, permissions, and UID/GID; it never stores file contents.
+- The following fresh destination scan can reuse that metadata and is labeled as cached. The other/source tree is always read fresh. In both-direction mode the two possible destinations have independently validated metadata snapshots.
+- The cache expires after five minutes. Its root path and filter settings must match; folder/mask changes or OFS copy/move/delete operations invalidate it. Canceled/skipped scans never become a cached manifest. An uncached refresh creates a fresh completed manifest.
+- **Cached metadata can miss changes made by other programs while the cache is valid.** After external changes, choose **Profiles → Run checked (uncached)**, or use `scan NAME --uncached` / `run NAME --uncached [--apply]`. This is a one-run override and does not turn off the saved setting.
+- A cache is not the file-history SQLite database, stored hashes, content-addressed storage, or post-copy verification. Metadata-only comparison cannot prove equal contents; optional binary comparison still performs its direct byte comparison on candidates.
+
 ## Preview and one-run actions
 
 - The comparison is a folder tree with file sizes, `L ──▶ R` / `L ◀── R` direction diagrams, folder action counts, and per-side copy/move/delete byte totals.
