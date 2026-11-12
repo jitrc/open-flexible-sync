@@ -156,6 +156,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._folder_copy_running: set[str] = set()
         self._path_available: dict[str, bool] = {}
         self._visible_count = 0
+        self._profile_scroll_generation = 0
         self._updating_appearance = False
 
         header = Gtk.HeaderBar()
@@ -273,25 +274,37 @@ class MainWindow(Gtk.ApplicationWindow):
         self.list_box.set_margin_start(12)
         self.list_box.set_margin_end(12)
         self.list_box.set_margin_top(8)
-        scrolled = Gtk.ScrolledWindow(vexpand=True)
-        scrolled.set_child(self.list_box)
+        self.profiles_scroll = Gtk.ScrolledWindow(vexpand=True)
+        self.profiles_scroll.set_child(self.list_box)
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         root.append(tools)
         root.append(filters)
         self.column_headers = self._column_headers()
         root.append(self.column_headers)
-        root.append(scrolled)
+        root.append(self.profiles_scroll)
         root.append(self.status)
         self.set_child(root)
         _install_css()
         self.reload()
 
     def reload(self) -> None:
+        saved_scroll = self.profiles_scroll.get_vadjustment().get_value()
+        self._profile_scroll_generation += 1
+        generation = self._profile_scroll_generation
         self.profiles = load_profiles()
         self._path_available.clear()
         self._rebuild()
         folder = config_dir() / "profiles"
         self.status.set_text(f"{len(self.profiles)} profiles in {folder}")
+        GLib.idle_add(self._restore_profile_scroll, generation, saved_scroll)
+
+    def _restore_profile_scroll(self, generation: int, saved_scroll: float) -> bool:
+        if generation != self._profile_scroll_generation:
+            return False
+        adjustment = self.profiles_scroll.get_vadjustment()
+        maximum = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
+        adjustment.set_value(min(saved_scroll, maximum))
+        return False
 
     def _column_headers(self) -> Gtk.Widget:
         row = Gtk.Box(spacing=4)

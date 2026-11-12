@@ -92,6 +92,9 @@ These are the requirements added after the first draft, restated with the behavi
 
 ### Filters
 
+Result reloads in the profile overview preserve the user's vertical scroll adjustment and existing expanded-group state. Restore after GTK has laid out the rebuilt rows, discard superseded restores, and clamp only when the new list is shorter. This covers normal copy and explicit whole-folder result refreshes without changing checked profiles, filters, or plan behavior. Existing group canonical-key expansion remains intact.
+
+
 - Include masks and exclusion masks for files and folders. Both are editable as typed rule lists with relative-path match tests. Keep `(all)` in includes for no restriction; replacing it makes nonmatching files invisible to copy and mirror deletion. Several masks may be separated by semicolon or newline. A mask may point at a text file that holds more masks.
 - A lone `*` in an exclusion list matches no path. The imported lists keep that star. `(all)` on an include list includes every file. `*.tmp` matches that name in any folder. A mask that names a folder matches that folder and everything under it.
 - Folder masks are separate from file masks.

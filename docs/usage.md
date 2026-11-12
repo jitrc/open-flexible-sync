@@ -32,6 +32,8 @@ Rename checked profiles… provides case-sensitive text replacement or prefix ma
 
 Multi Edit… changes one field across the checked profiles after showing affected names and values for confirmation. Direction, mode, exclusions, Disabled, Older settings, binary comparison, file database, and timestamp settings are available. For include or exclusion masks, choose Add to keep each profile's existing rules or Replace to replace that entire list. All unselected fields, names, paths, notes, and last results stay unchanged. Disabled profiles can be changed or enabled even though their overview checkboxes are unavailable.
 
+When a completed copy or new-folder operation refreshes profile results, the overview keeps its vertical scroll position and expanded groups. The viewport is restored after GTK lays out the rebuilt rows. If profiles are removed so the total list becomes shorter, the position is clamped to the valid range rather than showing an empty area.
+
 The editor's **Left** and **Right** path fields both accept typed paths and offer **Browse…** to choose an existing local or mounted folder. Choosing a folder updates the field; it does not save the profile or clear databases until the normal Save confirmation path is used. Preserve imported settings and the existing history/path-change rules remain in effect.
 
 ## OFS profile export and import

@@ -1,6 +1,8 @@
 import os
 import time
 
+import pytest
+
 import gi
 
 gi.require_version("Gtk", "4.0")
@@ -88,6 +90,47 @@ def _widgets(widget):
 
 def _profile_rows(box) -> list[str]:
     return [item.get_label() for item in _widgets(box) if isinstance(item, Gtk.CheckButton)]
+
+
+def test_completed_run_reload_preserves_scroll_and_expanded_groups(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestProfileScroll")
+    for index in range(40):
+        save_profile(Profile(name=f"group-{index // 2:02d} profile-{index:02d}", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window._set_groups(True)
+            window.present()
+            settle()
+            adjustment = window.profiles_scroll.get_vadjustment()
+            seen["has_scrollbar"] = adjustment.get_upper() > adjustment.get_page_size()
+            adjustment.set_value((adjustment.get_upper() - adjustment.get_page_size()) * 0.55)
+            settle()
+            seen["before"] = adjustment.get_value()
+            seen["expanded_before"] = window._group_expanded.get("group-00") is True
+            window.reload()
+            settle()
+            seen["after"] = adjustment.get_value()
+            seen["expanded_after"] = window._group_expanded.get("group-00") is True
+            adjustment.set_value(0)
+            window.reload()
+            settle()
+            seen["top"] = adjustment.get_value()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["has_scrollbar"] is True
+    assert seen["before"] > 0
+    assert seen["after"] == pytest.approx(seen["before"], abs=1)
+    assert seen["expanded_before"] is True and seen["expanded_after"] is True
+    assert seen["top"] == 0
 
 
 def test_overview_groups_and_preview_actions(tmp_path, monkeypatch):
