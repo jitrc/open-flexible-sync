@@ -22,6 +22,7 @@ class ScanResult:
     left_files: int = 0
     right_files: int = 0
     bytes_read: int = 0
+    discovered: int = 0
     errors: list[str] = field(default_factory=list)
     note: str = ""
     listing: list[Listed] = field(default_factory=list)
@@ -82,6 +83,7 @@ def scan_profile(
     ensure_volume(profile.right, profile.right_volume)
     left_root = ensure_dir(profile.left)
     right_root = ensure_dir(profile.right)
+    walked = {"Left": 0, "Right": 0}
 
     def progress(side: str):
         def report(rel: str, count: int) -> None:
@@ -92,6 +94,7 @@ def scan_profile(
 
     def stats(side: str):
         def report(rel: str, values) -> None:
+            walked[side] = values.discovered
             if on_stats is not None:
                 on_stats(side, rel, values)
 
@@ -146,6 +149,7 @@ def scan_profile(
         len(left),
         len(right),
         bytes_read,
+        discovered=sum(walked.values()),
         note=note,
         listing=build_listing(left, right, changes),
     )

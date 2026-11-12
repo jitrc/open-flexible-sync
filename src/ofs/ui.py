@@ -45,6 +45,7 @@ from ofs.settings import (
     compare_command,
     global_exclusion_mode,
     global_exclusions,
+    scan_estimate,
     copy_speed_limit,
     set_compare_command,
     set_copy_speed_limit,
@@ -766,7 +767,8 @@ class MainWindow(Gtk.ApplicationWindow):
         profiles = list(self.profiles)
         skips = {name: set(values) for name, values in self.session_skips.items()}
         masks = {name: list(values) for name, values in self.session_masks.items()}
-        progress = ScanWindow(self, self._scan_label.removesuffix("…"))
+        estimates = {name: scan_estimate(name) for name in chosen}
+        progress = ScanWindow(self, self._scan_label.removesuffix("…"), estimates=estimates)
         progress.present()
 
         def on_stats(name: str, side: str, rel: str, values) -> None:
@@ -1646,7 +1648,7 @@ class Preview(Gtk.Window):
 class ScanWindow(Gtk.Window):
     """Live scan statistics, pause, per-profile skip, and whole-scan cancel."""
 
-    def __init__(self, owner: Gtk.Window, title: str = "Scanning"):
+    def __init__(self, owner: Gtk.Window, title: str = "Scanning", *, estimates: dict[str, tuple[int, float]] | None = None):
         super().__init__(transient_for=owner, modal=False, title=title)
         self.set_default_size(640, 260)
         self.control = RunControl()
@@ -1654,6 +1656,10 @@ class ScanWindow(Gtk.Window):
         self._place = "Starting…"
         self._name = ""
         self._started = time.monotonic()
+        self._paused_at: float | None = None
+        self._paused_total = 0.0
+        self._estimates = estimates or {}
+        self._estimate = (0, 0.0)
         self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
         self.file_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.file_label.set_text(self._place)
@@ -1684,20 +1690,30 @@ class ScanWindow(Gtk.Window):
         self.connect("close-request", self._cancel_close)
         GLib.timeout_add(120, self._pulse)
 
+    def _elapsed(self) -> float:
+        now = self._paused_at if self._paused_at is not None else time.monotonic()
+        return max(0.0, now - self._started - self._paused_total)
+
     def _update_counts(self) -> None:
         discovered = sum(values["discovered"] for values in self._stats.values())
         filtered = sum(values["filtered"] for values in self._stats.values())
         added = sum(values["added"] for values in self._stats.values())
-        elapsed = max(0.001, time.monotonic() - self._started)
-        speed = int(discovered / elapsed)
+        elapsed = self._elapsed()
+        speed = int(discovered / elapsed) if elapsed else 0
+        eta = _estimate_eta(discovered, elapsed, self._estimate)
+        eta_text = f"ETA ~{_duration(eta)}" if eta is not None else "ETA after first completed scan"
         self.count_label.set_text(
             f"Folders and files found: {discovered}\nFiltered (ignored): {filtered}\nAdded to file list: {added}\n"
-            f"Elapsed {_duration(elapsed)} · {speed} entries/s · ETA unknown"
+            f"Elapsed {_duration(elapsed)} · {speed} entries/s · {eta_text}"
         )
 
     def _new_profile(self, name: str) -> None:
         if name != self._name:
             self._name = name
+            self._estimate = self._estimates.get(name, (0, 0.0))
+            self._started = time.monotonic()
+            self._paused_total = 0.0
+            self._paused_at = self._started if self.control.paused else None
             self.skip_button.set_sensitive(True)
             self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
 
@@ -1735,10 +1751,14 @@ class ScanWindow(Gtk.Window):
 
     def _toggle(self, *_args) -> None:
         if self.control.paused:
+            if self._paused_at is not None:
+                self._paused_total += time.monotonic() - self._paused_at
+            self._paused_at = None
             self.control.resume()
             self.pause_button.set_label("Pause")
             self.file_label.set_text(self._place)
         else:
+            self._paused_at = time.monotonic()
             self.control.pause()
             self.pause_button.set_label("Resume")
             self.file_label.set_text("Paused. " + self._place)
@@ -1764,6 +1784,18 @@ class ScanWindow(Gtk.Window):
             return False
         self._cancel()
         return True
+
+
+def _estimate_eta(discovered: int, elapsed: float, estimate: tuple[int, float]) -> float | None:
+    """Previous duration initially, then a live-pace estimate after ten entries."""
+
+    expected_entries, previous_seconds = estimate
+    if expected_entries <= 0 or previous_seconds <= 0:
+        return None
+    if discovered < 10 or elapsed <= 0:
+        return max(0.0, previous_seconds - elapsed)
+    remaining = max(0, expected_entries - discovered)
+    return remaining * elapsed / discovered
 
 
 def _duration(seconds: float) -> str:

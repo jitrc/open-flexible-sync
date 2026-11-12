@@ -482,6 +482,10 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
             seen["skipping"] = scan.control.skipping
             seen["skip_enabled"] = scan.skip_button.get_sensitive()
             seen["modal"] = scan.get_modal()
+            estimated = ScanWindow(window, estimates={"job": (1000, 20.0)})
+            estimated.update_stats("job", "Left", "folder", WalkStats(450, 0, 450))
+            seen["estimated"] = estimated.count_label.get_text()
+            estimated.allow_close()
             self.quit()
 
     assert App().run(None) == 0
@@ -491,12 +495,14 @@ def test_scan_counts_stay_for_both_sides(tmp_path, monkeypatch):
         "Added to file list: 43",
     ]
     assert "entries/s" in seen["counts"]
-    assert "ETA unknown" in seen["counts"]
+    assert "ETA after first completed scan" in seen["counts"]
     assert "Reading right" in seen["place"]
     assert seen["skip"].startswith("Skipping rest")
     assert seen["skipping"] is True
     assert seen["skip_enabled"] is False
     assert seen["modal"] is False
+    assert "ETA ~" in seen["estimated"]
+    assert "ETA after first" not in seen["estimated"]
 
 
 def test_a_second_scan_waits_behind_the_one_already_running(tmp_path, monkeypatch):
@@ -740,6 +746,15 @@ def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
     assert App().run(None) == 0
     assert seen["left"] == "/media/new/photos"
     assert seen["database"] is False
+
+
+def test_scan_eta_uses_previous_duration_then_current_pace():
+    from ofs.ui import _estimate_eta
+
+    assert _estimate_eta(0, 1.0, (0, 0.0)) is None
+    assert _estimate_eta(0, 2.0, (100, 10.0)) == 8.0
+    assert _estimate_eta(50, 5.0, (100, 10.0)) == 5.0
+    assert _estimate_eta(150, 10.0, (100, 10.0)) == 0.0
 
 
 def test_status_icon_reflects_the_last_result():

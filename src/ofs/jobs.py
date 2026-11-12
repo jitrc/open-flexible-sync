@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass
 
 from ofs.model import Profile
 from ofs.scan import ScanResult, scan_profile
+from ofs.settings import record_scan_estimate
 from ofs.walk import MissingVolume, WalkSkipped, WalkStopped
 
 
@@ -41,6 +43,7 @@ def run_checked(
             if on_stats is not None:
                 on_stats(name, side, rel, values)
 
+        started = time.monotonic()
         try:
             result = scan_profile(
                 profile,
@@ -63,5 +66,9 @@ def run_checked(
             break
         else:
             error = None
+            try:
+                record_scan_estimate(profile.name, result.discovered, time.monotonic() - started)
+            except OSError as exc:
+                result.note = (result.note + " " if result.note else "") + f"Could not save the scan ETA estimate: {exc}"
         results.append(JobResult(profile, result, error))
     return results

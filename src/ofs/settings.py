@@ -93,6 +93,28 @@ def set_copy_speed_limit(bytes_per_second: float) -> None:
     _save("copy_speed_limit", max(0, int(bytes_per_second)))
 
 
+def record_scan_estimate(name: str, entries: int, seconds: float) -> None:
+    if entries <= 0 or seconds <= 0:
+        return
+    estimates = load_settings().get("scan_estimates")
+    estimates = dict(estimates) if isinstance(estimates, dict) else {}
+    estimates[name] = {"entries": int(entries), "seconds": float(seconds)}
+    _save("scan_estimates", estimates)
+
+
+def scan_estimate(name: str) -> tuple[int, float]:
+    raw = load_settings().get("scan_estimates")
+    found = raw.get(name) if isinstance(raw, dict) else None
+    if not isinstance(found, dict):
+        return 0, 0.0
+    try:
+        entries = int(found.get("entries") or 0)
+        seconds = float(found.get("seconds") or 0)
+    except (TypeError, ValueError):
+        return 0, 0.0
+    return (entries, seconds) if entries > 0 and seconds > 0 else (0, 0.0)
+
+
 def _save(key: str, value) -> None:
     folder = config_dir()
     folder.mkdir(parents=True, exist_ok=True)

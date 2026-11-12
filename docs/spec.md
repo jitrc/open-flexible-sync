@@ -174,7 +174,7 @@ A scan of a large tree is metadata only unless the profile turned on binary comp
 Scanning has its own window, separate from the copying progress window.
 
 - The window names the profile, says it is reading the left folder or the right folder, and shows the path inside that folder.
-- Combined counts stay on screen: folders and files discovered, rules filtered by Ignore Totally, and files added to the scan.
+- Combined counts stay on screen: folders and files discovered, rules filtered by Ignore Totally, and files added to the scan. Elapsed time and discovered entries/second are shown. Only complete scans save that profile's discovered count and duration in Settings. Repeat scans display a clearly approximate ETA using prior duration, measured pace, and expected remaining entries, excluding pauses. The first scan has no ETA; skipped/canceled scans do not replace an existing estimate.
 - Copy, move, and delete totals are shown on the comparison window after the scan.
 - Pause holds the walk between entries. Resume continues. Skip Rest abandons the current profile and continues the checked batch. Cancel stops the batch. Closing the window is Cancel.
 - The scan window does not lock the overview. Run on another row, or Run checked, queues that scan. Queued scans start one after another. A stopped scan does not open a comparison of the partial tree and does not write a log. The next waiting scan still starts. Profiles inside one Run checked still stop when that scan is canceled.

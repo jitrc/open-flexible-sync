@@ -118,7 +118,10 @@ def test_stopped_scan_does_not_start_the_next_profile(tmp_path):
     assert results[0].result is None
 
 
-def test_skip_rest_continues_with_the_next_profile(tmp_path):
+def test_skip_rest_continues_with_the_next_profile(tmp_path, monkeypatch):
+    from ofs.settings import scan_estimate
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     first_left = tmp_path / "a" / "left"
     second_left = tmp_path / "b" / "left"
     second_left.mkdir(parents=True)
@@ -144,6 +147,9 @@ def test_skip_rest_continues_with_the_next_profile(tmp_path):
     assert results[1].result is not None
     assert [change.rel for change in results[1].result.changes] == ["complete.txt"]
     assert control.skipping is False
+    assert scan_estimate("first") == (0, 0.0)
+    next_entries, next_seconds = scan_estimate("second")
+    assert next_entries > 0 and next_seconds > 0
 
 
 def test_missing_volume_raises(tmp_path):
