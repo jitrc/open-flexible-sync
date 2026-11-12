@@ -785,11 +785,13 @@ class MainWindow(Gtk.ApplicationWindow):
         right_volume = Gtk.Entry(text="" if existing is None else existing.right_volume)
         mode = Gtk.DropDown.new_from_strings(["Copy only (no deletions)", "Exact Mirror (copy/move/delete)"])
         mode.set_selected(0 if existing is None or existing.mode == SyncMode.STANDARD else 1)
-        direction = Gtk.DropDown.new_from_strings(["left_to_right", "right_to_left", "both"])
+        direction = Gtk.DropDown.new_from_strings(["Left to right (L → R)", "Right to left (R → L)", "Both directions"])
         direction_values = [Direction.LEFT_TO_RIGHT, Direction.RIGHT_TO_LEFT, Direction.BOTH]
         direction.set_selected(0 if existing is None else direction_values.index(existing.direction))
-        exclusion = Gtk.DropDown.new_from_strings(["ignore_totally", "dont_copy"])
+        direction.set_tooltip_text("Choose which side supplies changes, or synchronize in both directions.")
+        exclusion = Gtk.DropDown.new_from_strings(["Ignore Totally", "Don't Copy"])
         exclusion.set_selected(0 if existing is None or existing.exclusion_mode == ExclusionMode.IGNORE_TOTALLY else 1)
+        exclusion.set_tooltip_text("Ignore Totally hides matches from copying and mirror deletion. Don't Copy leaves matches untransferred, but Exact Mirror may delete a destination extra.")
         rules = None if existing is None else existing.timestamps
         small = Gtk.CheckButton(label="Ignore differences of 2 seconds", active=bool(rules and rules.ignore_small))
         hour = Gtk.CheckButton(label="Ignore a difference of exactly one hour", active=bool(rules and rules.ignore_exact_hour))

@@ -390,6 +390,43 @@ def test_profile_editor_saves_copy_only_and_include_filters(tmp_path, monkeypatc
     assert saved.name == "selection job"
 
 
+def test_direction_and_exclusion_dropdown_labels_are_readable_and_mapped(tmp_path, monkeypatch):
+    from ofs.model import Direction, ExclusionMode
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestDropdownLabels")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    original = Profile(name="labels", left=str(left), right=str(right), direction=Direction.RIGHT_TO_LEFT, exclusion_mode=ExclusionMode.DONT_COPY, imported_settings=True)
+    save_profile(original)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            editor = window._editor(window.profiles[0])
+            for dropdown in [item for item in _widgets(editor) if isinstance(item, Gtk.DropDown)]:
+                model = dropdown.get_model()
+                labels = [model.get_string(index) for index in range(model.get_n_items())]
+                if "Both directions" in labels:
+                    seen["direction"] = labels
+                if "Don't Copy" in labels:
+                    seen["exclusion"] = labels
+            save = next(item for item in _buttons(editor) if item.get_label() == "Save")
+            save.emit("clicked")
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["direction"] == ["Left to right (L → R)", "Right to left (R → L)", "Both directions"]
+    assert seen["exclusion"] == ["Ignore Totally", "Don't Copy"]
+    saved = load_profiles()[0]
+    assert saved.direction == Direction.RIGHT_TO_LEFT
+    assert saved.exclusion_mode == ExclusionMode.DONT_COPY
+    assert saved.to_json() == original.to_json()
+
+
 def test_profile_editor_preserves_symlink_metadata_and_other_policy_fields(tmp_path, monkeypatch):
     from ofs.model import SizeConflict, SymlinkMode, TimestampRules
 
