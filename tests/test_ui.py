@@ -92,7 +92,85 @@ def _profile_rows(box) -> list[str]:
     return [item.get_label() for item in _widgets(box) if isinstance(item, Gtk.CheckButton)]
 
 
+def _find_profile_row(root, name: str):
+    for widget in _widgets(root):
+        if isinstance(widget, Gtk.CheckButton) and widget.get_label() == name:
+            while widget is not None and "profile-row" not in widget.get_css_classes():
+                widget = widget.get_parent()
+            return widget
+    return None
+
+
+def test_result_return_restores_the_same_profile_and_scroll_position(tmp_path, monkeypatch):
+    from ofs.apply import ApplyReport
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestResultProfileReturn")
+    for index in range(40):
+        save_profile(Profile(name=f"group-{index // 2:02d} profile-{index:02d}", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window._set_groups(True)
+            window.present()
+            settle()
+            adjustment = window.profiles_scroll.get_vadjustment()
+            adjustment.set_value((adjustment.get_upper() - adjustment.get_page_size()) * 0.5)
+            settle()
+            target = None
+            for profile in window.profiles:
+                row = _find_profile_row(window.list_box, profile.name)
+                if row is None or not row.get_mapped():
+                    continue
+                point = row.translate_coordinates(window.list_box, 0, 0)
+                offset = point[1] - adjustment.get_value() if point is not None else -1
+                if offset >= 0 and offset + row.get_height() <= adjustment.get_page_size():
+                    target = profile.name
+                    break
+            seen["target"] = target
+            selected = {"group-00 profile-00", target}
+            window.checked = set(selected)
+            window._run_names = lambda *_args, **_kwargs: seen.setdefault("scan_requested", target)
+            window._run_one(None, target)
+            window.reload()
+            settle()
+            seen["selected_name"] = getattr(window, "_focused_profile", None)
+            seen["selected_row"] = "profile-selected" in _find_profile_row(window.list_box, target).get_css_classes()
+            seen["before_scroll"] = adjustment.get_value()
+            job = next(item for item in window.profiles if item.name == target)
+            preview = window._preview(JobResult(job, ScanResult([]), None))
+            progress = ProgressWindow(preview, target)
+            preview._finished(progress, ApplyReport(), None)
+            result = next(item for item in self.get_windows() if isinstance(item, ResultsWindow))
+            result.close()
+            settle()
+            seen["overview_visible"] = window.get_visible()
+            seen["focused_name"] = getattr(window, "_focused_profile", None)
+            check = window._profile_check_buttons.get(target)
+            seen["widget_focus"] = check is not None and check.has_focus()
+            seen["after_scroll"] = adjustment.get_value()
+            seen["expanded_preserved"] = window._group_expanded.get("group-00") is True
+            seen["checked_preserved"] = window.checked == selected
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["target"] is not None
+    assert seen["scan_requested"] == seen["target"]
+    assert seen["selected_name"] == seen["target"] and seen["selected_row"] is True
+    assert seen["overview_visible"] is True
+    assert seen["focused_name"] == seen["target"] and seen["widget_focus"] is True
+    assert seen["after_scroll"] == pytest.approx(seen["before_scroll"], abs=1)
+    assert seen["expanded_preserved"] is True and seen["checked_preserved"] is True
+
+
 def test_completed_run_reload_preserves_scroll_and_expanded_groups(tmp_path, monkeypatch):
+
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestProfileScroll")
     for index in range(40):
@@ -797,8 +875,12 @@ def test_copy_stays_in_preview_and_fades_completed_rows_without_changing_plan(tm
             GLib.timeout_add(20, self.watch, preview)
 
         def watch(self, preview):
+            from ofs.run_history import list_history
+
             if preview._running:
                 return True
+            history = list_history()
+            seen["history"] = [(entry.profile, entry.kind, entry.log_path.is_file()) for entry in history]
             seen["released_with_closed_overview"] = not self.profile_is_active("alpha copy")
             seen["after"] = [change.rel for change in preview._planned()]
             seen["copied"] = set(preview._completed_rows)
@@ -825,6 +907,7 @@ def test_copy_stays_in_preview_and_fades_completed_rows_without_changing_plan(tm
     assert seen["locked_with_closed_overview"] is True and seen["released_with_closed_overview"] is True
     assert seen["source_survives"] is True and seen["destinations"] == ("alpha", "beta")
     assert seen["results"] is True
+    assert seen["history"] == [("alpha copy", "copy", True)]
 
 
 def test_copy_progress_window_shows_bytes_current_file_and_operation_fallback(tmp_path, monkeypatch):
@@ -2453,12 +2536,23 @@ def test_multi_edit_cache_size_and_fractional_age_controls(tmp_path, monkeypatch
 
             seen["searchable_fields"] = editor.field.get_enable_search()
             seen["cache_hint"] = "cache" in editor.preview.get_text().lower()
-            editor.field.set_selected(next(index for index, item in enumerate(FIELDS) if item.key == "cache_destination"))
+            search = getattr(editor, "field_search", None)
+            seen["visible_search"] = search is not None
+            if search is None:
+                self.quit()
+                return
+            search.set_text("cache")
+            seen["search_results"] = ["cache" in item.label.lower() for item in editor._visible_fields]
+            seen["cache_options"] = [label for label, _value in editor._field_definition().options]
             editor.value_widget.set_selected(1)
             editor.apply.emit("clicked")
             seen["cache"] = seen["changed"]
             seen["cache_field"] = seen["field"]
             seen["before"] = [(profile.name, profile.cache_destination) for profile in load_profiles()]
+            search.set_text("no-such-setting")
+            seen["no_matches"] = editor.value_widget.get_text() == "No matching settings" and not editor.apply.get_sensitive()
+            search.set_text("")
+            seen["all_fields_restored"] = len(editor._visible_fields) == len(FIELDS)
 
             editor.field.set_selected(next(index for index, item in enumerate(FIELDS) if item.key == "min_age_days"))
             seen["age_digits"] = editor.value_widget.get_digits()
@@ -2476,7 +2570,11 @@ def test_multi_edit_cache_size_and_fractional_age_controls(tmp_path, monkeypatch
 
     assert App().run(None) == 0
     assert seen["searchable_fields"] is True and seen["cache_hint"] is True
+    assert seen["visible_search"] is True
+    assert seen["search_results"] == [True]
+    assert seen["cache_options"] == ["Off", "On"]
     assert seen["cache_field"] == "cache_destination"
+    assert seen["no_matches"] is True and seen["all_fields_restored"] is True
     assert [profile.name for profile in seen["cache"]] == ["alpha one"]
     assert seen["cache"][0].imported_settings is True
     assert seen["before"] == [("alpha one", False), ("alpha two", True)]
@@ -2678,6 +2776,78 @@ def test_path_replace_saves_and_drops_the_file_database(tmp_path, monkeypatch):
     assert App().run(None) == 0
     assert seen["left"] == "/media/new/photos"
     assert seen["database"] is False
+
+
+def test_global_history_searches_refreshes_and_opens_only_saved_logs(tmp_path, monkeypatch):
+    from ofs.apply import ApplyReport
+    from ofs.review import log_body, write_log
+    from ofs.run_history import record
+    import ofs.ui as ui
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestGlobalHistory")
+    profile = Profile(name="alpha docs", left="/sample/left", right="/sample/right")
+    report = ApplyReport(copied=1)
+    path = write_log(profile, log_body(profile, [], report, choice="test record only"))
+    record("alpha docs", "copy", "Copied 1 file", path)
+    record("beta media", "scan", "Complete scan: no changes")
+    record("offline disk", "scan", "Volume unavailable")
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            owner.checked = {"alpha docs"}
+            owner._focused_profile = "alpha docs"
+            owner.reload()
+            history = owner._run_history()
+            settle()
+            seen["initial"] = [(entry.profile, entry.kind) for entry in history._filtered]
+            seen["no_log_disabled"] = not history.view_log.get_sensitive()
+            volume = next(widget for widget in _widgets(history.list_box) if isinstance(widget, Gtk.Label) and widget.get_text() == "Volume unavailable")
+            seen["volume_tone"] = "result-error" in volume.get_css_classes()
+
+            history.search.set_text("alpha")
+            history.search.emit("search-changed")
+            seen["filtered"] = [entry.profile for entry in history._filtered]
+            seen["log_enabled"] = history.view_log.get_sensitive()
+            summary = next(widget for widget in _widgets(history.list_box) if isinstance(widget, Gtk.Label) and widget.get_text() == "Copied 1 file")
+            stamp = next(widget for widget in _widgets(history.list_box) if isinstance(widget, Gtk.Label) and widget.get_text() == history._filtered[0].when)
+            sample = summary.get_style_context().get_color()
+            plain = stamp.get_style_context().get_color()
+            seen["selected_text_colors"] = tuple(
+                (color.red, color.green, color.blue, color.alpha) for color in (sample, plain)
+            )
+            monkeypatch.setattr(ui, "open_uri", lambda log_path: seen.setdefault("opened", log_path))
+            history._open_log()
+
+            record("gamma backups", "folder-copy", "Copied a new folder")
+            history._refresh()
+            seen["preserves_query"] = history.search.get_text() == "alpha"
+            seen["refresh_count"] = len(history._entries)
+            history.search.set_text("")
+            history.search.emit("search-changed")
+            seen["all_again"] = len(history._filtered)
+            seen["owner_selection"] = owner._focused_profile
+            seen["owner_checked"] = owner.checked
+            history.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["initial"] == [("offline disk", "scan"), ("beta media", "scan"), ("alpha docs", "copy")]
+    assert seen["no_log_disabled"] is True and seen["volume_tone"] is True
+    assert seen["filtered"] == ["alpha docs"]
+    assert seen["log_enabled"] is True
+    assert seen["selected_text_colors"][0] == seen["selected_text_colors"][1]
+    assert seen["opened"] == path
+    assert seen["preserves_query"] is True and seen["refresh_count"] == 4
+    assert seen["all_again"] == 4
+    assert seen["owner_selection"] == "alpha docs"
+    assert seen["owner_checked"] == {"alpha docs"}
 
 
 def test_scan_eta_uses_previous_duration_then_current_pace():

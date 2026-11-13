@@ -5,7 +5,9 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
+from ofs.compare import plan_summary
 from ofs.model import Profile
+from ofs.run_history import record as record_run
 from ofs.scan import ScanResult, scan_profile
 from ofs.settings import record_scan_estimate
 from ofs.walk import MissingVolume, WalkSkipped, WalkStopped
@@ -16,6 +18,31 @@ class JobResult:
     profile: Profile
     result: ScanResult | None
     error: str | None
+
+
+def _record_scan_history(job: JobResult) -> None:
+    if job.result is None:
+        if job.error == "scan stopped":
+            summary = "Stopped by user"
+        elif job.error == "scan skipped":
+            summary = "Skipped"
+        elif (job.error or "").startswith("volume is not mounted"):
+            summary = "Volume unavailable"
+        else:
+            summary = "Scan unavailable"
+    elif job.result.partial_sides:
+        summary = f"Partial scan (review only): {plan_summary(job.result.changes)}"
+    else:
+        cache = "cached " if job.result.cached else ""
+        summary = f"Complete {cache}scan: {plan_summary(job.result.changes)}"
+    try:
+        record_run(job.profile.name, "scan", summary)
+    except OSError as exc:
+        warning = f"Could not save global run history: {exc}"
+        if job.result is not None:
+            job.result.note = (job.result.note + " " if job.result.note else "") + warning
+        else:
+            job.error = f"{job.error or 'Scan unavailable'}; {warning}"
 
 
 def run_checked(
@@ -65,12 +92,16 @@ def run_checked(
             result = None
             error = f"volume is not mounted: {exc.path}"
         except WalkSkipped:
-            results.append(JobResult(profile, None, "scan skipped"))
+            skipped = JobResult(profile, None, "scan skipped")
+            _record_scan_history(skipped)
+            results.append(skipped)
             if control is not None:
                 control.clear_skip()
             continue
         except WalkStopped:
-            results.append(JobResult(profile, None, "scan stopped"))
+            stopped = JobResult(profile, None, "scan stopped")
+            _record_scan_history(stopped)
+            results.append(stopped)
             break
         else:
             error = None
@@ -79,5 +110,7 @@ def run_checked(
                     record_scan_estimate(profile.name, result.discovered, time.monotonic() - started)
                 except OSError as exc:
                     result.note = (result.note + " " if result.note else "") + f"Could not save the scan ETA estimate: {exc}"
-        results.append(JobResult(profile, result, error))
+        completed = JobResult(profile, result, error)
+        _record_scan_history(completed)
+        results.append(completed)
     return results

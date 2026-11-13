@@ -143,6 +143,9 @@ def _scan(name: str, *, apply: bool, uncached: bool = False) -> int:
 
     print(results_text(report))
     log_path = write_log(profile, log_body(profile, job.result.changes, report, choice="apply"))
+    from ofs.run_history import record as record_run
+
+    record_run(profile.name, "copy", report.summary(), log_path)
     print(f"log: {log_path}")
     for error in report.errors:
         print(error, file=sys.stderr)

@@ -14,6 +14,7 @@ Use local folders or OS-mounted NAS, SMB/CIFS, NFS, SSHFS, and rclone storage.
 | 🔍 **Understandable scans** | Live discovery counts, elapsed time, repeat-scan ETA estimates, and Pause/Skip Rest/Cancel controls, followed by a clear file/folder preview. Optional destination metadata caching persists across backup rounds; **Run uncached** handles external changes. |
 | 🛡️ **Safe synchronization** | Copy-only or Exact Mirror, timestamp and optional binary comparison, reviewed deletions, configurable deletion limits, and atomic temporary-file replacement. |
 | 🪟 **Flexible windows** | Open additional main windows with independent profile selections and coordinated job activity. |
+| 📜 **Global run history** | Persistent, searchable scan/copy records across profiles, read-only backfill of existing logs, and optional full-log viewing. |
 | 🗃️ **Recovery when needed** | Optional recovery of deleted files, retained replaced versions, and restoration into a separate destination without overwriting existing files. |
 | 🔗 **Links and metadata** | Follow, preserve, or skip symlinks; optional permission/owner comparison and safe owner/group preservation. |
 | ⚡ **Responsive progress** | Total and per-file bars, speed/ETA, pause/resume, cancellation, optional throttling, logs, results, and retry through a fresh scan. |

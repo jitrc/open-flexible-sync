@@ -32,6 +32,7 @@ from ofs.legacy import import_cfg, import_global_masks
 from ofs.masks import any_match, included, path_matches, split_masks
 from ofs.model import Direction, ExclusionMode, Profile, SizeConflict, SymlinkMode, SyncMode, TimestampRules, parse_size
 from ofs.power import PowerActionError, run_completion_action
+from ofs.run_history import list_history, record as record_run
 from ofs.review import (
     SAFETY_SECONDS,
     Listed,
@@ -161,6 +162,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._path_available: dict[str, bool] = {}
         self._visible_count = 0
         self._profile_scroll_generation = 0
+        self._focused_profile: str | None = None
+        self._profile_rows: dict[str, Gtk.Widget] = {}
+        self._profile_check_buttons: dict[str, Gtk.CheckButton] = {}
+        self._profile_return_pending = False
         self._updating_appearance = False
 
         header = Gtk.HeaderBar()
@@ -172,6 +177,10 @@ class MainWindow(Gtk.ApplicationWindow):
         _button_icon(restore_button, "Restore Older…", "document-revert-symbolic")
         restore_button.set_tooltip_text("Restore an archived file to a separate folder")
         restore_button.connect("clicked", self._restore_older)
+        history_button = Gtk.Button()
+        _button_icon(history_button, "History", "document-open-recent-symbolic")
+        history_button.set_tooltip_text("Show scan and copy history across all profiles")
+        history_button.connect("clicked", self._run_history)
         self.profiles_menu = Gtk.MenuButton()
         _button_icon(self.profiles_menu, "Profiles", "open-menu-symbolic")
         self.profiles_menu.set_tooltip_text("Import, export, and edit checked profiles")
@@ -229,6 +238,7 @@ class MainWindow(Gtk.ApplicationWindow):
         header.pack_start(new_button)
         header.pack_start(self.profiles_menu)
         header.pack_start(restore_button)
+        header.pack_start(history_button)
         header.pack_end(self.run_button)
         header.pack_end(self.uncached_button)
         header.pack_end(settings_button)
@@ -295,24 +305,62 @@ class MainWindow(Gtk.ApplicationWindow):
         _install_css()
         self.reload()
 
+    def _profile_anchor(self) -> tuple[str | None, float | None]:
+        name = self._focused_profile
+        row = self._profile_rows.get(name)
+        if row is None or not row.get_mapped():
+            return name, None
+        point = row.translate_coordinates(self.list_box, 0, 0)
+        return name, point[1] if point is not None else None
+
     def reload(self) -> None:
-        saved_scroll = self.profiles_scroll.get_vadjustment().get_value()
+        adjustment = self.profiles_scroll.get_vadjustment()
+        saved_scroll = adjustment.get_value()
+        profile, old_offset = self._profile_anchor()
         self._profile_scroll_generation += 1
         generation = self._profile_scroll_generation
+        self._profile_restore_pending = True
         self.profiles = load_profiles()
         self._path_available.clear()
         self._rebuild()
         folder = config_dir() / "profiles"
         self.status.set_text(f"{len(self.profiles)} profiles in {folder}")
-        GLib.idle_add(self._restore_profile_scroll, generation, saved_scroll)
+        # GTK resizes/allocates rebuilt children at a higher priority than this restore.
+        GLib.idle_add(
+            self._restore_profile_scroll, generation, saved_scroll, profile, old_offset,
+            priority=GLib.PRIORITY_LOW,
+        )
 
-    def _restore_profile_scroll(self, generation: int, saved_scroll: float) -> bool:
+    def _restore_profile_scroll(
+        self, generation: int, saved_scroll: float, profile: str | None, old_offset: float | None,
+    ) -> bool:
         if generation != self._profile_scroll_generation:
             return False
         adjustment = self.profiles_scroll.get_vadjustment()
         maximum = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
-        adjustment.set_value(min(saved_scroll, maximum))
+        requested = saved_scroll
+        row = self._profile_rows.get(profile)
+        if row is not None and row.get_mapped() and old_offset is not None:
+            point = row.translate_coordinates(self.list_box, 0, 0)
+            if point is not None:
+                requested += point[1] - old_offset
+        adjustment.set_value(min(max(0.0, requested), maximum))
+        self._profile_restore_pending = False
+        if self._profile_return_pending:
+            self._profile_return_pending = False
+            check = self._profile_check_buttons.get(self._focused_profile)
+            if check is not None and check.get_mapped():
+                check.grab_focus()
         return False
+
+    def _return_to_profile(self, name: str) -> None:
+        self._focused_profile = name
+        if not self.get_visible():
+            return
+        self._profile_return_pending = True
+        self.present()
+        if not self._profile_restore_pending:
+            self.reload()
 
     def _column_headers(self) -> Gtk.Widget:
         row = Gtk.Box(spacing=4)
@@ -381,6 +429,8 @@ class MainWindow(Gtk.ApplicationWindow):
         while child := self.list_box.get_first_child():
             self.list_box.remove(child)
         self._labels.clear()
+        self._profile_rows.clear()
+        self._profile_check_buttons.clear()
         self._group_sizes = Counter(profile.group for profile in self.profiles)
         query = self.search.get_text().strip().lower()
         statuses = ["all", "not_run", "clean", "stopped", "errors", "selected", "stale", "disabled"]
@@ -611,6 +661,10 @@ class MainWindow(Gtk.ApplicationWindow):
             actions.append(button)
         row = Gtk.Box(spacing=4)
         row.add_css_class("profile-row")
+        if profile.name == self._focused_profile:
+            row.add_css_class("profile-selected")
+        self._profile_rows[profile.name] = row
+        self._profile_check_buttons[profile.name] = check
         if len(self._labels) % 2:
             row.add_css_class("profile-row-alt")
         row.set_margin_top(2)
@@ -623,6 +677,7 @@ class MainWindow(Gtk.ApplicationWindow):
         return row
 
     def _toggled(self, button: Gtk.CheckButton, name: str) -> None:
+        self._focused_profile = name
         if button.get_active():
             self.checked.add(name)
         else:
@@ -1364,6 +1419,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 path = write_log(current, log_body(current, outcome.changes, outcome.report, choice="explicit new folder; no comparison or overwrites"))
             except Exception as exc:
                 outcome.report.errors.append(f"history/log: {exc}")
+            try:
+                record_run(current.name, "folder-copy", outcome.report.summary(), path)
+            except OSError as exc:
+                outcome.report.errors.append(f"run history: {exc}")
             GLib.idle_add(self._whole_folder_finished, progress, outcome, path, priority=GLib.PRIORITY_DEFAULT)
 
         threading.Thread(target=work, daemon=True, name=f"OFS folder copy: {profile.name}").start()
@@ -1383,6 +1442,7 @@ class MainWindow(Gtk.ApplicationWindow):
         return False
 
     def _run_one(self, _button, name: str) -> None:
+        self._focused_profile = name
         self._run_names({name})
 
     def _run(self, *_args) -> None:
@@ -1398,6 +1458,11 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text("Check one or more profiles to scan without destination caches.")
             return
         self._run_names(chosen, uncached=True)
+
+    def _run_history(self, *_args):
+        window = RunHistoryWindow(self)
+        window.present()
+        return window
 
     def _session_rule_lock(self, name: str) -> threading.RLock:
         return self._session_rule_locks.setdefault(name, threading.RLock())
@@ -1579,6 +1644,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _preview(self, job: JobResult) -> None:
         assert job.result is not None
+        self._focused_profile = job.profile.name
         window = self._live_completed.pop(job.profile.name, None)
         if window is None:
             window = Preview(self, job)
@@ -1861,7 +1927,9 @@ def _install_css() -> None:
         ".profile-disabled { opacity: 0.55; }"
         "box.profile-row { padding: 7px 10px; border-bottom: 1px solid alpha(@theme_fg_color, 0.12); border-radius: 6px; }"
         "box.profile-row-alt { background-color: alpha(@theme_fg_color, 0.035); }"
-        "box.profile-row:hover { background-color: alpha(@theme_selected_bg_color, 0.12); }"
+        "box.profile-row:hover { background-color: alpha(@accent_bg_color, 0.12); }"
+        "box.profile-row.profile-selected { background-color: alpha(@accent_bg_color, 0.16); outline: 2px solid alpha(@accent_color, 0.7); outline-offset: -2px; }"
+        ".history-list row:selected label { color: @theme_selected_fg_color; }"
         "box.scan-path { padding: 10px; border-radius: 8px; border: 1px solid alpha(@theme_fg_color, 0.12); background-color: alpha(@theme_fg_color, 0.035); }"
         "label.result-ok { color: @success_color; }"
         "label.result-error { color: @error_color; }"
@@ -2325,6 +2393,7 @@ class Preview(Gtk.Window):
             return True
         if self.owner._live_completed.get(self.job.profile.name) is self:
             self.owner._live_completed.pop(self.job.profile.name, None)
+        self.owner._return_to_profile(self.job.profile.name)
         return False
 
     def _start_or_rescan(self, *_args) -> None:
@@ -3133,6 +3202,10 @@ class Preview(Gtk.Window):
                     path = write_log(self.job.profile, log_body(self.job.profile, changes, report, choice=choice))
                 except Exception as exc:
                     report.errors.append(f"log: {exc}")
+            try:
+                record_run(self.job.profile.name, "copy", report.summary(), path)
+            except OSError as exc:
+                report.errors.append(f"run history: {exc}")
             GLib.idle_add(self._finished, progress, report, path, priority=GLib.PRIORITY_DEFAULT)
 
         threading.Thread(target=work, daemon=True).start()
@@ -3570,6 +3643,116 @@ class WholeFolderWindow(ProgressWindow):
         return True
 
 
+class RunHistoryWindow(Gtk.Window):
+    """Read-only, searchable activity across profiles; no run can be replayed here."""
+
+    def __init__(self, owner: MainWindow):
+        super().__init__(transient_for=owner, modal=False, title="Run History")
+        self.set_application(_owner_application(owner))
+        self.owner = owner
+        self.set_default_size(1050, 600)
+        header = Gtk.HeaderBar()
+        refresh = Gtk.Button()
+        _button_icon(refresh, "Refresh", "view-refresh-symbolic")
+        refresh.set_tooltip_text("Reload saved run history")
+        refresh.connect("clicked", lambda *_args: self._refresh())
+        header.pack_end(refresh)
+        self.set_titlebar(header)
+        self.search = Gtk.SearchEntry(placeholder_text="Search profiles, dates, types, or results")
+        self.search.set_margin_start(12)
+        self.search.set_margin_end(12)
+        self.search.set_margin_top(10)
+        self.search.connect("search-changed", self._filter)
+        self.list_box = Gtk.ListBox(selection_mode=Gtk.SelectionMode.SINGLE, css_classes=["history-list"])
+        self.list_box.connect("row-selected", self._selected)
+        scroll = Gtk.ScrolledWindow(vexpand=True, min_content_height=280)
+        scroll.set_child(self.list_box)
+        scroll.set_margin_start(12)
+        scroll.set_margin_end(12)
+        self.count = Gtk.Label(xalign=0, hexpand=True)
+        self.count.add_css_class("dim-label")
+        self.view_log = Gtk.Button(label="View Log…")
+        self.view_log.set_tooltip_text("Open the selected complete copy log in the desktop application for text files")
+        self.view_log.connect("clicked", self._open_log)
+        self.view_log.set_sensitive(False)
+        buttons = Gtk.Box(spacing=8)
+        buttons.append(self.count)
+        buttons.append(self.view_log)
+        buttons.set_margin_start(12)
+        buttons.set_margin_end(12)
+        buttons.set_margin_top(8)
+        buttons.set_margin_bottom(12)
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        headings = Gtk.Box(spacing=12)
+        for edge, size in (("start", 30), ("end", 12)):
+            getattr(headings, f"set_margin_{edge}")(size)
+        for title, width in (("When", 19), ("Profile", 24), ("Type", 10)):
+            headings.append(Gtk.Label(label=title, xalign=0, width_chars=width, css_classes=["column-heading"]))
+        headings.append(Gtk.Label(label="Result", xalign=0, hexpand=True, css_classes=["column-heading"]))
+        root.append(self.search)
+        root.append(headings)
+        root.append(scroll)
+        root.append(buttons)
+        self.set_child(root)
+        self._entries = []
+        self._filtered = []
+        self._selected_entry = None
+        self._refresh()
+
+    def _refresh(self) -> None:
+        self._entries = list_history()
+        self._selected_entry = None
+        self._populate()
+
+    def _filter(self, *_args) -> None:
+        self._populate()
+
+    def _populate(self) -> None:
+        query = self.search.get_text().strip().lower()
+        self._filtered = [
+            entry for entry in self._entries
+            if not query or query in " ".join((entry.profile, entry.when, entry.kind, entry.summary)).lower()
+        ]
+        while child := self.list_box.get_first_child():
+            self.list_box.remove(child)
+        for entry in self._filtered:
+            stamp = Gtk.Label(label=entry.when, xalign=0, width_chars=19, css_classes=["monospace"])
+            profile = Gtk.Label(label=entry.profile, xalign=0, ellipsize=Pango.EllipsizeMode.END, width_chars=24, max_width_chars=24)
+            profile.set_tooltip_text(entry.profile)
+            kind = {"scan": "Scan", "copy": "Copy", "folder-copy": "New folder"}[entry.kind]
+            kind_label = Gtk.Label(label=kind, xalign=0, width_chars=10, css_classes=["dim-label"])
+            summary = Gtk.Label(label=entry.summary, xalign=0, wrap=True, hexpand=True, selectable=True)
+            _time, _body, tone = _result_parts(entry.summary, "")
+            if entry.kind == "scan" and entry.summary in {"Volume unavailable", "Scan unavailable"}:
+                tone = "result-error"
+            elif entry.kind == "scan" and (entry.summary == "Skipped" or entry.summary.startswith("Partial scan")):
+                tone = "result-warn"
+            if tone:
+                summary.add_css_class(tone)
+            content = Gtk.Box(spacing=12)
+            for widget in (stamp, profile, kind_label, summary):
+                content.append(widget)
+            row = Gtk.ListBoxRow(child=content)
+            row.history_entry = entry
+            self.list_box.append(row)
+        if self._filtered:
+            self.list_box.select_row(self.list_box.get_row_at_index(0))
+        else:
+            self._selected_entry = None
+            self.view_log.set_sensitive(False)
+        noun = "activity" if len(self._entries) == 1 else "activities"
+        self.count.set_text(f"{len(self._filtered)} of {len(self._entries)} {noun}, newest first")
+
+    def _selected(self, _box, row) -> None:
+        self._selected_entry = getattr(row, "history_entry", None) if row is not None else None
+        path = self._selected_entry.log_path if self._selected_entry is not None else None
+        self.view_log.set_sensitive(path is not None and path.is_file())
+
+    def _open_log(self, *_args) -> None:
+        if self._selected_entry is not None and self._selected_entry.log_path is not None:
+            open_uri(self._selected_entry.log_path)
+
+
 class ResultsWindow(Gtk.Window):
     def __init__(self, owner: Preview, report: ApplyReport, log_path: Path | None):
         super().__init__(transient_for=owner, modal=True, title="Copying Results")
@@ -3835,21 +4018,26 @@ class BulkEditWindow(Gtk.Window):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         for side in ("start", "end", "top", "bottom"):
             getattr(root, f"set_margin_{side}")(12)
+        self._visible_fields = list(FIELDS)
+        self.field_search = Gtk.SearchEntry(placeholder_text="Search settings (e.g. cache)")
+        self.field_search.set_tooltip_text("Filter this field picker without changing a profile")
+        self.field_search.connect("changed", self._filter_fields)
         self.field = Gtk.DropDown.new_from_strings([item.label for item in FIELDS])
         self.field.set_enable_search(True)
-        self.field.set_tooltip_text("Choose a setting or type to search. Destination metadata cache has explicit Off and On choices; the other fields stay unchanged.")
+        self.field.set_tooltip_text("Choose one setting to change. Search above for cache to find the persistent destination metadata On/Off setting.")
         self.field.connect("notify::selected", lambda *_: self._show_value())
         self.value_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         self.value_widget: Gtk.Widget | None = None
         self.mask_operation: Gtk.DropDown | None = None
         self.preview = Gtk.Label(xalign=0, wrap=True)
-        self.preview.set_text(f"{len(profiles)} checked profiles. Choose one field to change; other fields are preserved. Type cache in Field to change to find persistent destination metadata caching, then choose Off or On.")
+        self.preview.set_text(f"{len(profiles)} checked profiles. Choose one field to change; other fields are preserved. Search for cache, then choose Off or On.")
         self.apply = Gtk.Button(label="Preview Changes…")
         self.apply.add_css_class("suggested-action")
         self.apply.connect("clicked", self._preview_changes)
         hint = Gtk.Label(xalign=0, wrap=True)
         hint.set_text("Masks can be added to each profile without removing existing rules, or can replace that profile's whole list. Confirmation is required before anything is saved.")
         hint.add_css_class("dim-label")
+        root.append(self.field_search)
         for label, widget in (("Field to change", self.field), ("New value", self.value_box)):
             root.append(Gtk.Label(label=label, xalign=0))
             root.append(widget)
@@ -3859,11 +4047,38 @@ class BulkEditWindow(Gtk.Window):
         self.set_child(root)
         self._show_value()
 
+    def _field_definition(self):
+        selected = self.field.get_selected()
+        if selected == Gtk.INVALID_LIST_POSITION or selected >= len(self._visible_fields):
+            return None
+        return self._visible_fields[selected]
+
+    def _filter_fields(self, *_args) -> None:
+        previous = self._field_definition()
+        query = self.field_search.get_text().strip().lower()
+        self._visible_fields = [
+            item for item in FIELDS
+            if not query or query in item.label.lower() or query in item.key.replace("_", " ")
+        ]
+        self.field.set_model(Gtk.StringList.new([item.label for item in self._visible_fields]))
+        selected = next(
+            (index for index, item in enumerate(self._visible_fields) if previous and item.key == previous.key),
+            0,
+        )
+        self.field.set_selected(selected)
+        self._show_value()
+
     def _show_value(self) -> None:
         while child := self.value_box.get_first_child():
             self.value_box.remove(child)
-        definition = FIELDS[self.field.get_selected()]
+        definition = self._field_definition()
         self.mask_operation = None
+        self.apply.set_sensitive(definition is not None)
+        if definition is None:
+            self.value_widget = Gtk.Label(label="No matching settings", xalign=0)
+            self.preview.set_text("No settings match this search. No profile was changed.")
+            self.value_box.append(self.value_widget)
+            return
         if definition.kind == "choice":
             self.value_widget = Gtk.DropDown.new_from_strings([label for label, _value in definition.options])
         elif definition.kind in {"number", "decimal"}:
@@ -3887,7 +4102,10 @@ class BulkEditWindow(Gtk.Window):
         self.value_box.append(self.value_widget)
 
     def _preview_changes(self, *_args) -> None:
-        definition = FIELDS[self.field.get_selected()]
+        definition = self._field_definition()
+        if definition is None:
+            self.preview.set_text("No setting is selected. No profile was changed.")
+            return
         if definition.kind == "choice":
             assert isinstance(self.value_widget, Gtk.DropDown)
             value = definition.options[self.value_widget.get_selected()][1]

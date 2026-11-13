@@ -26,7 +26,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - **New profile** is the first header action.
 - **Profiles → New window**, or the desktop launcher's **New Window** action, opens an independent main view in the same OFS process. Selections, filters, scrolling, and dialogs are per window. Shared per-profile operation locks reject duplicate scans, whole-folder copies, and comparison-plan copies across windows; different profiles can proceed independently. Existing serial/chunked behavior within each copy is unchanged. Closing an overview does not cancel its active scan or strand the resulting preview: the operation retains OFS until its result window is attached and its profile claim is released.
 - Profile Editor groups existing controls into **General**, **Filters**, **Comparison**, and **Recovery & Safety** tabs. Only the current tab's content scrolls. **Cancel**, **Save**, and (for existing profiles) **Restore Older…** remain in a fixed footer outside the tab. Cancel saves nothing; saving from any tab preserves noncurrent-tab settings, imported flags, notes, and path/history behavior.
-- **Multi Edit** previews and confirms one field across checked profiles. It includes cache Off/On, sync/exclusion modes, Older/deletion safeguards, symlink and metadata controls, timestamps, volume labels, size limits, and fractional-day age limits. Other fields remain unchanged. Masks can be added without duplicating existing rules or can replace the entire mask list.
+- **Multi Edit** previews and confirms one field across checked profiles. Its visible **Search settings** field filters the setting list; `cache` exposes persistent destination metadata Off/On. Keyboard search remains available too. It includes cache Off/On, sync/exclusion modes, Older/deletion safeguards, symlink and metadata controls, timestamps, volume labels, size limits, and fractional-day age limits. Other fields remain unchanged. Masks can be added without duplicating existing rules or can replace the entire mask list.
 - **Replace paths in checked profiles…** handles changed mount points and moved folders:
   - Replace matching text in both paths, Left only, or Right only.
   - Use ordinary case-sensitive text replacement or complete-folder-prefix matching.
@@ -49,6 +49,11 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - File and folder **Add exclusion…** dialogs let the user choose profile/global scope, a full relative path or name at any depth, and edit the rule before saving. Global additions preserve existing rules and mode; current live previews recheck displayed, queued, future, and final rows.
 - Leading `*/folder` masks match both a root-level folder and nested copies: for example `*/cache` stops discovery at both `cache` and `folder/cache`, including their descendants.
 - Per-profile minimum/maximum size and minimum/maximum age limits leave out-of-range files under **Skipped**, without copying or deleting them.
+
+## Global activity history
+
+- The overview **History** button lists scans, comparison copies, and explicit new-folder copies across profiles, newest first. Compact records persist across restarts in `run-history.jsonl`; GUI and CLI use the same store.
+- Read-only backfill includes existing OFS copy logs without modifying or duplicating them. Search and Refresh retain context. View Log opens only an existing selected log; there is no replay or history deletion. Scan summaries do not create full copy logs or change last-copy results/profile file-history databases.
 
 ## Scanning and comparison
 

@@ -6,6 +6,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Added
 
+- Global run history lists scans and copy operations across profiles, survives restarts, backfills existing copy logs read-only, and offers search, refresh, and guarded log opening.
 - Merged scanning, comparison, and comparison-copy progress into a live preview. Pending metadata fills the result tree without becoming a copy/delete decision.
 - Live Ignore/Exclude works across current discovery, queued rows, and final results, with synchronized temporary rules and separate cache/history protection.
 - Collapsible scan and copy panels provide more result-tree room. Completed operations are marked and use subdued rows without changing the plan.
@@ -30,6 +31,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Detached-overview copying retains profile lock/release and cross-window power safeguards; the common copy entry point directly refuses incomplete or partial scans.
 - Normal activation restores or creates the main OFS window rather than focusing an empty detached scan-control window.
 - Keep scan paths one line without resizing the path box from changing content, and keep context-menu action fonts consistent.
+- Completed preview/result closure returns to the existing owner overview's selected profile and scroll position using a profile-name anchor and post-layout restoration, without changing checked profiles or reopening deliberately closed overviews.
+- Multi Edit's visible Search settings field filters settings and exposes persistent cache Off/On without relying solely on keyboard search.
 
 ## [0.3.0] - 2026-11-12
 
