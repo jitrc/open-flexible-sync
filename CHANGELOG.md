@@ -4,6 +4,16 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-12
+
+### Added
+
+- The comparison has a **Reason** selector beside the other filters: Show All, Time, Size, Bigger source, Smaller source, Binary, Only source, and Only destination. It only changes which rows are shown, keeps parent folders while any matching file under them is visible, and never changes the plan.
+
+### Fixed
+
+- Pointing a folder at the side that holds the file now turns its delete rows into copies from that side. Reversing a destination-only folder brings the files back instead of only flipping the red delete arrow to the other side.
+
 ## [0.4.5] - 2026-11-12
 
 ### Added

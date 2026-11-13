@@ -186,8 +186,9 @@ def scan_profile(
     left = _drop_global(read_side("Left", left_root, False), masks, mode)
     right = _drop_global(read_side("Right", right_root, True), masks, mode)
     bytes_read = 0
+    binary_diff: set[str] = set()
     if profile.binary_compare:
-        bytes_read = _equalize_identical(profile, left_root, right_root, left, right, control=control)
+        bytes_read, binary_diff = _equalize_identical(profile, left_root, right_root, left, right, control=control)
     with rules_lock:
         changes = build_plan(
             profile,
@@ -227,7 +228,7 @@ def scan_profile(
         note=" ".join([part for part in (note, *cache_notes) if part]),
         cached=bool(cached_sides),
         partial_sides=tuple(partial_sides),
-        listing=build_listing(left, right, changes, profile),
+        listing=build_listing(left, right, changes, profile, binary_diff=binary_diff),
     )
 
 
@@ -277,10 +278,14 @@ def _equalize_identical(
     right: dict[str, FileStat],
     *,
     control=None,
-) -> int:
-    """If both sides have the same bytes, pretend the metadata matches too."""
+) -> tuple[int, set[str]]:
+    """If both sides have the same bytes, pretend the metadata matches too.
+
+    Returns the bytes read and the relative paths whose bytes differ.
+    """
 
     read = 0
+    differing: set[str] = set()
     for rel in set(left) & set(right):
         if left[rel].kind != "file" or right[rel].kind != "file":
             continue
@@ -302,4 +307,6 @@ def _equalize_identical(
         if files_identical(left_root / rel, right_root / rel):
             current = right[rel]
             right[rel] = FileStat(left[rel].size, left[rel].mtime, current.kind, current.target, current.mode, current.uid, current.gid)
-    return read
+        else:
+            differing.add(rel)
+    return read, differing

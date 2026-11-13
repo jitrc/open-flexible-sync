@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 
 from ofs.compare import Action, Change, FileStat, equal_reason, format_bytes
-from ofs.model import Profile
+from ofs.model import Direction, Profile
 from ofs.store import config_dir
 
 DELETE = {Action.DELETE_LEFT, Action.DELETE_RIGHT}
@@ -23,6 +23,24 @@ class Listed:
     change: Change
     on_left: bool
     on_right: bool
+    size_relation: str = ""
+    binary_diff: bool = False
+
+
+def _size_relation(profile: Profile, rel: str, left: dict, right: dict, change: Change) -> str:
+    """Bigger/smaller from the copy source's point of view, or an empty string."""
+
+    if rel not in left or rel not in right:
+        return ""
+    if left[rel].size == right[rel].size:
+        return ""
+    if change.action not in (Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT, Action.ASK):
+        return ""
+    source_left = profile.direction != Direction.RIGHT_TO_LEFT
+    if profile.direction == Direction.BOTH:
+        source_left = change.action != Action.COPY_RIGHT_TO_LEFT
+    source, other = (left[rel], right[rel]) if source_left else (right[rel], left[rel])
+    return "bigger" if source.size > other.size else "smaller"
 
 
 def build_listing(
@@ -30,6 +48,8 @@ def build_listing(
     right: dict[str, FileStat],
     changes: list[Change],
     profile: Profile | None = None,
+    *,
+    binary_diff: frozenset[str] | set[str] = frozenset(),
 ) -> list[Listed]:
     """Every file the scan saw, with unchanged rows included so the filters can hide them."""
 
@@ -45,7 +65,8 @@ def build_listing(
             if profile is not None and rel in left and rel in right:
                 reason = equal_reason(profile, left[rel], right[rel])
             change = Change(rel, Action.UNCHANGED, reason, stat.size)
-        rows.append(Listed(change, rel in left, rel in right))
+        relation = "" if profile is None else _size_relation(profile, rel, left, right, change)
+        rows.append(Listed(change, rel in left, rel in right, relation, rel in binary_diff))
     return rows
 
 
@@ -57,6 +78,7 @@ def matches(
     moved: str = "show",
     deletes: str = "show",
     adjust: str = "right",
+    reason: str = "all",
 ) -> bool:
     action = row.change.action
     if state == "affected" and action in (Action.UNCHANGED, Action.SKIPPED):
@@ -86,6 +108,20 @@ def matches(
     if deletes == "only" and not is_delete:
         return False
     if deletes == "hide" and is_delete:
+        return False
+    if reason == "time" and "newer" not in row.change.reason:
+        return False
+    if reason == "size" and not row.change.reason.startswith("same time, different size"):
+        return False
+    if reason == "bigger" and row.size_relation != "bigger":
+        return False
+    if reason == "smaller" and row.size_relation != "smaller":
+        return False
+    if reason == "binary" and not row.binary_diff:
+        return False
+    if reason == "only_source" and row.change.reason not in ("only on source", "only on left"):
+        return False
+    if reason == "only_destination" and row.change.reason not in ("only on destination", "only on right"):
         return False
     return True
 
@@ -155,25 +191,41 @@ def file_detail(change: Change) -> str:
     return "  ".join(parts)
 
 
-def point_change(change: Change, toward: str) -> Change:
+def point_change(
+    change: Change,
+    toward: str,
+    *,
+    on_left: bool | None = None,
+    on_right: bool | None = None,
+) -> Change:
     """Aim one planned file at the right folder or the left folder.
 
-    Unchanged and skipped files stay. A copy or an ask becomes a copy.
-    A move stays a move. A delete stays a delete, on the chosen side.
+    Unchanged and skipped files stay. A copy or an ask becomes a copy toward
+    the chosen folder. A move stays a move. A delete becomes a copy from that
+    folder when the file is really there, so reversing the direction brings a
+    destination-only file back instead of deleting the other side. When the
+    pointed side has no copy, the delete is left untouched.
     """
 
     if change.action in (Action.UNCHANGED, Action.SKIPPED):
         return change
-    if toward == "right":
+    to_right = toward != "left"
+    if change.action in DELETE:
+        # Deletes only become copies when the pointed side really holds the
+        # file. Otherwise the scan's deletion stays exactly as it was.
+        source_present = on_left if to_right else on_right
+        if source_present is False:
+            return change
+        new = Action.COPY_LEFT_TO_RIGHT if to_right else Action.COPY_RIGHT_TO_LEFT
+    elif to_right:
         mapped = {
             Action.COPY_LEFT_TO_RIGHT: Action.COPY_LEFT_TO_RIGHT,
             Action.COPY_RIGHT_TO_LEFT: Action.COPY_LEFT_TO_RIGHT,
             Action.ASK: Action.COPY_LEFT_TO_RIGHT,
             Action.MOVE_ON_RIGHT: Action.MOVE_ON_RIGHT,
             Action.MOVE_ON_LEFT: Action.MOVE_ON_RIGHT,
-            Action.DELETE_RIGHT: Action.DELETE_RIGHT,
-            Action.DELETE_LEFT: Action.DELETE_RIGHT,
         }
+        new = mapped.get(change.action, change.action)
     else:
         mapped = {
             Action.COPY_LEFT_TO_RIGHT: Action.COPY_RIGHT_TO_LEFT,
@@ -181,10 +233,8 @@ def point_change(change: Change, toward: str) -> Change:
             Action.ASK: Action.COPY_RIGHT_TO_LEFT,
             Action.MOVE_ON_RIGHT: Action.MOVE_ON_LEFT,
             Action.MOVE_ON_LEFT: Action.MOVE_ON_LEFT,
-            Action.DELETE_RIGHT: Action.DELETE_LEFT,
-            Action.DELETE_LEFT: Action.DELETE_LEFT,
         }
-    new = mapped.get(change.action, change.action)
+        new = mapped.get(change.action, change.action)
     if new == change.action:
         return change
     return Change(change.rel, new, "chosen in preview", change.size, change.dest_rel)

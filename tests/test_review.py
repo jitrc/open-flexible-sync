@@ -110,15 +110,28 @@ def test_pointing_a_folder_keeps_unchanged_files():
     assert [item.action for item in pointed] == [
         Action.COPY_RIGHT_TO_LEFT,
         Action.COPY_RIGHT_TO_LEFT,
-        Action.DELETE_LEFT,
+        Action.COPY_RIGHT_TO_LEFT,
         Action.MOVE_ON_LEFT,
         Action.UNCHANGED,
         Action.SKIPPED,
     ]
     assert pointed[0].reason == "chosen in preview"
     assert pointed[0].dest_rel == "elsewhere"
+    assert pointed[2].reason == "chosen in preview"
     assert pointed[3].dest_rel == "1960s/e.mp3"
     assert point_change(pointed[0], "left") is pointed[0]
+
+
+def test_pointing_a_delete_copies_only_when_the_file_is_on_that_side():
+    extra_right = Change("only-right.txt", Action.DELETE_RIGHT, "only on destination", 5)
+    extra_left = Change("only-left.txt", Action.DELETE_LEFT, "only on source", 6)
+
+    # Reversing a destination-only delete brings the right file back.
+    assert point_change(extra_right, "left", on_left=False, on_right=True).action == Action.COPY_RIGHT_TO_LEFT
+    # Pointing right has no left copy to copy, so the delete stays as scanned.
+    assert point_change(extra_right, "right", on_left=False, on_right=True).action == Action.DELETE_RIGHT
+    assert point_change(extra_left, "right", on_left=True, on_right=False).action == Action.COPY_LEFT_TO_RIGHT
+    assert point_change(extra_left, "left", on_left=True, on_right=False).action == Action.DELETE_LEFT
 
 
 def test_filters_combine():
@@ -220,3 +233,74 @@ def test_unchanged_listing_rows_name_the_comparison_reason():
     plain = Profile(name="plain", left="/l", right="/r")
     rows = build_listing({"a": left["same.txt"]}, {"a": left["same.txt"]}, [], plain)
     assert rows[0].change.reason == "unchanged: same size and time"
+
+
+def test_reason_filter_selects_by_comparison_reason():
+    time_row = Listed(Change("newer.txt", Action.COPY_LEFT_TO_RIGHT, "source is newer", 1), True, True)
+    size_row = Listed(Change("size.txt", Action.COPY_LEFT_TO_RIGHT, "same time, different size", 1), True, True)
+    bigger = Listed(Change("bigger.txt", Action.COPY_LEFT_TO_RIGHT, "same time, different size", 1), True, True, "bigger")
+    smaller = Listed(Change("smaller.txt", Action.COPY_LEFT_TO_RIGHT, "same time, different size", 1), True, True, "smaller")
+    binary = Listed(Change("binary.txt", Action.COPY_LEFT_TO_RIGHT, "source is newer", 1), True, True, "", True)
+    only_source = Listed(Change("left-only.txt", Action.COPY_LEFT_TO_RIGHT, "only on source", 1), True, False)
+    only_dest = Listed(Change("right-only.txt", Action.DELETE_RIGHT, "only on destination", 1), False, True)
+
+    assert matches(time_row, reason="time") and not matches(size_row, reason="time")
+    assert matches(size_row, reason="size") and not matches(time_row, reason="size")
+    assert matches(bigger, reason="bigger") and not matches(smaller, reason="bigger")
+    assert matches(smaller, reason="smaller") and not matches(bigger, reason="smaller")
+    assert matches(binary, reason="binary") and not matches(time_row, reason="binary")
+    assert matches(only_source, reason="only_source") and not matches(only_dest, reason="only_source")
+    assert matches(only_dest, reason="only_destination") and not matches(only_source, reason="only_destination")
+    assert matches(size_row, reason="all")
+
+
+def test_listing_marks_source_size_relation_and_binary_differences():
+    left = {
+        "bigger.bin": FileStat(200, 10),
+        "smaller.bin": FileStat(50, 20),
+        "same.bin": FileStat(30, 30),
+        "diff.bin": FileStat(40, 40),
+    }
+    right = {
+        "bigger.bin": FileStat(100, 10),
+        "smaller.bin": FileStat(80, 20),
+        "same.bin": FileStat(30, 30),
+        "diff.bin": FileStat(40, 20),
+    }
+    changes = [
+        Change("bigger.bin", Action.COPY_LEFT_TO_RIGHT, "same time, different size", 200),
+        Change("smaller.bin", Action.COPY_LEFT_TO_RIGHT, "same time, different size", 50),
+        Change("same.bin", Action.UNCHANGED, "unchanged", 30),
+        Change("diff.bin", Action.COPY_LEFT_TO_RIGHT, "source is newer", 40),
+    ]
+    profile = Profile(name="relations", left="/l", right="/r")
+    rows = {
+        row.change.rel: row
+        for row in build_listing(left, right, changes, profile, binary_diff={"diff.bin"})
+    }
+    assert rows["bigger.bin"].size_relation == "bigger"
+    assert rows["smaller.bin"].size_relation == "smaller"
+    assert rows["same.bin"].size_relation == ""
+    assert rows["diff.bin"].binary_diff is True
+    assert rows["bigger.bin"].binary_diff is False
+
+    reversed_profile = Profile(name="relations", left="/l", right="/r", direction="right_to_left")
+    reversed_rows = {
+        row.change.rel: row
+        for row in build_listing(left, right, changes, reversed_profile)
+    }
+    # Right is the copy source now, so the same pair looks bigger the other way.
+    assert reversed_rows["bigger.bin"].size_relation == "smaller"
+    assert reversed_rows["smaller.bin"].size_relation == "bigger"
+
+
+def test_reason_filter_keeps_parent_folders_of_visible_files():
+    rows = [
+        Listed(Change("keep/a.txt", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False),
+        Listed(Change("keep/b.txt", Action.DELETE_RIGHT, "only on destination", 20), False, True),
+        Listed(Change("gone/c.txt", Action.DELETE_RIGHT, "only on destination", 30), False, True),
+    ]
+    visible = [row for row in rows if matches(row, reason="only_source")]
+    tree = build_tree(visible)
+    assert [node.name for node in tree] == ["keep"]
+    assert [child.name for child in tree[0].children] == ["a.txt"]

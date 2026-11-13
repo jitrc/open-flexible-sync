@@ -12,7 +12,7 @@ from ofs.apply import CopyProgress
 from ofs.compare import Action, Change, FileStat
 from ofs.jobs import JobResult
 from ofs.model import ExclusionMode, Profile, SyncMode, TimestampRules
-from ofs.review import Listed
+from ofs.review import Listed, build_listing
 from ofs.scan import ScanResult, scan_profile
 from ofs.store import load_profiles, save_profile
 from ofs.ui import ExclusionEditor, MainWindow, PlanRow, Preview, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
@@ -3102,3 +3102,77 @@ def test_live_discovery_does_not_rebuild_layout_every_batch(tmp_path, monkeypatc
     assert seen["expand_all"] == 0
     assert seen["top"] >= 12
     assert seen["folder_expanded"] is True
+
+
+def test_reason_filter_dropdown_narrows_rows_without_changing_the_plan(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestReasonFilter")
+    profile = Profile(name="reason filter", left="/sample/left", right="/sample/right")
+    left = {"big.bin": FileStat(200, 10), "small.bin": FileStat(10, 10)}
+    right = {"big.bin": FileStat(100, 10), "small.bin": FileStat(50, 10)}
+    changes = [
+        Change("big.bin", Action.COPY_LEFT_TO_RIGHT, "same time, different size", 200),
+        Change("small.bin", Action.COPY_LEFT_TO_RIGHT, "same time, different size", 10),
+    ]
+    listing = build_listing(left, right, changes, profile)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult(changes, listing=listing), None))
+            model = preview.reason_filter.get_model()
+            seen["labels"] = [model.get_string(index) for index in range(model.get_n_items())]
+            seen["all_rows"] = preview.store.get_n_items()
+            seen["plan_before"] = [row.change.action for row in preview.rows]
+
+            preview.reason_filter.set_selected(preview.reason_values.index("bigger"))
+            seen["bigger_reason"] = preview.filters["reason"]
+            seen["bigger_rows"] = [preview.store.get_item(i).change.rel for i in range(preview.store.get_n_items())]
+
+            preview.reason_filter.set_selected(preview.reason_values.index("smaller"))
+            seen["smaller_rows"] = [preview.store.get_item(i).change.rel for i in range(preview.store.get_n_items())]
+
+            preview.reason_filter.set_selected(0)
+            seen["all_again"] = preview.store.get_n_items()
+            seen["plan_after"] = [row.change.action for row in preview.rows]
+
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["labels"][0] == "Show All"
+    assert seen["labels"][3] == "Bigger source"
+    assert seen["all_rows"] == 2
+    assert seen["bigger_reason"] == "bigger"
+    assert seen["bigger_rows"] == ["big.bin"]
+    assert seen["smaller_rows"] == ["small.bin"]
+    assert seen["all_again"] == 2
+    assert seen["plan_before"] == seen["plan_after"]
+
+
+def test_folder_direction_copies_destination_files_back(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFolderDirection")
+    profile = Profile(name="folder direction", left="/sample/left", right="/sample/right")
+    left = {}
+    right = {"AndamanTICKETS/ticket.pdf": FileStat(10, 1)}
+    changes = [Change("AndamanTICKETS/ticket.pdf", Action.DELETE_RIGHT, "only on destination", 10)]
+    listing = build_listing(left, right, changes, profile)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult(changes, listing=listing), None))
+            preview._set_folder_direction("AndamanTICKETS", "left")
+            seen["left"] = [(row.change.rel, row.change.action, row.change.reason) for row in preview.rows]
+            # Pointing back re-aims the copy, the same way any copy row is aimed.
+            preview._set_folder_direction("AndamanTICKETS", "right")
+            seen["right"] = [(row.change.rel, row.change.action) for row in preview.rows]
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["left"] == [("AndamanTICKETS/ticket.pdf", Action.COPY_RIGHT_TO_LEFT, "chosen in preview")]
+    assert seen["right"] == [("AndamanTICKETS/ticket.pdf", Action.COPY_LEFT_TO_RIGHT)]

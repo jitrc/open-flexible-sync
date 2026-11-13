@@ -2009,6 +2009,7 @@ class Preview(Gtk.Window):
         self.filters = {
             "state": "affected",
             "existence": "all",
+            "reason": "all",
             "moved": "show",
             "deletes": "show",
             "adjust": adjust,
@@ -2103,6 +2104,7 @@ class Preview(Gtk.Window):
             ("One Side", "one"),
             ("Both Sides", "both"),
         ]))
+        sidebar.append(self._reason_controls())
         sidebar.append(self._size_filter_controls())
         sidebar.append(self._radios("Moved Files", "moved", [
             ("Show", "show"),
@@ -2471,6 +2473,45 @@ class Preview(Gtk.Window):
         box.append(folder)
         box.append(status)
         return box
+
+    def _reason_controls(self) -> Gtk.Widget:
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        heading = Gtk.Label(xalign=0)
+        heading.set_markup("<b>Reason</b>")
+        box.append(heading)
+        self.reason_values = [
+            "all",
+            "time",
+            "size",
+            "bigger",
+            "smaller",
+            "binary",
+            "only_source",
+            "only_destination",
+        ]
+        self.reason_filter = Gtk.DropDown.new_from_strings([
+            "Show All",
+            "Time (newer/older)",
+            "Size (same time, different size)",
+            "Bigger source",
+            "Smaller source",
+            "Binary (contents differ)",
+            "Only source",
+            "Only destination",
+        ])
+        self.reason_filter.set_selected(0)
+        self.reason_filter.set_tooltip_text(
+            "Show rows by why they are in the plan. Display only; the plan does not change. "
+            "Bigger and Smaller compare the copy source with the other side. "
+            "Binary means binary compare read the contents and they differ. "
+            "Only source and Only destination follow the profile direction."
+        )
+        self.reason_filter.connect("notify::selected", self._reason_changed)
+        box.append(self.reason_filter)
+        return box
+
+    def _reason_changed(self, _drop_down, _param) -> None:
+        self._set_filter(reason=self.reason_values[self.reason_filter.get_selected()])
 
     def _size_filter_controls(self) -> Gtk.Expander:
         self.size_filter_expander = Gtk.Expander(label="Size filter", expanded=False)
@@ -3107,7 +3148,12 @@ class Preview(Gtk.Window):
         for item in self.rows:
             path = item.change.rel
             if path == rel or path.startswith(prefix):
-                item.change = point_change(item.change, toward)
+                item.change = point_change(
+                    item.change,
+                    toward,
+                    on_left=item.on_left,
+                    on_right=item.on_right,
+                )
         self._refill()
 
     def _ignore_folder(self, rel: str) -> None:
