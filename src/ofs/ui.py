@@ -2250,7 +2250,7 @@ class Preview(Gtk.Window):
         self._cache_sides = set(destination_sides(self.job.profile))
         self._cached_discovery.clear()
         self._fresh_discovery.clear()
-        self.scan_details = self._attach_operation_panel(progress, f"Scanning {self.job.profile.name}")
+        self.scan_details = self._attach_operation_panel(progress, "Scanning")
         self.start_button.set_label("Scanning…")
         self.start_button.set_sensitive(False)
         self.start_button.set_tooltip_text("Wait for the complete comparison, or cancel discovery")
@@ -3342,7 +3342,7 @@ class Preview(Gtk.Window):
         self.start_button.set_sensitive(False)
         progress = ProgressWindow(self, self.job.profile.name)
         self._copy_progress = progress
-        self.copy_details = self._attach_operation_panel(progress, f"Copying {self.job.profile.name}")
+        self.copy_details = self._attach_operation_panel(progress, "Copying")
         self._copy_planned = {change.rel: change for change in changes}
         self._copy_cache_invalidated = False
         self._last_copy_done = 0
@@ -3400,7 +3400,7 @@ class Preview(Gtk.Window):
         if mutating and self.job.profile.cache_destination and not self._copy_cache_invalidated:
             self._copy_cache_invalidated = True
             if self.copy_details is not None:
-                self.copy_details.set_label(f"Copying {self.job.profile.name} · cache invalidated")
+                self.copy_details.set_label("Copying · cache invalidated")
         if event.rel and event.completed > self._last_copy_done:
             self._last_copy_done = event.completed
             if change is not None and event.errors == self._last_copy_errors:
@@ -3490,12 +3490,11 @@ class ScanWindow(Gtk.Window):
         self._estimates = estimates or {}
         self._estimate = (0, 0.0)
         self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
-        self.profile_label = Gtk.Label(xalign=0, hexpand=True, ellipsize=Pango.EllipsizeMode.END)
-        self.profile_label.add_css_class("heading")
+        # The window title already names the profile; the panel leads with the
+        # reading side instead of repeating it.
         self.side_label = Gtk.Label(xalign=0, label="Reading left")
-        self.side_label.add_css_class("dim-label")
+        self.side_label.add_css_class("heading")
         heading = Gtk.Box(spacing=12)
-        heading.append(self.profile_label)
         heading.append(self.side_label)
         self.file_label = _fixed_path_label(self._place)
         self.file_label.set_text(self._place)
@@ -3559,7 +3558,6 @@ class ScanWindow(Gtk.Window):
     def _update_location(self, name: str, side: str, rel: str) -> None:
         self._new_profile(name)
         reading = "Reading right" if side == "Right" else "Reading left"
-        self.profile_label.set_text(name)
         self.side_label.set_text(reading)
         self._place = rel or "."
         self.file_label.set_tooltip_text(self._place)

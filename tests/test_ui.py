@@ -3176,3 +3176,37 @@ def test_folder_direction_copies_destination_files_back(tmp_path, monkeypatch):
     assert App().run(None) == 0
     assert seen["left"] == [("AndamanTICKETS/ticket.pdf", Action.COPY_RIGHT_TO_LEFT, "chosen in preview")]
     assert seen["right"] == [("AndamanTICKETS/ticket.pdf", Action.COPY_LEFT_TO_RIGHT)]
+
+
+def test_scan_panel_names_the_profile_only_in_the_window_title(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanNameOnce")
+    save_profile(Profile(name="named profile", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(owner.profiles[0], ScanResult([]), None))
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            seen["title"] = preview.get_title()
+            seen["expander"] = preview.scan_details.get_label()
+            seen["labels"] = []
+
+            def collect(widget):
+                child = widget.get_first_child()
+                while child is not None:
+                    if isinstance(child, Gtk.Label):
+                        seen["labels"].append(child.get_text())
+                    collect(child)
+                    child = child.get_next_sibling()
+
+            collect(preview.scan_details.get_child())
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["title"] == "named profile — Scanning"
+    assert seen["expander"] == "Scanning"
+    assert seen["labels"]
+    assert all("named profile" not in text for text in seen["labels"])
