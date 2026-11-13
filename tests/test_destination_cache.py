@@ -267,3 +267,18 @@ def test_rename_and_delete_do_not_leave_snapshots_behind(tmp_path, monkeypatch):
     save_destination(renamed, "Right", [], renamed.exclusion_mode, {"a": FileStat(1, 1)})
     delete_profile(renamed.name)
     assert not cache_module.cache_path(renamed.name).exists()
+
+
+def test_creating_a_destination_root_drops_a_snapshot_taken_before_it(tmp_path, monkeypatch):
+    from ofs.scan import create_destination_root
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    save_destination(profile, "Right", [], profile.exclusion_mode, {"gone.txt": FileStat(1, 1)})
+    Path(profile.right).rmdir()
+    assert cache_module.cache_path(profile.name).exists()
+
+    assert create_destination_root(profile) == profile.right
+
+    assert Path(profile.right).is_dir()
+    assert not cache_module.cache_path(profile.name).exists()

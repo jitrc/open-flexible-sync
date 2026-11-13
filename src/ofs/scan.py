@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from ofs.model import ExclusionMode, Profile
 from ofs.review import Listed, build_listing
 from ofs.settings import global_exclusion_mode, global_exclusions
 from ofs.volume import ensure_volume
-from ofs.walk import WalkSkipped, WalkStopped, ensure_dir, walk
+from ofs.walk import DestinationMissing, MissingFolder, WalkSkipped, WalkStopped, ensure_dir, walk
 
 
 @dataclass
@@ -31,6 +32,72 @@ class ScanResult:
     cached: bool = False
     partial_sides: tuple[str, ...] = ()
     listing: list[Listed] = field(default_factory=list)
+
+
+def missing_destination(profile: Profile) -> tuple[str, str] | None:
+    """(side, path) when a one-way profile's destination root is absent.
+
+    Two-way profiles are excluded: there is no single destination to create.
+    """
+
+    sides = destination_sides(profile)
+    if len(sides) != 1:
+        return None
+    side = sides[0]
+    path = profile.right if side == "Right" else profile.left
+    if not path or os.path.lexists(path):
+        return None
+    return side, path
+
+
+def destination_can_be_created(profile: Profile) -> bool:
+    """True when only the last folder is missing, so one mkdir is enough."""
+
+    missing = missing_destination(profile)
+    return bool(missing) and Path(missing[1]).parent.is_dir()
+
+
+def create_destination_root(profile: Profile) -> str:
+    """Create a confirmed, missing destination root and drop its stale snapshot.
+
+    Never builds intermediate folders: if the parent is gone, the volume is
+    probably unmounted, and creating a chain would write onto the wrong disk.
+    """
+
+    missing = missing_destination(profile)
+    if missing is None:
+        raise ValueError("the destination root already exists or the direction is not one-way")
+    side, path = missing
+    if not Path(path).parent.is_dir():
+        raise DestinationMissing(path, side, False)
+    # A snapshot taken before the creation would hide that the destination is
+    # empty, so remove it before a scan can reuse it.
+    invalidate_destination(profile)
+    try:
+        Path(path).mkdir()
+    except OSError as exc:
+        raise OSError(f"could not create {path}: {exc}") from exc
+    return path
+
+
+def _scan_roots(profile: Profile, create_destination: bool) -> tuple[Path, Path, str]:
+    """Resolve both roots; a one-way destination may be created after confirmation."""
+
+    sides = destination_sides(profile)
+    destination = sides[0] if len(sides) == 1 else None
+    created = ""
+    roots: dict[str, Path] = {}
+    for name, path in (("Left", profile.left), ("Right", profile.right)):
+        try:
+            roots[name] = ensure_dir(path)
+        except MissingFolder:
+            if name != destination:
+                raise
+            if not create_destination:
+                raise DestinationMissing(path, name, destination_can_be_created(profile)) from None
+            created = create_destination_root(profile)
+            roots[name] = Path(created)
+    return roots["Left"], roots["Right"], created
 
 
 def _skip_dir(
@@ -83,13 +150,13 @@ def scan_profile(
     on_stats=None,
     on_entry=None,
     force_uncached: bool = False,
+    create_destination: bool = False,
 ) -> ScanResult:
     masks = global_exclusions()
     mode = global_exclusion_mode()
     ensure_volume(profile.left, profile.left_volume)
     ensure_volume(profile.right, profile.right_volume)
-    left_root = ensure_dir(profile.left)
-    right_root = ensure_dir(profile.right)
+    left_root, right_root, created_destination = _scan_roots(profile, create_destination)
     walked = {"Left": 0, "Right": 0}
     rules_lock = getattr(control, "rules_lock", None) or nullcontext()
     session_filters_used = False
@@ -225,7 +292,17 @@ def scan_profile(
         len(right),
         bytes_read,
         discovered=sum(walked.values()),
-        note=" ".join([part for part in (note, *cache_notes) if part]),
+        note=" ".join(
+            part
+            for part in (
+                note,
+                *cache_notes,
+                f"Created the missing destination folder {created_destination}; this first copy is a full copy of the source."
+                if created_destination
+                else "",
+            )
+            if part
+        ),
         cached=bool(cached_sides),
         partial_sides=tuple(partial_sides),
         listing=build_listing(left, right, changes, profile, binary_diff=binary_diff),

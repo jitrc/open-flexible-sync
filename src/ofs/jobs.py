@@ -10,7 +10,7 @@ from ofs.model import Profile
 from ofs.run_history import record as record_run
 from ofs.scan import ScanResult, scan_profile
 from ofs.settings import record_scan_estimate
-from ofs.walk import MissingFolder, MissingVolume, WalkSkipped, WalkStopped
+from ofs.walk import DestinationMissing, MissingFolder, MissingVolume, WalkSkipped, WalkStopped
 
 
 @dataclass
@@ -60,6 +60,7 @@ def run_checked(
     on_stats=None,
     on_entry=None,
     force_uncached: bool = False,
+    create_destination: bool = False,
 ) -> list[JobResult]:
     skips = session_skips or {}
     masks = session_masks or {}
@@ -91,7 +92,14 @@ def run_checked(
                 on_stats=report_stats,
                 on_entry=None if on_entry is None else report_entry,
                 force_uncached=force_uncached,
+                create_destination=create_destination,
             )
+        except DestinationMissing as exc:
+            result = None
+            if exc.creatable:
+                error = f"destination folder is missing: {exc.path} (it can be created; its parent exists)"
+            else:
+                error = f"destination folder is missing: {exc.path} (its parent folder is missing too)"
         except MissingFolder as exc:
             result = None
             error = f"folder not found: {exc.path}"

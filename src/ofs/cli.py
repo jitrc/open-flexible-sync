@@ -11,7 +11,7 @@ from ofs.jobs import run_checked
 from ofs.legacy import import_cfg
 from ofs.model import Profile
 from ofs.store import install_imported, load_profiles, save_profile
-from ofs.walk import MissingFolder, MissingVolume
+from ofs.walk import DestinationMissing, MissingFolder, MissingVolume
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -30,11 +30,13 @@ def main(argv: list[str] | None = None) -> int:
     scan_cmd = sub.add_parser("scan", help="dry-run one profile")
     scan_cmd.add_argument("name")
     scan_cmd.add_argument("--uncached", action="store_true", help="ignore and refresh destination metadata caches")
+    scan_cmd.add_argument("--create-destination", action="store_true", help="create a missing destination root, then treat it as an empty folder")
 
     run_cmd = sub.add_parser("run", help="apply one profile")
     run_cmd.add_argument("name")
     run_cmd.add_argument("--apply", action="store_true", help="copy and delete. Without this, the command only prints the plan.")
     run_cmd.add_argument("--uncached", action="store_true", help="ignore and refresh destination metadata caches")
+    run_cmd.add_argument("--create-destination", action="store_true", help="create a missing destination root, then treat it as an empty folder")
 
     args = parser.parse_args(argv)
     if args.cmd == "import":
@@ -42,9 +44,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "list":
         return _list()
     if args.cmd == "scan":
-        return _scan(args.name, apply=False, uncached=args.uncached)
+        return _scan(args.name, apply=False, uncached=args.uncached, create_destination=args.create_destination)
     if args.cmd == "run":
-        return _scan(args.name, apply=args.apply, uncached=args.uncached)
+        return _scan(args.name, apply=args.apply, uncached=args.uncached, create_destination=args.create_destination)
     return 2
 
 
@@ -80,13 +82,22 @@ def _find(name: str) -> Profile | None:
     return None
 
 
-def _scan(name: str, *, apply: bool, uncached: bool = False) -> int:
+def _scan(name: str, *, apply: bool, uncached: bool = False, create_destination: bool = False) -> int:
     profile = _find(name)
     if profile is None:
         print(f"no profile named {name!r}", file=sys.stderr)
         return 1
     try:
-        results = run_checked([profile], checked={profile.name}, force_uncached=uncached)
+        results = run_checked(
+            [profile], checked={profile.name}, force_uncached=uncached, create_destination=create_destination
+        )
+    except DestinationMissing as exc:
+        print(
+            f"destination folder is missing: {exc.path} "
+            + ("(pass --create-destination to create it and copy everything)" if exc.creatable else "(its parent folder is missing too)"),
+            file=sys.stderr,
+        )
+        return 1
     except MissingFolder as exc:
         print(f"folder not found: {exc.path}", file=sys.stderr)
         return 1

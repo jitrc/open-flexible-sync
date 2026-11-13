@@ -26,6 +26,19 @@ class MissingFolder(MissingVolume):
         super().__init__(path)
 
 
+class DestinationMissing(MissingFolder):
+    """A one-way profile's destination root is absent while its source exists.
+
+    `creatable` says whether the parent folder is still there, so creating the
+    root is a single mkdir instead of building a path on the wrong filesystem.
+    """
+
+    def __init__(self, path: str, side: str, creatable: bool):
+        super().__init__(path)
+        self.side = side
+        self.creatable = creatable
+
+
 class WalkStopped(Exception):
     """Pause/cancel control asked the walk to stop."""
 

@@ -209,3 +209,22 @@ def test_a_missing_volume_keeps_its_own_message(tmp_path, monkeypatch):
 
     assert results[0].error == f"volume is not mounted: OFS-TEST-NOT-A-LABEL ({source})"
     assert list_history()[0].summary == f"Scan error: volume is not mounted: OFS-TEST-NOT-A-LABEL ({source})"
+
+
+def test_a_missing_destination_names_the_side_and_whether_it_can_be_created(tmp_path, monkeypatch):
+    from ofs.jobs import run_checked
+    from ofs.model import Profile
+
+    _home(tmp_path, monkeypatch)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "note.txt").write_text("data")
+    destination = tmp_path / "backup"
+    profile = Profile(name="fresh backup", left=str(source), right=str(destination))
+
+    results = run_checked([profile], checked={profile.name})
+
+    assert results[0].result is None
+    assert results[0].error == f"destination folder is missing: {destination} (it can be created; its parent exists)"
+    assert list_history()[0].summary == f"Scan error: {results[0].error}"
+    assert not destination.exists()

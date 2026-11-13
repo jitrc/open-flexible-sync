@@ -3299,3 +3299,160 @@ def test_a_newer_failed_scan_outranks_an_older_run():
     profile.last_scan_result = "2026-11-12 22:36  Complete scan: 0 files, 0 B to copy"
     assert _row_parts(profile)[2] == "result-ok"
     assert _profile_status(profile) == "clean"
+
+
+def test_a_scan_that_cannot_run_names_the_missing_path_and_the_fix(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanFailurePage")
+    missing = tmp_path / "gone"
+    right = tmp_path / "right"
+    right.mkdir()
+    save_profile(Profile(name="broken scan", left=str(missing), right=str(right)))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            from ofs.jobs import run_checked
+
+            owner = MainWindow(self)
+            profile = owner.profiles[0]
+            preview = owner._preview(JobResult(profile, ScanResult(changes=[]), None))
+            preview._finish_scan(run_checked([profile], checked={profile.name})[0])
+            seen["title"] = preview.get_title()
+            seen["notice"] = preview.notice.get_text()
+            seen["notice_visible"] = preview.notice.get_visible()
+            seen["detail"] = preview.detail.get_text()
+            seen["left"] = preview.left_status.get_text()
+            seen["start"] = preview.start_button.get_label()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["title"] == "broken scan — Scan failed"
+    assert seen["notice_visible"] is True
+    assert seen["notice"] == f"Cannot scan this profile: folder not found: {missing}"
+    assert seen["left"] == f"Left side unavailable: {missing}"
+    assert seen["detail"].startswith(f"folder not found: {missing}")
+    assert "Check the profile's Left and Right paths in Edit" in seen["detail"]
+    assert "nothing was copied, moved, or deleted" in seen["detail"]
+    assert seen["start"] == "Rescan"
+
+
+def test_a_stopped_scan_is_not_reported_as_a_failure(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanStoppedPage")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    save_profile(Profile(name="stopped scan", left=str(left), right=str(right)))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            profile = owner.profiles[0]
+            preview = owner._preview(JobResult(profile, ScanResult(changes=[]), None))
+            preview._finish_scan(JobResult(profile, None, "scan stopped"))
+            seen["title"] = preview.get_title()
+            seen["notice_visible"] = preview.notice.get_visible()
+            seen["detail"] = preview.detail.get_text()
+            seen["start"] = preview.start_button.get_label()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["title"] == "stopped scan — Scan stopped"
+    assert seen["notice_visible"] is False
+    assert seen["detail"].startswith("scan stopped.")
+    assert "Incomplete discovery is review-only" in seen["detail"]
+    assert seen["start"] == "Rescan"
+
+
+def test_a_missing_destination_is_asked_about_before_it_is_created(tmp_path, monkeypatch):
+    import ofs.ui as ui
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestCreateDestination")
+    left = tmp_path / "left"
+    left.mkdir()
+    (left / "note.txt").write_text("hello")
+    right = tmp_path / "right"
+    save_profile(Profile(name="fresh backup", left=str(left), right=str(right)))
+    seen = {"dialogs": []}
+
+    class LocalDialog:
+        def __init__(self, choice=None):
+            self.choice = choice
+
+        def choose_finish(self, _result):
+            return self.choice
+
+    class FakeAlertDialog:
+        def __init__(self):
+            self.message = ""
+            self.detail = ""
+            self.buttons = []
+            seen["dialogs"].append(self)
+
+        def set_message(self, text):
+            self.message = text
+
+        def set_detail(self, text):
+            self.detail = text
+
+        def set_buttons(self, labels):
+            self.buttons = list(labels)
+
+        def set_cancel_button(self, index):
+            self.cancel = index
+
+        def set_default_button(self, index):
+            self.default = index
+
+        def choose(self, _parent, _cancellable, callback, data):
+            self.callback = (callback, data)
+
+    monkeypatch.setattr(ui.Gtk, "AlertDialog", FakeAlertDialog)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            profile = owner.profiles[0]
+            pending = owner._missing_destinations([profile])
+            seen["pending"] = [(item[0].name, item[1], item[2]) for item in pending]
+            started = []
+            owner._start_run_names = lambda chosen, uncached=False: started.append((set(chosen), uncached))
+
+            owner._confirm_missing_destinations(pending, {profile.name}, uncached=False)
+            dialog = seen["dialogs"][-1]
+            seen["message"] = dialog.message
+            seen["detail"] = dialog.detail
+            seen["buttons"] = dialog.buttons
+            seen["cancel_index"] = (dialog.cancel, dialog.default)
+            callback, data = dialog.callback
+            callback(LocalDialog(0), None, data)
+            seen["cancelled_status"] = owner.status.get_text()
+            seen["created_after_cancel"] = right.exists()
+            seen["started_after_cancel"] = list(started)
+
+            callback(LocalDialog(1), None, data)
+            seen["created"] = right.is_dir()
+            seen["created_status"] = owner.status.get_text()
+            seen["started"] = list(started)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["pending"] == [("fresh backup", "Right", str(right))]
+    assert seen["message"] == "Create the missing destination folder?"
+    assert f"Right folder: {right}" in seen["detail"]
+    assert "treated as an empty destination" in seen["detail"]
+    assert "Nothing is deleted" in seen["detail"]
+    assert seen["buttons"] == ["Cancel", "Create and copy all"]
+    assert seen["cancel_index"] == (0, 0)
+    assert "Canceled" in seen["cancelled_status"]
+    assert seen["created_after_cancel"] is False
+    assert seen["started_after_cancel"] == []
+    assert seen["created"] is True
+    assert "Created 1 destination folder" in seen["created_status"]
+    assert seen["started"] == [({"fresh backup"}, False)]

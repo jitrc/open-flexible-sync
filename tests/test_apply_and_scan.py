@@ -411,3 +411,130 @@ def test_global_exclusion_dont_copy_deletes_an_extra_on_the_destination(tmp_path
     profile = Profile(name="p", left=str(left), right=str(right), mode=SyncMode.EXACT_MIRROR)
     changes = scan_profile(profile).changes
     assert [(item.rel, item.action) for item in changes] == [("Thumbs.db", Action.DELETE_RIGHT)]
+
+
+def test_a_missing_destination_is_creatable_and_never_created_silently(tmp_path, monkeypatch):
+    from ofs.walk import DestinationMissing
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    left = tmp_path / "left"
+    left.mkdir()
+    (left / "note.txt").write_text("hello")
+    right = tmp_path / "right"
+    profile = Profile(name="fresh backup", left=str(left), right=str(right))
+
+    try:
+        scan_profile(profile)
+    except DestinationMissing as exc:
+        assert (exc.path, exc.side, exc.creatable) == (str(right), "Right", True)
+    else:
+        raise AssertionError("expected DestinationMissing")
+    assert not right.exists()
+
+
+def test_a_confirmed_destination_is_created_and_everything_not_excluded_is_copied(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    left = tmp_path / "left"
+    (left / "sub").mkdir(parents=True)
+    (left / "keep.txt").write_text("keep")
+    (left / "skip.tmp").write_text("skip")
+    (left / "sub" / "deep.bin").write_text("deep")
+    right = tmp_path / "right"
+    profile = Profile(name="fresh backup", left=str(left), right=str(right), exclusions=["*.tmp"])
+
+    result = scan_profile(profile, create_destination=True)
+
+    assert right.is_dir()
+    assert {change.rel: change.action for change in result.changes} == {
+        "keep.txt": Action.COPY_LEFT_TO_RIGHT,
+        "sub/deep.bin": Action.COPY_LEFT_TO_RIGHT,
+    }
+    assert result.right_files == 0
+    assert f"Created the missing destination folder {right}" in result.note
+
+
+def test_a_missing_parent_is_never_created(tmp_path, monkeypatch):
+    from ofs.walk import DestinationMissing
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    left = tmp_path / "left"
+    left.mkdir()
+    deep = tmp_path / "absent-drive" / "right"
+    profile = Profile(name="unmounted", left=str(left), right=str(deep))
+
+    try:
+        scan_profile(profile)
+    except DestinationMissing as exc:
+        assert exc.creatable is False
+    else:
+        raise AssertionError("expected DestinationMissing")
+    try:
+        scan_profile(profile, create_destination=True)
+    except DestinationMissing as exc:
+        assert exc.creatable is False
+    else:
+        raise AssertionError("expected DestinationMissing")
+    assert not (tmp_path / "absent-drive").exists()
+
+
+def test_the_destination_side_follows_the_profile_direction(tmp_path, monkeypatch):
+    from ofs.model import Direction
+    from ofs.walk import DestinationMissing
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    right = tmp_path / "right"
+    right.mkdir()
+    (right / "note.txt").write_text("hello")
+    left = tmp_path / "left"
+    profile = Profile(name="reverse", left=str(left), right=str(right), direction=Direction.RIGHT_TO_LEFT)
+
+    try:
+        scan_profile(profile)
+    except DestinationMissing as exc:
+        assert (exc.path, exc.side, exc.creatable) == (str(left), "Left", True)
+    else:
+        raise AssertionError("expected DestinationMissing")
+
+    result = scan_profile(profile, create_destination=True)
+    assert left.is_dir()
+    assert [change.action for change in result.changes] == [Action.COPY_RIGHT_TO_LEFT]
+
+
+def test_a_missing_source_is_never_a_creatable_destination(tmp_path, monkeypatch):
+    from ofs.model import Direction
+    from ofs.walk import DestinationMissing, MissingFolder
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    right = tmp_path / "right"
+    right.mkdir()
+
+    source_gone = Profile(name="source gone", left=str(tmp_path / "gone"), right=str(right))
+    for direction in (None, Direction.RIGHT_TO_LEFT):
+        profile = source_gone if direction is None else Profile(
+            name="source gone", left=str(right), right=str(tmp_path / "gone"), direction=direction
+        )
+        try:
+            scan_profile(profile)
+        except DestinationMissing:
+            raise AssertionError("a missing source must not be offered for creation")
+        except MissingFolder as exc:
+            assert exc.path == str(tmp_path / "gone")
+
+
+def test_two_way_profiles_never_create_a_destination(tmp_path, monkeypatch):
+    from ofs.model import Direction
+    from ofs.walk import DestinationMissing, MissingFolder
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    left = tmp_path / "left"
+    left.mkdir()
+    right = tmp_path / "right"
+    profile = Profile(name="both ways", left=str(left), right=str(right), direction=Direction.BOTH)
+
+    try:
+        scan_profile(profile)
+    except DestinationMissing:
+        raise AssertionError("a two-way profile has no single destination to create")
+    except MissingFolder:
+        pass
+    assert not right.exists()

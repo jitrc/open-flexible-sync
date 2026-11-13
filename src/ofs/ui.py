@@ -49,7 +49,14 @@ from ofs.review import (
     without_deletes,
     write_log,
 )
-from ofs.scan import ScanResult, invalidate_cached_destinations, remember
+from ofs.scan import (
+    ScanResult,
+    create_destination_root,
+    destination_can_be_created,
+    invalidate_cached_destinations,
+    missing_destination,
+    remember,
+)
 from ofs.settings import (
     compare_command,
     global_exclusion_mode,
@@ -75,6 +82,8 @@ from ofs.store import (
     save_profile,
     validate_name_replacements,
 )
+from ofs.volume import ensure_volume
+from ofs.walk import DestinationMissing, MissingVolume
 from ofs.transfer import export_profiles, install_profile_bundle, read_profile_bundle
 
 _CFG = Path.home() / ".SuperFlexibleSynchronizer" / "SuperFlexibleSynchronizer.cfg"
@@ -1509,6 +1518,84 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
         selected = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
+        pending = self._missing_destinations(selected)
+        if pending:
+            self._confirm_missing_destinations(pending, chosen, uncached=uncached)
+            return
+        self._start_run_names(chosen, uncached=uncached)
+
+    def _missing_destinations(self, profiles: list[Profile]) -> list[tuple[Profile, str, str]]:
+        """One-way destinations that are absent but can be created in place."""
+
+        pending = []
+        for profile in profiles:
+            missing = missing_destination(profile)
+            if missing is None or not destination_can_be_created(profile):
+                continue
+            side, path = missing
+            source = profile.right if side == "Left" else profile.left
+            if not Path(source).is_dir():
+                # A missing source is a plain error; do not offer to create the other side.
+                continue
+            label = profile.right_volume if side == "Right" else profile.left_volume
+            try:
+                ensure_volume(path, label)
+            except MissingVolume:
+                continue
+            pending.append((profile, side, path))
+        return pending
+
+    def _confirm_missing_destinations(self, pending: list[tuple[Profile, str, str]], chosen: set[str], *, uncached: bool) -> None:
+        dialog = Gtk.AlertDialog()
+        if len(pending) == 1:
+            profile, side, path = pending[0]
+            dialog.set_message("Create the missing destination folder?")
+            detail = (
+                f"{profile.name}\n{side} folder: {path}\n\n"
+                "It will be created inside its existing parent folder and treated as an empty destination, "
+                "so every source file that is not excluded is copied. Nothing is deleted."
+            )
+        else:
+            lines = "\n".join(f"{profile.name}\n  {path}" for profile, _side, path in pending)
+            dialog.set_message(f"Create {len(pending)} missing destination folders?")
+            detail = (
+                f"{lines}\n\n"
+                "Each folder will be created inside its existing parent folder and treated as an empty "
+                "destination, so its source files are copied in full. Exclusions still apply. Nothing is deleted."
+            )
+        dialog.set_detail(detail)
+        dialog.set_buttons(["Cancel", "Create and copy all"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+        dialog.choose(self, None, self._create_destinations_chosen, (pending, chosen, uncached))
+
+    def _create_destinations_chosen(self, dialog, result, data) -> None:
+        pending, chosen, uncached = data
+        try:
+            choice = dialog.choose_finish(result)
+        except GLib.Error:
+            return
+        if choice != 1:
+            self.status.set_text("Canceled: the destination folder is missing, so nothing was created or scanned.")
+            return
+        created: list[str] = []
+        failures: list[str] = []
+        for profile, _side, path in pending:
+            try:
+                created.append(create_destination_root(profile))
+            except ValueError:
+                # Already created between the question and the answer.
+                continue
+            except (OSError, DestinationMissing) as exc:
+                failures.append(f"{profile.name}: {exc}")
+        if failures:
+            self.status.set_text("Could not create every destination folder: " + "; ".join(failures))
+        elif created:
+            self.status.set_text(f"Created {len(created)} destination folder(s); the first copy is a full copy.")
+        self._start_run_names(chosen, uncached=uncached)
+
+    def _start_run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
+        selected = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
         profiles = []
         already_running: set[str] = set()
         app = self._ofs_app
@@ -1721,6 +1808,12 @@ def _owner_application(owner: Gtk.Window) -> Gtk.Application | None:
 
 
 _RUN_RESULT = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2})\s+(.*)$")
+
+
+def _scan_failure(error: str | None) -> bool:
+    """A scan that could not run at all, as opposed to one the user stopped."""
+
+    return bool(error) and error.strip() not in {"scan stopped", "scan skipped"}
 
 
 def _result_parts(last_result: str, note: str) -> tuple[str, str, str]:
@@ -2265,6 +2358,9 @@ class Preview(Gtk.Window):
                 css_classes=["result-warn"],
             )
             header.append(warning)
+        self.notice = Gtk.Label(xalign=0, wrap=True, visible=False)
+        self.notice.add_css_class("result-error")
+        header.append(self.notice)
         self.sides_header = Gtk.Box(homogeneous=True, spacing=24)
         self.sides_header.append(self._side_head("Left", self.job.profile.left, self.left_status))
         self.sides_header.append(self._side_head("Right", self.job.profile.right, self.right_status))
@@ -2361,6 +2457,7 @@ class Preview(Gtk.Window):
         self.start_button.set_sensitive(False)
         self.start_button.set_tooltip_text("Wait for the complete comparison, or cancel discovery")
         self.completion_action.set_sensitive(False)
+        self.notice.set_visible(False)
         self.set_title(f"{self.job.profile.name} — Scanning")
         self._refresh_detail()
 
@@ -2514,7 +2611,12 @@ class Preview(Gtk.Window):
             progress.cancel_button.set_sensitive(False)
         if self.scan_details is not None:
             self.scan_details.set_expanded(False)
-            self.scan_details.set_label("Scan complete" if self._scan_complete else "Scan stopped / unavailable")
+            if self._scan_complete:
+                self.scan_details.set_label("Scan complete")
+            elif _scan_failure(job.error):
+                self.scan_details.set_label("Scan failed")
+            else:
+                self.scan_details.set_label("Scan stopped")
         if job.result is not None:
             result = job.result
             self.rows = list(result.listing) if result.listing else [Listed(change, False, False) for change in result.changes]
@@ -2530,18 +2632,36 @@ class Preview(Gtk.Window):
             self.completion_action.set_sensitive(not self.partial)
         else:
             self.partial = True
-            self.detail.set_text(
-                f"{job.error or 'Scan stopped'}. Incomplete discovery is review-only and cannot be applied. "
-                "Choose Rescan for a complete plan."
-            )
+            error = (job.error or "Scan stopped").strip()
+            failure = _scan_failure(job.error)
+            if failure:
+                self.set_title(f"{job.profile.name} — Scan failed")
+                self.notice.set_text(f"Cannot scan this profile: {error}")
+                self.notice.set_visible(True)
+                self._mark_unavailable_side(error)
+            else:
+                self.set_title(f"{job.profile.name} — Scan stopped")
             self.start_button.set_label("Rescan")
             self.start_button.set_sensitive(True)
             self.start_button.set_tooltip_text(
-                "Scan this profile again from the start; the rows found before the stop are shown for review only"
+                f"{error}. Rescan starts a fresh discovery." if failure
+                else "Scan this profile again from the start; the rows found before the stop are shown for review only"
             )
             self.completion_action.set_sensitive(False)
-            self.set_title(f"{job.profile.name} — Scan stopped")
         self._refill()
+
+    def _mark_unavailable_side(self, error: str) -> None:
+        """Name the side whose folder or volume the error mentions."""
+
+        sides = (
+            (self.job.profile.left, self.left_status, "Left"),
+            (self.job.profile.right, self.right_status, "Right"),
+        )
+        matching = [item for item in sides if item[0] and item[0] in error]
+        if not matching:
+            return
+        path, label, side = max(matching, key=lambda item: len(item[0]))
+        label.set_text(f"{side} side unavailable: {path}")
 
     def _close_request(self, *_args) -> bool:
         if self._scan_active and self._scan_progress is not None:
@@ -3314,7 +3434,17 @@ class Preview(Gtk.Window):
             self.detail.set_text("Live discovery is review-only. Start is unlocked only after the complete comparison.")
             return
         if not self._scan_complete:
-            self.detail.set_text(f"{self.job.error or 'Scan stopped'}. Incomplete discovery is review-only and cannot be applied.")
+            error = (self.job.error or "Scan stopped").strip()
+            if _scan_failure(self.job.error):
+                self.detail.set_text(
+                    f"{error}. Check the profile's Left and Right paths in Edit, then choose Rescan; "
+                    "nothing was copied, moved, or deleted."
+                )
+            else:
+                self.detail.set_text(
+                    f"{error}. Incomplete discovery is review-only and cannot be applied. "
+                    "Choose Rescan for a complete plan."
+                )
             return
         planned = self._planned()
         left, right = status_lines(planned)

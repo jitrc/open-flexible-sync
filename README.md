@@ -92,6 +92,7 @@ Scan and run:
 ```bash
 ./launch.sh scan "Profile name"             # scan and print a plan
 ./launch.sh scan "Profile name" --uncached  # fresh destination discovery
+./launch.sh scan "Profile name" --create-destination  # create a missing destination folder, then treat it as empty
 ./launch.sh run "Profile name"              # dry-run
 ./launch.sh run "Profile name" --apply      # apply with configured safeguards
 ```

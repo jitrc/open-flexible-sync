@@ -148,3 +148,5 @@ Local and OS-mounted folders work on either side, including SMB/CIFS, NFS, SSHFS
 
 Optional Left/Right volume labels identify the required disk. A missing folder or unexpected volume fails that profile rather than scanning the wrong disk, and a checked batch can continue with the next profile. The row says **folder not found** with the path when only the folder is gone, and **volume is not mounted** with the label and path when the disk is absent or different.
 
+A one-way profile whose **destination** root is missing is different: if its parent folder still exists and the volume label matches, OFS asks before doing anything. **Create and copy all** creates that single folder, invalidates any destination snapshot from before it existed, and scans it as an empty destination, so every source file that is not excluded is copied. Nothing is deleted. OFS never creates intermediate folders, because a missing parent usually means the disk is not mounted and building the chain would write onto the wrong filesystem. A missing source stays an error, and nothing is created without that confirmation. The CLI equivalents are `--create-destination` on `scan` and `run`.
+
