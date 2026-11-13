@@ -1768,6 +1768,14 @@ def test_scan_path_is_one_line_fixed_width_with_stats_below(tmp_path, monkeypatc
             seen["no_wrap"] = not scan.file_label.get_wrap()
             seen["bounded"] = scan.file_label.get_max_width_chars() <= 52
             seen["ellipsized"] = scan.file_label.get_layout().is_ellipsized()
+            caption = next(
+                child for child in _widgets(path_box)
+                if isinstance(child, Gtk.Label) and child.get_text() == "Current path"
+            )
+            caption_point = caption.translate_coordinates(path_box, 0, 0)
+            label_point = scan.file_label.translate_coordinates(path_box, 0, 0)
+            seen["compact"] = path_box.get_height() < 40
+            seen["inline_caption"] = abs(caption_point[1] - label_point[1]) < 6
             path_point = path_box.translate_coordinates(scan, 0, 0)
             count_point = scan.count_label.translate_coordinates(scan, 0, 0)
             seen["totals_below"] = count_point[1] >= path_point[1] + path_box.get_height()
@@ -1780,6 +1788,7 @@ def test_scan_path_is_one_line_fixed_width_with_stats_below(tmp_path, monkeypatc
     assert seen["short_height"] == seen["long_height"]
     assert seen["no_wrap"] is True
     assert seen["bounded"] is True and seen["ellipsized"] is True
+    assert seen["compact"] is True and seen["inline_caption"] is True
     assert seen["totals_below"] is True
 
 

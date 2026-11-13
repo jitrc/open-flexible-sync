@@ -102,6 +102,20 @@ def _fixed_path_label(text: str) -> Gtk.Label:
     return label
 
 
+def _path_line(caption: str, label: Gtk.Label) -> Gtk.Box:
+    """One compact row for the current path; no card, fixed height, or extra line."""
+
+    row = Gtk.Box(spacing=8, valign=Gtk.Align.CENTER)
+    row.add_css_class("scan-path")
+    heading = Gtk.Label(label=caption, xalign=0, valign=Gtk.Align.CENTER, width_chars=12)
+    heading.add_css_class("dim-label")
+    heading.set_tooltip_text("The entry being read or copied right now")
+    label.set_hexpand(True)
+    row.append(heading)
+    row.append(label)
+    return row
+
+
 def _button_icon(button, label: str, icon_name: str, *, icon_only: bool = False) -> None:
     """Use a symbolic icon without losing the action's accessible name."""
 
@@ -1955,7 +1969,7 @@ def _install_css() -> None:
         "box.profile-row:hover { background-color: alpha(@accent_bg_color, 0.12); }"
         "box.profile-row.profile-selected { background-color: alpha(@accent_bg_color, 0.16); outline: 2px solid alpha(@accent_color, 0.7); outline-offset: -2px; }"
         ".history-list row:selected label { color: @theme_selected_fg_color; }"
-        "box.scan-path { padding: 10px; border-radius: 8px; border: 1px solid alpha(@theme_fg_color, 0.12); background-color: alpha(@theme_fg_color, 0.035); }"
+        "box.scan-path { padding: 2px 2px 4px 2px; border-bottom: 1px solid alpha(@theme_fg_color, 0.10); }"
         "label.result-ok { color: @success_color; }"
         "label.result-error { color: @error_color; }"
         "label.result-warn { color: @warning_color; }"
@@ -3347,13 +3361,7 @@ class ScanWindow(Gtk.Window):
         heading.append(self.side_label)
         self.file_label = _fixed_path_label(self._place)
         self.file_label.set_text(self._place)
-        path_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        path_box.add_css_class("scan-path")
-        path_box.set_size_request(-1, 78)
-        path_caption = Gtk.Label(xalign=0, label="Current path")
-        path_caption.add_css_class("dim-label")
-        path_box.append(path_caption)
-        path_box.append(self.file_label)
+        path_box = _path_line("Current path", self.file_label)
         self.count_label = Gtk.Label(xalign=0, wrap=True)
         self._update_counts()
         self.bar = Gtk.ProgressBar(hexpand=True)
@@ -3517,13 +3525,7 @@ class ProgressWindow(Gtk.Window):
         self._paused_total = 0.0
         self.latest: CopyProgress | None = None
         self.file_label = _fixed_path_label("Starting…")
-        path_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        path_box.add_css_class("scan-path")
-        path_box.set_size_request(-1, 78)
-        path_caption = Gtk.Label(xalign=0, label="Current file")
-        path_caption.add_css_class("dim-label")
-        path_box.append(path_caption)
-        path_box.append(self.file_label)
+        path_box = _path_line("Current file", self.file_label)
         self.file_bar = Gtk.ProgressBar(show_text=True)
         self.file_count = Gtk.Label(xalign=0)
         self.count_label = Gtk.Label(xalign=0)

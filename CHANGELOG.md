@@ -4,6 +4,12 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-12
+
+### Changed
+
+- The scan and copy panels show the current path as one compact row with an inline caption instead of a bordered card, freeing about 60 px of height for the result tree while keeping the path ellipsized, selectable, and fully available in its tooltip.
+
 ## [0.4.1] - 2026-11-12
 
 ### Fixed
@@ -106,7 +112,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.2.0...v0.3.0
