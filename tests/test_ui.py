@@ -3236,7 +3236,7 @@ def test_row_parts_prefer_an_applied_run_and_fall_back_to_the_last_scan():
     )
     assert _row_parts(scanned) == ("2026-11-12 22:36", "Scan error: folder not found: /sample/left", "result-error")
     assert _profile_status(scanned) == "errors"
-    scanned.last_result = "2026-11-11 10:00  0 copied, 0 deleted, 0 moved"
+    scanned.last_result = "2026-11-13 10:00  0 copied, 0 deleted, 0 moved"
     assert _row_parts(scanned)[2] == "result-ok"
     assert _profile_status(scanned) == "clean"
     fresh = Profile(name="never touched", left="/sample/left", right="/sample/right", note="Nothing to be done")
@@ -3275,3 +3275,27 @@ def test_a_failed_scan_reaches_the_overview_row_without_a_prior_run(tmp_path, mo
     assert seen["label"] == f"folder not found: {missing}"
     assert "result-error" in seen["tones"]
     assert seen["icons"] and seen["icons"][0].endswith(f"folder not found: {missing}")
+
+
+def test_a_newer_failed_scan_outranks_an_older_run():
+    from ofs.ui import _last_activity, _profile_status, _row_parts
+
+    profile = Profile(
+        name="was clean then broke",
+        left="/sample/left",
+        right="/sample/right",
+        last_result="2026-11-10 12:00  0 copied, 0 deleted, 0 moved",
+        last_scan_result="2026-11-12 22:36  Scan error: folder not found: /sample/left",
+    )
+    assert _row_parts(profile)[1:] == ("Scan error: folder not found: /sample/left", "result-error")
+    assert _profile_status(profile) == "errors"
+    assert _last_activity(profile) == profile.last_scan_result
+
+    profile.last_scan_result = "2026-11-09 22:36  Scan error: folder not found: /sample/left"
+    assert _row_parts(profile)[2] == "result-ok"
+    assert _profile_status(profile) == "clean"
+    assert _last_activity(profile) == profile.last_result
+
+    profile.last_scan_result = "2026-11-12 22:36  Complete scan: 0 files, 0 B to copy"
+    assert _row_parts(profile)[2] == "result-ok"
+    assert _profile_status(profile) == "clean"

@@ -6,7 +6,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Added
 
-- A profile that has never been copied now shows its last scan attempt in the overview row, with date and colour, so a folder that was renamed or moved reaches a visible error instead of an empty "Never run" row. A completed scan stays informational and never claims a clean sync.
+- A profile that has never been copied now shows its last scan attempt in the overview row, with date and colour, so a folder that was renamed or moved reaches a visible error instead of an empty "Never run" row. A newer failed scan also outranks an older successful run, because it describes the profile's current state; a completed scan stays informational and never claims a clean sync.
 
 ### Fixed
 

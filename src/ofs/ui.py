@@ -1766,27 +1766,61 @@ def _scan_parts(text: str, note: str = "") -> tuple[str, str, str]:
     return when, body, tone
 
 
+def _timestamp(text: str) -> str:
+    match = _RUN_RESULT.match(text.strip())
+    return match.group(1) if match else ""
+
+
+def _not_before(when: str, other: str) -> bool:
+    """True when `when` is missing, unparsable, or not older than `other`."""
+
+    if not other:
+        return True
+    if not when:
+        return False
+    try:
+        return time.mktime(time.strptime(when, "%Y-%m-%d %H:%M")) >= time.mktime(time.strptime(other, "%Y-%m-%d %H:%M"))
+    except ValueError:
+        return True
+
+
 def _row_parts(profile: Profile) -> tuple[str, str, str]:
-    """Overview row: the last applied run, or the last scan when never applied."""
+    """Overview row: the latest attempt, with a failed scan outranking an older run.
+
+    A run that is newer than the last scan keeps the row, so a green check still
+    means "the last applied run was clean". A scan that failed describes the
+    profile's current state, so it replaces an older result instead of hiding
+    behind it.
+    """
 
     when, body, tone = _result_parts(profile.last_result, "")
+    scan = _scan_parts(profile.last_scan_result, "")
+    if scan[2] == "result-error" and _not_before(scan[0], when):
+        return scan
     if body:
         return when, body, tone
-    return _scan_parts(profile.last_scan_result, profile.note)
+    return scan if scan[1] else ("", profile.note, "dim-label")
 
 
 def _last_activity(profile: Profile) -> str:
-    return profile.last_result if profile.last_result.strip() else profile.last_scan_result
+    """The newer of the last run and the last scan, for the stale-days filter."""
+
+    run = profile.last_result.strip()
+    scan = profile.last_scan_result.strip()
+    if not run or not scan:
+        return run or scan
+    return scan if _not_before(_timestamp(scan), _timestamp(run)) else run
 
 
 def _profile_status(profile: Profile) -> str:
-    """Filter status: an applied run first, then a scan that failed or stopped."""
+    """Filter status follows the row: an applied run, or a newer failed scan."""
 
-    status = _result_status(profile.last_result)
-    if status == "not_run":
-        tone = _scan_parts(profile.last_scan_result)[2]
-        status = {"result-error": "errors", "result-warn": "stopped"}.get(tone, "not_run")
-    return status
+    _when, body, tone = _row_parts(profile)
+    if not body:
+        return "not_run"
+    if tone == "result-ok":
+        return "clean"
+    return {"result-error": "errors", "result-warn": "stopped"}.get(tone, "not_run")
 
 
 def _not_run_since(last_result: str, days: int, now: float | None = None) -> bool:
