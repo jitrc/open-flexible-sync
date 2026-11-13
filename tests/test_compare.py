@@ -109,6 +109,26 @@ def test_exact_mirror_leaves_same_size_files_unpaired():
     }
 
 
+def test_exact_mirror_detects_a_folder_rename_with_duplicate_names():
+    profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR, timestamps=rules(ignore_timestamp=True))
+    left = {
+        "renamed/semester one/notes.pdf": FileStat(10, 1),
+        "renamed/semester two/notes.pdf": FileStat(10, 1),
+        "renamed/unique.bin": FileStat(99, 1),
+    }
+    right = {
+        "original/semester one/notes.pdf": FileStat(10, 5),
+        "original/semester two/notes.pdf": FileStat(10, 5),
+        "original/unique.bin": FileStat(99, 5),
+    }
+    plan = {item.rel: item for item in build_plan(profile, left, right)}
+    assert plan["original/semester one/notes.pdf"].action == Action.MOVE_ON_RIGHT
+    assert plan["original/semester one/notes.pdf"].dest_rel == "renamed/semester one/notes.pdf"
+    assert plan["original/semester two/notes.pdf"].dest_rel == "renamed/semester two/notes.pdf"
+    assert plan["original/unique.bin"].dest_rel == "renamed/unique.bin"
+    assert len(plan) == 3
+
+
 def test_exact_mirror_does_not_infer_a_move_to_a_different_filename():
     profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR, timestamps=rules(ignore_timestamp=True))
     plan = {(item.rel, item.action) for item in build_plan(

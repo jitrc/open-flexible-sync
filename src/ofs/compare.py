@@ -281,6 +281,23 @@ def build_plan(
     return _pair_mirror_moves(profile, changes, left, right)
 
 
+def _trailing_folders(old: str, new: str) -> int:
+    """How many trailing folder components the two paths share, filename aside.
+
+    A renamed folder keeps everything below it, so this is what tells apart two
+    same-named, same-sized files in different subfolders.
+    """
+
+    old_parts = old.split("/")[:-1]
+    new_parts = new.split("/")[:-1]
+    score = 0
+    for old_part, new_part in zip(reversed(old_parts), reversed(new_parts)):
+        if old_part != new_part:
+            break
+        score += 1
+    return score
+
+
 def _pair_mirror_moves(
     profile: Profile,
     changes: list[Change],
@@ -292,7 +309,9 @@ def _pair_mirror_moves(
     Exact Mirror would copy the new path and delete the old one. When one file
     that exists only on the source matches one same-named file that exists only
     on the destination, under the profile's timestamp rules, that pair is a move.
-    Different filenames or ambiguous same-sized matches remain copy/delete.
+    Same-named and same-sized duplicates are told apart by how many trailing
+    folders they share, so a renamed folder still becomes moves instead of a
+    whole-tree copy plus delete. Truly ambiguous pairs remain copy/delete.
     """
 
     if profile.mode != SyncMode.EXACT_MIRROR or profile.direction == Direction.BOTH:
@@ -334,6 +353,17 @@ def _pair_mirror_moves(
         ]
         if len(hits) == 1:
             pairs.append((old, hits[0]))
+        elif hits:
+            # A renamed folder keeps its inner folders. Prefer the candidate
+            # that shares the deepest trailing folder chain, so duplicate
+            # names and sizes do not collapse a whole rename into copy/delete.
+            scores = [(_trailing_folders(old, new), new) for new in hits]
+            best = max(score for score, _new in scores)
+            if best == 0:
+                continue
+            winners = [new for score, new in scores if score == best]
+            if len(winners) == 1:
+                pairs.append((old, winners[0]))
     used = Counter(new for _, new in pairs)
     unique = [(old, new) for old, new in pairs if used[new] == 1]
     if not unique:

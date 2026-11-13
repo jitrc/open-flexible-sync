@@ -4,6 +4,10 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+### Fixed
+
+- Exact Mirror now detects a renamed folder as moves even when the archive holds thousands of same-named, same-sized files. Multiple candidates are told apart by how many trailing folders they share with the old path, so a folder renamed with a prefix or suffix still pairs file-for-file instead of becoming a whole-tree copy plus delete. True ties still stay copy/delete.
+
 ## [0.4.6] - 2026-11-12
 
 ### Added
