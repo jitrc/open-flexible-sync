@@ -4,6 +4,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-12
+
 ### Added
 
 - Global run history lists scans and copy operations across profiles, survives restarts, backfills existing copy logs read-only, and offers search, refresh, and guarded log opening.
@@ -98,7 +100,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/jitrc/open-flexible-sync/releases/tag/v0.1.0
