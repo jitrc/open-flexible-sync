@@ -4,6 +4,16 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-12
+
+### Added
+
+- The scan preview is an ordinary top-level window, so it now shows minimize, maximize/restore, and close buttons next to each other.
+
+### Fixed
+
+- Scanning a very large tree no longer freezes the preview window. Live discovery appends rows without rebuilding the whole tree layout for every batch, and newly found folders are expanded in small idle batches instead of one whole-model pass. A folder you collapse stays collapsed even when deeper folders appear under it later.
+
 ## [0.4.4] - 2026-11-12
 
 ### Fixed

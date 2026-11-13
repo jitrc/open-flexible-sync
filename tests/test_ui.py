@@ -3026,3 +3026,79 @@ def test_stopped_scan_offers_rescan_and_never_stays_on_updating(tmp_path, monkey
     assert "cannot be applied" in seen["detail"]
     assert seen["pending"] == []
     assert seen["clicked_rescan"] is True
+
+
+def test_scan_preview_is_a_normal_window_with_minimize_and_maximize(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestPreviewWindow")
+    save_profile(Profile(name="window", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(owner.profiles[0], ScanResult([]), None))
+            seen["transient"] = preview.get_transient_for()
+            seen["modal"] = preview.get_modal()
+            seen["resizable"] = preview.get_resizable()
+            seen["deletable"] = preview.get_deletable()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    # GTK only draws minimize/maximize controls on sovereign windows.
+    assert seen["transient"] is None
+    assert seen["modal"] is False
+    assert seen["resizable"] is True
+    assert seen["deletable"] is True
+
+
+def test_live_discovery_does_not_rebuild_layout_every_batch(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLiveLayout")
+    save_profile(Profile(name="live layout", left="/sample/left", right="/sample/right"))
+    seen = {"expand_all": 0}
+
+    original = Gtk.TreeView.expand_all
+    monkeypatch.setattr(Gtk.TreeView, "expand_all", lambda self: seen.__setitem__("expand_all", seen["expand_all"] + 1))
+
+    def settle(rounds=200):
+        for _ in range(rounds):
+            if not GLib.MainContext.default().pending():
+                break
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(owner.profiles[0], ScanResult([]), None))
+            preview.present()
+            progress = ScanWindow(owner)
+            preview._begin_scan(progress)
+            self.preview = preview
+            self.progress = progress
+            GLib.timeout_add(300, self.queue_rows)
+
+        def queue_rows(self):
+            preview = self.preview
+            seen["expand_all"] = 0
+            for index in range(600):
+                preview._queue_entry("Left", f"folder-{index // 50:02d}/file-{index:04d}.txt", FileStat(10, 1))
+            settle()
+            GLib.timeout_add(300, self.check)
+            return False
+
+        def check(self):
+            preview = self.preview
+            seen["top"] = preview.tree_store.iter_n_children(None)
+            first_iter = preview.tree_store.iter_nth_child(None, 0)
+            seen["folder_expanded"] = preview.view.row_expanded(preview.tree_store.get_path(first_iter))
+            self.progress.allow_close()
+            preview.close()
+            self.quit()
+            return False
+
+    assert App().run(None) == 0
+    monkeypatch.setattr(Gtk.TreeView, "expand_all", original)
+    # Expanding the whole model per 250-row batch is quadratic on huge trees.
+    assert seen["expand_all"] == 0
+    assert seen["top"] >= 12
+    assert seen["folder_expanded"] is True

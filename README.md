@@ -29,11 +29,11 @@ OFS needs **Python 3.11+ and GTK 4 on the machine**; neither is bundled.
 
 ### AppImage
 
-**[Download OFS-0.4.4 for x86_64](https://github.com/jitrc/open-flexible-sync/releases/download/v0.4.4/OFS-0.4.4-x86_64.AppImage)**
+**[Download OFS-0.4.5 for x86_64](https://github.com/jitrc/open-flexible-sync/releases/download/v0.4.5/OFS-0.4.5-x86_64.AppImage)**
 
 ```bash
-chmod +x OFS-0.4.4-x86_64.AppImage
-./OFS-0.4.4-x86_64.AppImage
+chmod +x OFS-0.4.5-x86_64.AppImage
+./OFS-0.4.5-x86_64.AppImage
 ```
 
 If GTK support is missing on Debian/Ubuntu:
@@ -50,11 +50,11 @@ sudo dnf install python3-gobject gtk4
 
 ### Tar archive
 
-For machines without AppImage, download `OFS-0.4.4-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/jitrc/open-flexible-sync/releases):
+For machines without AppImage, download `OFS-0.4.5-linux-x86_64.tar.gz` from [GitHub Releases](https://github.com/jitrc/open-flexible-sync/releases):
 
 ```bash
-tar -xzf OFS-0.4.4-linux-x86_64.tar.gz
-./OFS-0.4.4/ofs
+tar -xzf OFS-0.4.5-linux-x86_64.tar.gz
+./OFS-0.4.5/ofs
 ```
 
 ## Overview

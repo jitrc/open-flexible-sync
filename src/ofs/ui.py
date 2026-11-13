@@ -1981,7 +1981,9 @@ def _install_css() -> None:
 
 class Preview(Gtk.Window):
     def __init__(self, owner: MainWindow, job: JobResult):
-        super().__init__(transient_for=owner, title=job.profile.name)
+        # A normal top-level window, not a transient child: GTK only shows
+        # minimize/maximize/restore buttons on sovereign windows.
+        super().__init__(title=job.profile.name)
         app = _owner_application(owner)
         if app is not None:
             self.set_application(app)
@@ -2048,6 +2050,8 @@ class Preview(Gtk.Window):
         self._tree_state_overrides: dict[str, bool] = {}
         self._folder_iters = {}
         self._record_tree_state = True
+        self._expand_queue = deque()
+        self._expand_scheduled = False
         self.partial = bool(job.result.partial_sides)
         if self.partial:
             self.set_title(f"{job.profile.name} — Partial scan (review only)")
@@ -2327,13 +2331,12 @@ class Preview(Gtk.Window):
                 if existing.on_left and existing.on_right:
                     existing.change = Change(rel, Action.ASK, "Seen on both sides; awaiting comparison", stat.size)
             self._append_pending(existing)
-        if self._live_refill_pending:
+        if self._live_refill_pending and not (self._pending_tree or self._replace_tree_model):
             self._live_refill_pending = False
             self._refill()
         else:
             self._refresh_detail()
         self.shown.set_text(f"Discovered preview: {len(self._live_seen)} paths. Pending rows make no copy/delete decision.")
-        self._refresh_tree_layout()
         if self._scan_active and self._entry_queue:
             with self._entry_lock:
                 if self._entry_refresh_scheduled:
@@ -2365,6 +2368,7 @@ class Preview(Gtk.Window):
             if folder is None:
                 folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False])
                 self._folder_iters[prefix] = folder
+                self._queue_folder_expansion(prefix, folder)
             parent = folder
         current = self.tree_store.append(
             parent,
@@ -2561,10 +2565,23 @@ class Preview(Gtk.Window):
         self._refresh_tree_layout()
 
     def _remember_tree_state(self, _view, tree_iter, _path, expanded: bool) -> None:
-        if self._record_tree_state:
-            rel = self.tree_store.get_value(tree_iter, 4)
-            if rel:
-                self._tree_state_overrides[rel] = expanded
+        if not self._record_tree_state:
+            return
+        rel = self.tree_store.get_value(tree_iter, 4)
+        if not rel:
+            return
+        if expanded and self._collapsed_ancestor(rel):
+            # Expanding a child forces GTK to open its ancestors. That must not
+            # overwrite a deliberate collapse of the parent folder.
+            return
+        self._tree_state_overrides[rel] = expanded
+
+    def _collapsed_ancestor(self, rel: str) -> bool:
+        parts = rel.split("/")
+        for depth in range(1, len(parts)):
+            if self._tree_state_overrides.get("/".join(parts[:depth])) is False:
+                return True
+        return False
 
     def _refresh_tree_layout(self) -> None:
         self._record_tree_state = False
@@ -2573,17 +2590,64 @@ class Preview(Gtk.Window):
                 self.view.expand_all()
             else:
                 self.view.collapse_all()
+            self._apply_tree_overrides()
+        finally:
+            self._record_tree_state = True
+
+    def _apply_tree_overrides(self) -> None:
+        self._record_tree_state = False
+        try:
             for rel, expanded in self._tree_state_overrides.items():
                 tree_iter = self._folder_iters.get(rel)
                 if tree_iter is None:
                     continue
+                if expanded and self._collapsed_ancestor(rel):
+                    # expand_to_path would force a collapsed ancestor open.
+                    continue
                 path = self.tree_store.get_path(tree_iter)
                 if expanded:
-                    self.view.expand_to_path(path)
+                    self.view.expand_row(path, False)
                 else:
                     self.view.collapse_row(path)
         finally:
             self._record_tree_state = True
+
+    def _queue_folder_expansion(self, rel: str, folder_iter) -> None:
+        """Expand a folder only after it has children, in bounded idle batches.
+
+        Expanding the whole model after every 250-row batch is quadratic on
+        very large trees and makes the window unresponsive during discovery.
+        """
+
+        if not self._tree_default_expanded or not self._tree_state_overrides.get(rel, True):
+            return
+        if self._collapsed_ancestor(rel):
+            # Expanding this folder would force a collapsed ancestor open.
+            return
+        self._expand_queue.append((rel, folder_iter))
+        if self._expand_scheduled:
+            return
+        self._expand_scheduled = True
+        GLib.idle_add(self._expand_some)
+
+    def _expand_some(self) -> bool:
+        self._expand_scheduled = False
+        for _ in range(_PREVIEW_BATCH_SIZE):
+            if not self._expand_queue:
+                break
+            _rel, folder_iter = self._expand_queue.popleft()
+            if not self._tree_state_overrides.get(_rel, True) or self._collapsed_ancestor(_rel):
+                continue
+            path = self.tree_store.get_path(folder_iter)
+            if path is None:
+                continue
+            if not self.view.row_expanded(path):
+                self.view.expand_row(path, False)
+        if self._expand_queue:
+            self._expand_scheduled = True
+            return True
+        self._apply_tree_overrides()
+        return False
 
     def _radios(self, title: str, key: str, options: list[tuple[str, str]]) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -2653,6 +2717,8 @@ class Preview(Gtk.Window):
         self.view.set_model(self.tree_store)
         self._folder_iters = {}
         self._file_iters = {}
+        # Iterators from the old model must never be expanded in the new one.
+        self._expand_queue.clear()
 
     def _node_values(self, node) -> list:
         label = node.name if node.is_file else f"{node.name}    {node.size_text}"
@@ -2690,6 +2756,7 @@ class Preview(Gtk.Window):
                 self.store.append(PlanRow(self._visible_changes[node.rel]))
             else:
                 self._folder_iters[node.rel] = current
+                self._queue_folder_expansion(node.rel, current)
             self._pending_tree.extend((current, child) for child in reversed(node.children))
         if self._pending_tree:
             return True
@@ -2697,7 +2764,12 @@ class Preview(Gtk.Window):
             self._live_refill_pending = False
             self._refill()
             return False
-        self._refresh_tree_layout()
+        if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD:
+            # Expansion is queued per folder in bounded idle batches; the
+            # override pass is cheap and keeps manual collapse authoritative.
+            self._apply_tree_overrides()
+        else:
+            self._refresh_tree_layout()
         self._refresh_detail()
         return False
 
