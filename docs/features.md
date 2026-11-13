@@ -83,6 +83,15 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - **Cached metadata can miss changes made by other programs while the cache is valid.** After external changes, choose **Run uncached** in the header, or use `scan NAME --uncached` / `run NAME --uncached [--apply]`. This is a one-run override and does not turn off the saved setting.
 - A cache is not the file-history SQLite database, stored hashes, content-addressed storage, or post-copy verification. Metadata-only comparison cannot prove equal contents; optional binary comparison still performs its direct byte comparison on candidates.
 
+## Bounded scans (sets)
+
+- Settings has **Scan in sets of (files, 0 = one complete scan)**. A non-zero value bounds memory on very large trees: OFS walks whole root names in sorted order, stops the set once it reaches that many files, and shows the set like any other complete preview, so **Start** copies it normally.
+- Each set is complete for its own root names, so deletes, moves, and the deletion safeguards apply inside it. Every root name belongs to exactly one set; a set never overlaps another or skips one.
+- After a set finishes copying without errors or cancellation, OFS scans the next set in the same window automatically. Its copy still needs the normal Start, so no file operation ever continues on its own.
+- The preview title and detail line name the set (`Set <first> … <last>`) and whether more remain. Rescan repeats the current set; a normal scan still starts from the beginning.
+- A single root folder larger than the set size cannot be split further, so that set is as large as that folder.
+- Set scans deliberately skip the destination metadata cache and the file-history baseline: a per-set snapshot or baseline would claim to describe the whole tree. Cross-set moves may therefore appear as a copy plus a delete, which is slower but copies the same bytes.
+
 ## Preview and one-run actions
 
 - The comparison is a folder tree with file sizes, `L ──▶ R` / `L ◀── R` direction diagrams, folder action counts, and per-side copy/move/delete byte totals. **Expand all / Collapse all** affect only the tree presentation, not filters or the plan. Individual folder expansion/collapse state is retained by relative path across exclusion/filter refreshes, and the global choice is retained for newly restored folders. A deliberate collapse also wins over folders discovered underneath it later. Large comparisons (at least 1,000 rows) update GTK in cancelable 250-row batches and expand new folders in separate small idle batches, invalidating stale batches after another edit, with a visible updating indicator instead of blocking the event loop through a whole-tree rebuild.

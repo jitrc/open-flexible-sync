@@ -31,10 +31,11 @@ def scan_summary(job: JobResult) -> str:
         # Keep the path: "folder not found" is the actionable part, and both
         # the row and the history list colour anything with "error" as failed.
         return f"Scan error: {job.error or 'scan unavailable'}"
+    label = f" (set {job.result.set_first} … {job.result.set_last})" if job.result.set_last else ""
     if job.result.partial_sides:
-        return f"Partial scan (review only): {plan_summary(job.result.changes)}"
+        return f"Partial scan (review only): {plan_summary(job.result.changes)}{label}"
     cache = "cached " if job.result.cached else ""
-    return f"Complete {cache}scan: {plan_summary(job.result.changes)}"
+    return f"Complete {cache}scan: {plan_summary(job.result.changes)}{label}"
 
 
 def _record_scan_history(job: JobResult) -> None:
@@ -61,6 +62,8 @@ def run_checked(
     on_entry=None,
     force_uncached: bool = False,
     create_destination: bool = False,
+    set_limit: int = 0,
+    after_name: str = "",
 ) -> list[JobResult]:
     skips = session_skips or {}
     masks = session_masks or {}
@@ -93,6 +96,8 @@ def run_checked(
                 on_entry=None if on_entry is None else report_entry,
                 force_uncached=force_uncached,
                 create_destination=create_destination,
+                set_limit=set_limit,
+                after_name=after_name,
             )
         except DestinationMissing as exc:
             result = None

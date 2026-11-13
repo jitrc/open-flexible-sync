@@ -67,6 +67,40 @@ def ensure_dir(path: str) -> Path:
     return folder
 
 
+def _file_stat(info, *, kind: str = "file", target: str = "") -> FileStat:
+    """Metadata for one path, shared by the walk and by scoped single entries."""
+
+    return FileStat(info.st_size, info.st_mtime, kind, target, stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)
+
+
+def entry_stat(path: Path, *, symlinks: str = "follow") -> FileStat | None:
+    """Metadata for one file or link, following the same rules as `walk`."""
+
+    try:
+        info = path.lstat()
+    except OSError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        if symlinks == "skip":
+            return None
+        try:
+            target = os.readlink(path)
+        except OSError:
+            return None
+        if symlinks == "preserve":
+            return _file_stat(info, kind="symlink", target=target)
+        try:
+            followed = path.stat()
+        except OSError:
+            return _file_stat(info, kind="broken", target=target)
+        if stat.S_ISREG(followed.st_mode):
+            return _file_stat(followed)
+        return _file_stat(info, kind="unsupported", target=target)
+    if stat.S_ISREG(info.st_mode):
+        return _file_stat(info)
+    return file_stat(info, kind="unsupported")
+
+
 def walk(
     root: Path,
     skip_dir,
@@ -112,7 +146,7 @@ def walk(
                 raise WalkSkipped(found, discovered, filtered)
 
     def file_stat(info, path: Path, *, kind: str = "file", target: str = "") -> FileStat:
-        return FileStat(info.st_size, info.st_mtime, kind, target, stat.S_IMODE(info.st_mode), info.st_uid, info.st_gid)
+        return _file_stat(info, kind=kind, target=target)
 
     def filtered_out(child: str, *, directory: bool) -> bool:
         nonlocal filtered

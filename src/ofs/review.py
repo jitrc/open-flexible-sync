@@ -18,7 +18,7 @@ LEFT_ACTIONS = {Action.COPY_RIGHT_TO_LEFT, Action.MOVE_ON_LEFT, Action.DELETE_LE
 SAFETY_SECONDS = 120
 
 
-@dataclass
+@dataclass(slots=True)
 class Listed:
     change: Change
     on_left: bool

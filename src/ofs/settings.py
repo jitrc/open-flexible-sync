@@ -113,6 +113,19 @@ def set_copy_speed_limit(bytes_per_second: float) -> None:
     _save("copy_speed_limit", max(0, int(bytes_per_second)))
 
 
+def scan_set_limit() -> int:
+    """Files per bounded scan set. Zero keeps one complete scan."""
+
+    try:
+        return max(0, int(load_settings().get("scan_set_limit") or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def set_scan_set_limit(entries: float) -> None:
+    _save("scan_set_limit", max(0, int(entries)))
+
+
 def record_scan_estimate(name: str, entries: int, seconds: float) -> None:
     if entries <= 0 or seconds <= 0:
         return

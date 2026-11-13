@@ -27,7 +27,7 @@ class Action(str, Enum):
     ASK = "ask"
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class FileStat:
     size: int
     mtime: float
@@ -38,7 +38,7 @@ class FileStat:
     gid: int = 0
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, slots=True)
 class Change:
     rel: str
     action: Action

@@ -62,6 +62,8 @@ from ofs.settings import (
     global_exclusion_mode,
     global_exclusions,
     scan_estimate,
+    scan_set_limit,
+    set_scan_set_limit,
     copy_speed_limit,
     set_compare_command,
     set_copy_speed_limit,
@@ -1037,7 +1039,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _settings(self, *_args) -> Gtk.Window:
         window = Gtk.Window(transient_for=self, modal=True, title="Settings")
-        window.set_default_size(560, 520)
+        window.set_default_size(560, 640)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         box.set_margin_start(12)
         box.set_margin_end(12)
@@ -1074,6 +1076,14 @@ class MainWindow(Gtk.ApplicationWindow):
         choose_speed()
         box.append(speed_presets)
         box.append(speed)
+        box.append(Gtk.Label(label="Scan in sets of (files, 0 = one complete scan)", xalign=0))
+        set_size = Gtk.SpinButton.new_with_range(0, 2_000_000, 10_000)
+        set_size.set_value(scan_set_limit())
+        set_size.set_tooltip_text(
+            "Bounds memory on very large trees: each set covers whole root folders up to about this many files, "
+            "and after a set is copied the next set is scanned. 0 scans everything at once."
+        )
+        box.append(set_size)
         box.append(Gtk.Label(label="Global exclusions", xalign=0))
         masks = Gtk.TextView()
         masks.set_monospace(True)
@@ -1099,6 +1109,7 @@ class MainWindow(Gtk.ApplicationWindow):
             apply_appearance(selected_theme)
             set_compare_command(entry.get_text())
             set_copy_speed_limit(speed.get_value() * 1024 * 1024)
+            set_scan_set_limit(set_size.get_value())
             buffer = masks.get_buffer()
             text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
             set_global_exclusions([line.strip() for line in text.splitlines() if line.strip()])
@@ -1516,13 +1527,13 @@ class MainWindow(Gtk.ApplicationWindow):
     def _session_rule_lock(self, name: str) -> threading.RLock:
         return self._session_rule_locks.setdefault(name, threading.RLock())
 
-    def _run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
+    def _run_names(self, chosen: set[str], *, uncached: bool = False, after_name: str = "") -> None:
         selected = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
         pending = self._missing_destinations(selected)
         if pending:
             self._confirm_missing_destinations(pending, chosen, uncached=uncached)
             return
-        self._start_run_names(chosen, uncached=uncached)
+        self._start_run_names(chosen, uncached=uncached, after_name=after_name)
 
     def _missing_destinations(self, profiles: list[Profile]) -> list[tuple[Profile, str, str]]:
         """One-way destinations that are absent but can be created in place."""
@@ -1594,7 +1605,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.status.set_text(f"Created {len(created)} destination folder(s); the first copy is a full copy.")
         self._start_run_names(chosen, uncached=uncached)
 
-    def _start_run_names(self, chosen: set[str], *, uncached: bool = False) -> None:
+    def _start_run_names(self, chosen: set[str], *, uncached: bool = False, after_name: str = "") -> None:
         selected = [profile for profile in self.profiles if profile.name in chosen and not profile.disabled]
         profiles = []
         already_running: set[str] = set()
@@ -1627,7 +1638,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
         # Independent windows and controls keep Skip/Cancel scoped to one profile.
         for profile in profiles:
-            self._start_profile_scan(profile, batch_id, uncached)
+            self._start_profile_scan(profile, batch_id, uncached, after_name if len(profiles) == 1 else "")
 
     def _with_scan_activity(self, text: str) -> None:
         count = len(self._scan_running)
@@ -1636,13 +1647,31 @@ class MainWindow(Gtk.ApplicationWindow):
             text += f"  {count} {noun} still running."
         self.status.set_text(text)
 
-    def _start_profile_scan(self, profile: Profile, batch_id: int, uncached: bool) -> None:
+    def _continue_set(self, preview: "Preview", after_name: str) -> None:
+        """Scan the next set in the same window; the copy still needs its own Start."""
+
+        name = preview.job.profile.name
+        app = self._ofs_app
+        if isinstance(app, SfsApplication) and not app.claim_profile(name):
+            self.status.set_text("This profile is already scanning or copying in another OFS window; the next set was not started.")
+            return
+        batch_id = self._next_scan_batch
+        self._next_scan_batch += 1
+        self._scan_batches[batch_id] = {"remaining": {name}, "results": []}
+        self._scan_running.add(name)
+        self._rebuild()
+        self._start_profile_scan(preview.job.profile, batch_id, False, after_name=after_name, preview=preview)
+
+    def _start_profile_scan(self, profile: Profile, batch_id: int, uncached: bool, after_name: str = "", preview: "Preview | None" = None) -> None:
         skips = {profile.name: self.session_skips.setdefault(profile.name, set())}
         masks = {profile.name: self.session_masks.setdefault(profile.name, [])}
         progress = ScanWindow(self, f"Scanning {profile.name}", estimates={profile.name: scan_estimate(profile.name)})
         progress.control.rules_lock = self._session_rule_lock(profile.name)
-        preview = self._preview(JobResult(profile, ScanResult(changes=[]), None))
-        preview._begin_scan(progress, uncached=uncached)
+        if preview is None:
+            preview = self._preview(JobResult(profile, ScanResult(changes=[]), None))
+        else:
+            preview._reset_for_scan()
+        preview._begin_scan(progress, uncached=uncached, after_name=after_name)
         self._scan_previews[profile.name] = preview
         # Closing the overview must not quit OFS before the result has a window.
         self._ofs_app.hold()
@@ -1665,6 +1694,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     on_stats=on_stats,
                     on_entry=on_entry,
                     force_uncached=uncached,
+                    set_limit=scan_set_limit(),
+                    after_name=preview._set_after,
                 )
             except Exception as exc:
                 results = [JobResult(profile, None, str(exc))]
@@ -2198,6 +2229,9 @@ class Preview(Gtk.Window):
         else:
             self.rows = [Listed(change, False, False) for change in job.result.changes]
         self._original = {row.change.rel: row.change for row in self.rows}
+        self._set_after = ""
+        self._set_last = ""
+        self._set_next = ""
         direction = job.profile.direction
         if direction == Direction.RIGHT_TO_LEFT:
             adjust = "left"
@@ -2444,7 +2478,24 @@ class Preview(Gtk.Window):
         self.operation_area.append(expander)
         return expander
 
-    def _begin_scan(self, progress: ScanWindow, *, uncached: bool = False) -> None:
+    def _reset_for_scan(self) -> None:
+        """Drop the previous set's rows before the same window scans again."""
+
+        self.job = JobResult(self.job.profile, ScanResult(changes=[]), None)
+        self.rows = []
+        self._original = {}
+        self._copy_planned = {}
+        self._copy_progress = None
+        self.partial = False
+        self._set_last = ""
+        self._set_next = ""
+        self.notice.set_visible(False)
+        self.tree_store.clear()
+
+    def _begin_scan(self, progress: ScanWindow, *, uncached: bool = False, after_name: str = "") -> None:
+        self._set_after = after_name
+        self._set_last = ""
+        self._set_next = ""
         self._scan_active = True
         self._scan_complete = False
         self._scan_progress = progress
@@ -2621,8 +2672,15 @@ class Preview(Gtk.Window):
             result = job.result
             self.rows = list(result.listing) if result.listing else [Listed(change, False, False) for change in result.changes]
             self._original = {row.change.rel: row.change for row in self.rows}
+            self._set_last = result.set_last
+            self._set_next = result.set_next
             self.partial = bool(result.partial_sides)
-            self.set_title(f"{job.profile.name} — Partial scan (review only)" if self.partial else job.profile.name)
+            if self.partial:
+                self.set_title(f"{job.profile.name} — Partial scan (review only)")
+            elif result.set_last:
+                self.set_title(f"{job.profile.name} — Set {result.set_first} … {result.set_last}")
+            else:
+                self.set_title(job.profile.name)
             self.start_button.set_label("Rescan" if self.partial else "Start")
             self.start_button.set_sensitive(True)
             if self.partial:
@@ -3465,6 +3523,12 @@ class Preview(Gtk.Window):
             text = "Review only. Add permanent or session exclusions, then Rescan. Partial plans cannot be applied."
         else:
             text = plan_summary(planned) + "  Filters hide rows. Start runs the whole plan. Right-click a folder to point L ──▶ R or L ◀── R."
+        if self.job.result is not None and self.job.result.set_last:
+            text += (
+                f"  Set: {self.job.result.set_first} … {self.job.result.set_last}"
+                f" of {self.job.result.set_total} root names;"
+                + (" the next set continues after this copy." if self.job.result.set_next else " this is the last set.")
+            )
         if self.job.result is not None and self.job.result.note:
             text += "  " + self.job.result.note
         self.detail.set_text(text)
@@ -3493,7 +3557,11 @@ class Preview(Gtk.Window):
 
     def _rescan(self, *_args) -> None:
         self.close()
-        self.owner._run_names({self.job.profile.name})
+        if self._set_after:
+            # A set preview repeats its own set; a normal scan starts from the beginning.
+            self.owner._run_names({self.job.profile.name}, after_name=self._set_after)
+        else:
+            self.owner._run_names({self.job.profile.name})
 
     def _safety(self, text: str, changes: list[Change], *, blocked: bool = False) -> Gtk.Window:
         window = Gtk.Window(transient_for=self, modal=True, title="Safety Confirmations Required")
@@ -3605,10 +3673,11 @@ class Preview(Gtk.Window):
                     invalidate_cached_destinations(self.job.profile)
                 except OSError as exc:
                     report.errors.append(f"destination cache: {exc}")
-            try:
-                remember(self.job.profile)
-            except Exception as exc:
-                report.errors.append(f"history: {exc}")
+            if self.job.result is None or not self.job.result.set_last:
+                try:
+                    remember(self.job.profile)
+                except Exception as exc:
+                    report.errors.append(f"history: {exc}")
             path = None
             if changes:
                 try:
@@ -3704,6 +3773,15 @@ class Preview(Gtk.Window):
                     self.owner.reload()
         self.detail.set_text(text + power_note)
         ResultsWindow(self, report, path).present()
+        # The next set is only *scanned* here; its copy still needs the normal Start.
+        if (
+            self.job.result is not None
+            and self.job.result.set_next
+            and action == "none"
+            and not report.cancelled
+            and not report.errors
+        ):
+            self.owner._continue_set(self, self.job.result.set_next)
         return False
 
 

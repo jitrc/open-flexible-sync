@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import stat
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
@@ -17,7 +18,7 @@ from ofs.model import ExclusionMode, Profile
 from ofs.review import Listed, build_listing
 from ofs.settings import global_exclusion_mode, global_exclusions
 from ofs.volume import ensure_volume
-from ofs.walk import DestinationMissing, MissingFolder, WalkSkipped, WalkStopped, ensure_dir, walk
+from ofs.walk import DestinationMissing, MissingFolder, WalkSkipped, WalkStopped, ensure_dir, entry_stat, walk
 
 
 @dataclass
@@ -32,6 +33,10 @@ class ScanResult:
     cached: bool = False
     partial_sides: tuple[str, ...] = ()
     listing: list[Listed] = field(default_factory=list)
+    set_first: str = ""
+    set_last: str = ""
+    set_next: str = ""
+    set_total: int = 0
 
 
 def missing_destination(profile: Profile) -> tuple[str, str] | None:
@@ -140,6 +145,19 @@ def _drop_global(
     return {rel: stat for rel, stat in files.items() if not any_match(rel, global_masks)}
 
 
+def root_names(left: Path, right: Path) -> list[str]:
+    """Sorted names directly under both roots, so sets never overlap or skip one."""
+
+    names: set[str] = set()
+    for root in (left, right):
+        try:
+            with os.scandir(root) as entries:
+                names.update(entry.name for entry in entries)
+        except OSError:
+            continue
+    return sorted(names)
+
+
 def scan_profile(
     profile: Profile,
     *,
@@ -151,6 +169,8 @@ def scan_profile(
     on_entry=None,
     force_uncached: bool = False,
     create_destination: bool = False,
+    set_limit: int = 0,
+    after_name: str = "",
 ) -> ScanResult:
     masks = global_exclusions()
     mode = global_exclusion_mode()
@@ -199,7 +219,84 @@ def scan_profile(
     cached_sides: set[str] = set()
     partial_sides = []
 
-    def read_side(side: str, root: Path, destination: bool) -> dict[str, FileStat]:
+    def read_names(side: str, root: Path, destination: bool, names: list[str]) -> dict[str, FileStat]:
+        """Read only the named root children. A set scan never uses or saves the cache."""
+
+        files: dict[str, FileStat] = {}
+        for name in names:
+            path = root / name
+            try:
+                info = path.lstat()
+            except OSError:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                if profile.symlinks.value == "skip":
+                    continue
+                if profile.symlinks.value == "preserve" or not path.is_dir():
+                    if skip_file(name):
+                        continue
+                    found = entry_stat(path, symlinks=profile.symlinks.value)
+                    if found is not None:
+                        files[name] = found
+                    continue
+            elif not stat.S_ISDIR(info.st_mode):
+                if skip_file(name):
+                    continue
+                found = entry_stat(path, symlinks=profile.symlinks.value)
+                if found is not None:
+                    files[name] = found
+                continue
+            if skip_dir(name, destination):
+                continue
+            base = walked[side]
+
+            def scoped_progress(rel: str, count: int, name: str = name) -> None:
+                if on_progress is not None:
+                    on_progress(side, f"{name}/{rel}" if rel else name, len(files) + count)
+
+            def scoped_stats(rel: str, values, name: str = name, base: int = base) -> None:
+                from ofs.walk import WalkStats
+
+                walked[side] = base + values.discovered
+                if on_stats is not None:
+                    on_stats(
+                        side,
+                        f"{name}/{rel}" if rel else name,
+                        WalkStats(base + values.discovered, values.filtered, base + values.added),
+                    )
+
+            def scoped_entry(rel: str, item, name: str = name) -> None:
+                if on_entry is not None:
+                    on_entry(side, f"{name}/{rel}", item)
+
+            try:
+                subtree = walk(
+                    path,
+                    lambda rel, name=name: skip_dir(f"{name}/{rel}", destination),
+                    skip_file=lambda rel, name=name: skip_file(f"{name}/{rel}"),
+                    control=control,
+                    on_progress=scoped_progress,
+                    on_stats=scoped_stats,
+                    on_entry=None if on_entry is None else scoped_entry,
+                    symlinks=profile.symlinks.value,
+                )
+            except WalkSkipped as exc:
+                partial_sides.append(side)
+                walked[side] = exc.discovered
+                files.update({f"{name}/{rel}": item for rel, item in exc.files.items()})
+                if on_stats is not None:
+                    from ofs.walk import WalkStats
+
+                    on_stats(side, name, WalkStats(exc.discovered, exc.filtered, len(files)))
+                if control is not None:
+                    control.clear_skip()
+                return files
+            files.update({f"{name}/{rel}": item for rel, item in subtree.items()})
+        return drop_session(files)
+
+    def read_side(side: str, root: Path, destination: bool, names: list[str] | None = None) -> dict[str, FileStat]:
+        if names is not None:
+            return read_names(side, root, destination, names)
         if destination and profile.cache_destination and not force_uncached:
             cached = load_destination(profile, side, masks, mode)
             if cached is not None:
@@ -216,8 +313,8 @@ def scan_profile(
 
                     on_stats(side, f"Using cached destination metadata ({age_seconds}s old)", WalkStats(len(files), 0, len(files)))
                 if on_entry is not None:
-                    for rel, stat in files.items():
-                        on_entry(side, rel, stat)
+                    for rel, info in files.items():
+                        on_entry(side, rel, info)
                 return files
         try:
             files = walk(
@@ -250,8 +347,32 @@ def scan_profile(
                 cache_notes.append(f"Could not save the destination cache: {exc}")
         return files
 
-    left = _drop_global(read_side("Left", left_root, False), masks, mode)
-    right = _drop_global(read_side("Right", right_root, True), masks, mode)
+    names: list[str] | None = None
+    set_first = set_last = set_next = ""
+    set_total = 0
+    if set_limit > 0:
+        available = root_names(left_root, right_root)
+        set_total = len(available)
+        pending = [name for name in available if name > after_name] if after_name else list(available)
+        names = []
+        left: dict[str, FileStat] = {}
+        right: dict[str, FileStat] = {}
+        for name in pending:
+            names.append(name)
+            left.update(_drop_global(read_side("Left", left_root, False, [name]), masks, mode))
+            right.update(_drop_global(read_side("Right", right_root, True, [name]), masks, mode))
+            if partial_sides or len(left) + len(right) >= set_limit:
+                break
+        if names:
+            set_first, set_last = names[0], names[-1]
+            if set_last != available[-1]:
+                set_next = set_last
+        cache_notes.append(
+            "Set scan: the destination cache and the file-history baseline are not used or saved."
+        )
+    else:
+        left = _drop_global(read_side("Left", left_root, False), masks, mode)
+        right = _drop_global(read_side("Right", right_root, True), masks, mode)
     bytes_read = 0
     binary_diff: set[str] = set()
     if profile.binary_compare:
@@ -270,7 +391,7 @@ def scan_profile(
     if partial_sides:
         sides = " and ".join(partial_sides)
         note = f"Partial scan: skipped {sides} discovery. Review only; copying and deleting are disabled. Add exclusions, then rescan. No new cache manifest or file history was saved."
-    if profile.track and not partial_sides:
+    if profile.track and not partial_sides and names is None:
         history, history_note = load_history(profile)
         if history is None and not history_note:
             if session_filters_used:
@@ -306,6 +427,10 @@ def scan_profile(
         cached=bool(cached_sides),
         partial_sides=tuple(partial_sides),
         listing=build_listing(left, right, changes, profile, binary_diff=binary_diff),
+        set_first=set_first,
+        set_last=set_last,
+        set_next=set_next,
+        set_total=set_total,
     )
 
 

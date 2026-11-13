@@ -3456,3 +3456,48 @@ def test_a_missing_destination_is_asked_about_before_it_is_created(tmp_path, mon
     assert seen["created"] is True
     assert "Created 1 destination folder" in seen["created_status"]
     assert seen["started"] == [({"fresh backup"}, False)]
+
+
+def test_a_set_preview_names_its_set_and_continues_after_a_clean_copy(tmp_path, monkeypatch):
+    from ofs.apply import ApplyReport
+    from ofs.scan import scan_profile
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestSetPreview")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    right.mkdir(parents=True)
+    for name in ("one", "two", "three"):
+        (left / name).mkdir(parents=True)
+        (left / name / "file.txt").write_text(name)
+    save_profile(Profile(name="set job", left=str(left), right=str(right)))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            profile = owner.profiles[0]
+            first = scan_profile(profile, set_limit=1)
+            preview = owner._preview(JobResult(profile, first, None))
+            preview._finish_scan(JobResult(profile, first, None))
+            seen["title"] = preview.get_title()
+            seen["detail"] = preview.detail.get_text()
+            started = []
+            owner._continue_set = lambda preview, after_name: started.append(after_name)
+            progress = ProgressWindow(preview, profile.name)
+            preview._copy_progress = progress
+            preview._finished(progress, ApplyReport(copied=1), None)
+            seen["started"] = started
+            bad = ProgressWindow(preview, profile.name)
+            preview._copy_progress = bad
+            preview._finished(bad, ApplyReport(copied=1, errors=["boom"]), None)
+            seen["started_after_error"] = started
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["title"] == "set job — Set one … one"
+    assert "of 3 root names" in seen["detail"]
+    assert "the next set continues after this copy" in seen["detail"]
+    assert seen["started"] == ["one"]
+    assert seen["started_after_error"] == ["one"]
