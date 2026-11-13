@@ -1,6 +1,6 @@
 [project]
 name = "ofs"
-version = "0.4.6"
+version = "0.4.7"
 description = "Local folder sync with profile groups, mask modes, and timestamp rules."
 requires-python = ">=3.11"
 readme = "README.md"

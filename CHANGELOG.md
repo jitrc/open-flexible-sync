@@ -4,9 +4,15 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-12
+
 ### Fixed
 
 - Exact Mirror now detects a renamed folder as moves even when the archive holds thousands of same-named, same-sized files. Multiple candidates are told apart by how many trailing folders they share with the old path, so a folder renamed with a prefix or suffix still pairs file-for-file instead of becoming a whole-tree copy plus delete. True ties still stay copy/delete.
+
+### Changed
+
+- The scan and copy panels no longer repeat the profile name. The window title carries it once, the expanders read Scanning and Copying, and the scan panel leads with Reading left or Reading right.
 
 ## [0.4.6] - 2026-11-12
 
@@ -148,7 +154,10 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.4...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.7...HEAD
+[0.4.7]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.6...v0.4.7
+[0.4.6]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.5...v0.4.6
+[0.4.5]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.1...v0.4.2
