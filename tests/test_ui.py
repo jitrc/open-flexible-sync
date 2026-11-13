@@ -169,6 +169,62 @@ def test_result_return_restores_the_same_profile_and_scroll_position(tmp_path, m
     assert seen["expanded_preserved"] is True and seen["checked_preserved"] is True
 
 
+def test_returning_result_reveals_the_whole_finished_profile_row(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFinishedRowVisible")
+    for index in range(40):
+        save_profile(Profile(name=f"group-{index // 2:02d} profile-{index:02d}", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window._set_groups(True)
+            window.present()
+            settle()
+            adjustment = window.profiles_scroll.get_vadjustment()
+            page = adjustment.get_page_size()
+            target = next(
+                name for name, row in window._profile_rows.items()
+                if row.get_mapped()
+                and row.translate_coordinates(window.list_box, 0, 0)[1] > page
+            )
+            row = window._profile_rows[target]
+            # Leave the name line inside the viewport and clip the path line below it.
+            top = row.translate_coordinates(window.list_box, 0, 0)[1]
+            adjustment.set_value(top - (page - 10))
+            settle()
+
+            def viewport_top(widget):
+                point = widget.translate_coordinates(window.list_box, 0, 0)
+                return None if point is None else point[1] - adjustment.get_value()
+
+            clipped = viewport_top(row)
+            seen["clipped_before"] = clipped is not None and clipped + row.get_height() > page
+            seen["before_value"] = adjustment.get_value()
+            window._focused_profile = target
+            window._return_to_profile(target)
+            settle()
+            rebuilt = window._profile_rows[target]
+            visible = viewport_top(rebuilt)
+            seen["visible_after"] = (
+                visible is not None and visible >= 0
+                and visible + rebuilt.get_height() <= adjustment.get_page_size()
+            )
+            seen["moved"] = abs(adjustment.get_value() - seen["before_value"])
+            seen["row_height"] = rebuilt.get_height()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["clipped_before"] is True
+    assert seen["visible_after"] is True
+    assert seen["moved"] <= seen["row_height"]
+
+
 def test_completed_run_reload_preserves_scroll_and_expanded_groups(tmp_path, monkeypatch):
 
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))

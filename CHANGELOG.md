@@ -4,6 +4,12 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-12
+
+### Fixed
+
+- Returning from a finished preview or result keeps the completed profile's whole row readable. The restored scroll position is now adjusted by the minimum amount needed, so the row is no longer left clipped at the bottom edge with only its name and checkbox visible.
+
 ## [0.4.0] - 2026-11-12
 
 ### Added
@@ -100,7 +106,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.1.0...v0.2.0

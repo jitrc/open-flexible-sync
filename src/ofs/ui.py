@@ -351,7 +351,32 @@ class MainWindow(Gtk.ApplicationWindow):
             check = self._profile_check_buttons.get(self._focused_profile)
             if check is not None and check.get_mapped():
                 check.grab_focus()
+            # Focus scrolling reveals only the checkbox, which can leave the
+            # rest of the finished profile's row below the viewport.
+            self._scroll_profile_into_view(self._profile_rows.get(self._focused_profile))
         return False
+
+    def _scroll_profile_into_view(self, row: Gtk.Widget | None) -> None:
+        """Move as little as needed so the whole profile row is readable."""
+
+        if row is None or not row.get_mapped():
+            return
+        adjustment = self.profiles_scroll.get_vadjustment()
+        page = adjustment.get_page_size()
+        point = row.translate_coordinates(self.list_box, 0, 0)
+        if page <= 0 or point is None:
+            return
+        top = point[1] - adjustment.get_value()
+        height = row.get_height()
+        value = adjustment.get_value()
+        if top < 0:
+            value += top
+        elif top + height > page:
+            value += top + height - page
+        else:
+            return
+        maximum = max(0.0, adjustment.get_upper() - page)
+        adjustment.set_value(min(max(0.0, value), maximum))
 
     def _return_to_profile(self, name: str) -> None:
         self._focused_profile = name
