@@ -4,12 +4,11 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-13
+
 ### Added
 
 - A one-way profile whose destination folder is missing now asks whether to create it. **Create and copy all** creates only that folder inside its existing parent, forgets any destination snapshot from before it existed, and treats it as empty, so every source file that is not excluded is copied and nothing is deleted. Missing parent folders are never created, so an unmounted disk cannot be filled on the wrong filesystem; a missing source is still an error. `ofs scan` and `ofs run` accept `--create-destination` for the confirmed form.
-
-### Added
-
 - A profile that has never been copied now shows its last scan attempt in the overview row, with date and colour, so a folder that was renamed or moved reaches a visible error instead of an empty "Never run" row. A newer failed scan also outranks an older successful run, because it describes the profile's current state; a completed scan stays informational and never claims a clean sync.
 
 ### Fixed
@@ -172,7 +171,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.7...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.8...HEAD
+[0.4.8]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.4...v0.4.5
