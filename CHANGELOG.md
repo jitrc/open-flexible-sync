@@ -4,6 +4,12 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-12
+
+### Fixed
+
+- A stopped scan no longer leaves a disabled **Scan incomplete** button or a permanent `Updating visible list…` message. The page now states that nothing can be copied from an incomplete scan, keeps the discovered rows as review-only, and offers a working **Rescan**.
+
 ## [0.4.3] - 2026-11-12
 
 ### Added
@@ -118,7 +124,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.0...v0.4.1

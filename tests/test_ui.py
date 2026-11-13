@@ -12,6 +12,7 @@ from ofs.apply import CopyProgress
 from ofs.compare import Action, Change, FileStat
 from ofs.jobs import JobResult
 from ofs.model import ExclusionMode, Profile, SyncMode, TimestampRules
+from ofs.review import Listed
 from ofs.scan import ScanResult, scan_profile
 from ofs.store import load_profiles, save_profile
 from ofs.ui import ExclusionEditor, MainWindow, PlanRow, Preview, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
@@ -2988,3 +2989,40 @@ def test_preview_states_the_comparison_rule_that_hides_equal_files(tmp_path, mon
     assert "Timestamps ignored" in seen["rule"] and "size matches" in seen["rule"]
     assert seen["shown"] is True
     assert seen["plain_rule"] == "" and seen["plain_shown"] is False
+
+
+def test_stopped_scan_offers_rescan_and_never_stays_on_updating(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestStoppedScan")
+    save_profile(Profile(name="stopped", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            profile = owner.profiles[0]
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            preview._scan_active = True
+            preview._scan_complete = False
+            preview.rows = [
+                Listed(Change(f"bulk/{index:04d}.txt", Action.UNCHANGED, "unchanged", 10), True, True)
+                for index in range(1200)
+            ]
+            preview._finish_scan(JobResult(profile, None, "scan stopped"))
+            seen["label"] = preview.start_button.get_label()
+            seen["sensitive"] = preview.start_button.get_sensitive()
+            seen["shown"] = preview.shown.get_text()
+            seen["detail"] = preview.detail.get_text()
+            seen["pending"] = list(preview._pending_tree)
+            preview._rescan = lambda *args: seen.setdefault("rescan", True)
+            preview.start_button.emit("clicked")
+            seen["clicked_rescan"] = seen.get("rescan", False)
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["label"] == "Rescan"
+    assert seen["sensitive"] is True
+    assert seen["shown"] == "Scan stopped: no comparison plan. Nothing can be copied from an incomplete scan."
+    assert "cannot be applied" in seen["detail"]
+    assert seen["pending"] == []
+    assert seen["clicked_rescan"] is True

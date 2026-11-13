@@ -2418,9 +2418,15 @@ class Preview(Gtk.Window):
             self.completion_action.set_sensitive(not self.partial)
         else:
             self.partial = True
-            self.detail.set_text(job.error or "Scan stopped")
-            self.start_button.set_label("Scan incomplete")
-            self.start_button.set_sensitive(False)
+            self.detail.set_text(
+                f"{job.error or 'Scan stopped'}. Incomplete discovery is review-only and cannot be applied. "
+                "Choose Rescan for a complete plan."
+            )
+            self.start_button.set_label("Rescan")
+            self.start_button.set_sensitive(True)
+            self.start_button.set_tooltip_text(
+                "Scan this profile again from the start; the rows found before the stop are shown for review only"
+            )
             self.completion_action.set_sensitive(False)
             self.set_title(f"{job.profile.name} — Scan stopped")
         self._refill()
@@ -2440,7 +2446,8 @@ class Preview(Gtk.Window):
         return False
 
     def _start_or_rescan(self, *_args) -> None:
-        if self.partial and self._scan_complete:
+        if self.partial:
+            # Partial results and stopped scans are review-only; both need a fresh complete scan.
             self._rescan()
         else:
             self._start()
@@ -2606,6 +2613,15 @@ class Preview(Gtk.Window):
 
     def _refill(self) -> None:
         self._fill_generation += 1
+        if not self._scan_complete and not self._scan_active:
+            # A stopped scan has no plan. Drop queued batches and replace the
+            # "Updating visible list…" text instead of leaving it forever.
+            self._pending_tree = []
+            self._replace_tree_model = False
+            self._live_refill_pending = False
+            self.shown.set_text("Scan stopped: no comparison plan. Nothing can be copied from an incomplete scan.")
+            self._refresh_detail()
+            return
         visible = [row for row in self.rows if matches(row, **self.filters)]
         if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD and (self.review_min_size or self._tree_sort != "name"):
             self._tree_nodes(visible)
