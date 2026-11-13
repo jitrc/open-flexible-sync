@@ -104,7 +104,7 @@ xvfb-run -a python3 -m pytest -q            # headless machine
 python3 scripts/build_release.py
 ```
 
-A matching `v*` tag runs tests and publishes artifacts through CI. Bump the version in one step with `python3 scripts/bump_version.py X.Y.Z`; it updates `pyproject.toml`, `__version__`, and the README download names, and a test fails if they ever disagree.
+A matching `v*` tag runs tests and publishes artifacts through CI. Bump the version in one step with `python3 scripts/bump_version.py X.Y.Z`; it updates `pyproject.toml`, `__version__`, and the README download names. Write the CHANGELOG section for the release first: tests fail if the package, packaging, README, or CHANGELOG version disagrees.
 
 ## Configuration
 
