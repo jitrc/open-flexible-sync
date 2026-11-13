@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from ofs.compare import Action, Change, FileStat, format_bytes
+from ofs.compare import Action, Change, FileStat, equal_reason, format_bytes
 from ofs.model import Profile
 from ofs.store import config_dir
 
@@ -25,7 +25,12 @@ class Listed:
     on_right: bool
 
 
-def build_listing(left: dict[str, FileStat], right: dict[str, FileStat], changes: list[Change]) -> list[Listed]:
+def build_listing(
+    left: dict[str, FileStat],
+    right: dict[str, FileStat],
+    changes: list[Change],
+    profile: Profile | None = None,
+) -> list[Listed]:
     """Every file the scan saw, with unchanged rows included so the filters can hide them."""
 
     by_rel: dict[str, Change] = {}
@@ -36,7 +41,10 @@ def build_listing(left: dict[str, FileStat], right: dict[str, FileStat], changes
         change = by_rel.get(rel)
         if change is None:
             stat = left.get(rel) or right[rel]
-            change = Change(rel, Action.UNCHANGED, "unchanged", stat.size)
+            reason = "unchanged"
+            if profile is not None and rel in left and rel in right:
+                reason = equal_reason(profile, left[rel], right[rel])
+            change = Change(rel, Action.UNCHANGED, reason, stat.size)
         rows.append(Listed(change, rel in left, rel in right))
     return rows
 

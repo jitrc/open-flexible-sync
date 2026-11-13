@@ -24,7 +24,7 @@ from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
 from ofs.archive import older_files, restore_version
 from ofs.bulk import FIELDS, bulk_preview, prepare_bulk_edit
 from ofs.cache import destination_sides
-from ofs.compare import Action, Change, format_bytes, plan_summary
+from ofs.compare import Action, Change, comparison_rule_text, format_bytes, plan_summary
 from ofs.jobs import JobResult, run_checked
 from ofs.folder_copy import FolderCopyOutcome, copy_new_folder
 from ofs.history import delete_history
@@ -2157,6 +2157,10 @@ class Preview(Gtk.Window):
         self.sides_header.append(self._side_head("Left", self.job.profile.left, self.left_status))
         self.sides_header.append(self._side_head("Right", self.job.profile.right, self.right_status))
         header.append(self.sides_header)
+        rule = comparison_rule_text(self.job.profile)
+        self.rule_label = Gtk.Label(label=rule, xalign=0, wrap=True, css_classes=["dim-label"])
+        if rule:
+            header.append(self.rule_label)
 
         self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool])
         self.view = Gtk.TreeView(model=self.tree_store)

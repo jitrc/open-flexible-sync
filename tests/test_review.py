@@ -200,3 +200,23 @@ def test_results_and_log(tmp_path, monkeypatch):
     assert "copy_l2r" in saved
     assert path.parent == tmp_path / "home" / "logs"
     assert "data_win" in path.name
+
+
+def test_unchanged_listing_rows_name_the_comparison_reason():
+    from ofs.model import TimestampRules
+
+    ignored = Profile(
+        name="timestamps ignored",
+        left="/l",
+        right="/r",
+        timestamps=TimestampRules(ignore_timestamp=True),
+    )
+    left = {"same.txt": FileStat(120, 1_700_000_000, "file")}
+    right = {"same.txt": FileStat(120, 1_500_000_000, "file")}
+    rows = build_listing(left, right, [], ignored)
+    assert rows[0].change.action == Action.UNCHANGED
+    assert rows[0].change.reason == "unchanged: same size, timestamps ignored"
+
+    plain = Profile(name="plain", left="/l", right="/r")
+    rows = build_listing({"a": left["same.txt"]}, {"a": left["same.txt"]}, [], plain)
+    assert rows[0].change.reason == "unchanged: same size and time"

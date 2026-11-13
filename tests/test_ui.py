@@ -11,7 +11,7 @@ from gi.repository import Gio, GLib, Gtk
 from ofs.apply import CopyProgress
 from ofs.compare import Action, Change, FileStat
 from ofs.jobs import JobResult
-from ofs.model import ExclusionMode, Profile, SyncMode
+from ofs.model import ExclusionMode, Profile, SyncMode, TimestampRules
 from ofs.scan import ScanResult, scan_profile
 from ofs.store import load_profiles, save_profile
 from ofs.ui import ExclusionEditor, MainWindow, PlanRow, Preview, ProgressWindow, RestoreWindow, ResultsWindow, ScanWindow, SfsApplication
@@ -2960,3 +2960,31 @@ def test_results_close_request_also_closes_the_preview():
     window.owner = owner
     assert window._close_preview() is False
     assert owner.closed
+
+
+def test_preview_states_the_comparison_rule_that_hides_equal_files(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestCompareRule")
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            ignored = Profile(
+                name="ignored timestamps", left="/left", right="/right",
+                timestamps=TimestampRules(ignore_timestamp=True),
+            )
+            preview = owner._preview(JobResult(ignored, ScanResult([]), None))
+            seen["rule"] = preview.rule_label.get_text()
+            seen["shown"] = preview.rule_label.get_parent() is not None
+
+            plain = Profile(name="plain", left="/left", right="/right")
+            other = owner._preview(JobResult(plain, ScanResult([]), None))
+            seen["plain_rule"] = other.rule_label.get_text()
+            seen["plain_shown"] = other.rule_label.get_parent() is not None
+            self.quit()
+
+    assert App().run(None) == 0
+    assert "Timestamps ignored" in seen["rule"] and "size matches" in seen["rule"]
+    assert seen["shown"] is True
+    assert seen["plain_rule"] == "" and seen["plain_shown"] is False

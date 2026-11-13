@@ -227,7 +227,7 @@ def scan_profile(
         note=" ".join([part for part in (note, *cache_notes) if part]),
         cached=bool(cached_sides),
         partial_sides=tuple(partial_sides),
-        listing=build_listing(left, right, changes),
+        listing=build_listing(left, right, changes, profile),
     )
 
 

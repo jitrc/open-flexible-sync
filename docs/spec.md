@@ -156,7 +156,7 @@ Preserve user expansion/collapse per relative folder path across filter, exclusi
 
 One scanned profile opens the comparison window. Several scanned profiles open a summary first, and each row can open the same window.
 
-The comparison is a folder tree of every file the scan saw, including files that would be left unchanged. Folders are listed before the files inside them. Each file row has a name, a size, a direction arrow, and a reason. Each folder row shows that folder's total size beside the name and in the size column, the arrow counts of the files under it, and the bytes for each arrow group. Filters on the left only hide rows. Start still runs the whole remaining plan, including rows the filter is hiding. Removing a row for this run, or saving an exclusion, takes that file out of the plan and out of the totals.
+The comparison is a folder tree of every file the scan saw, including files that would be left unchanged. Folders are listed before the files inside them. Each file row has a name, a size, a direction arrow, and a reason. Unchanged rows name the comparison reason that kept them out of the plan (for example `unchanged: same size, timestamps ignored`), and a non-default timestamp rule adds one short explanation line above the tree; both are display-only and never alter the plan. Each folder row shows that folder's total size beside the name and in the size column, the arrow counts of the files under it, and the bytes for each arrow group. Filters on the left only hide rows. Start still runs the whole remaining plan, including rows the filter is hiding. Removing a row for this run, or saving an exclusion, takes that file out of the plan and out of the totals.
 
 State, all of which can be combined with the other groups:
 

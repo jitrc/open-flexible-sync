@@ -97,6 +97,22 @@ def plan_summary(changes: list[Change]) -> str:
     return text
 
 
+def _rounded_delta(left_mtime: float, right_mtime: float, rules: TimestampRules) -> float:
+    """Timestamp difference after the profile's rounding rules."""
+
+    left_time = left_mtime
+    right_time = right_mtime
+    if rules.ignore_seconds:
+        left_time = float(int(left_time) // 60 * 60)
+        right_time = float(int(right_time) // 60 * 60)
+    delta = left_time - right_time
+    if rules.ignore_exact_hour and abs(abs(delta) - HOUR_SECONDS) <= SMALL_SECONDS:
+        delta = 0.0
+    if rules.ignore_small and abs(delta) <= SMALL_SECONDS:
+        delta = 0.0
+    return delta
+
+
 def classify_time(
     left_mtime: float,
     right_mtime: float,
@@ -113,16 +129,7 @@ def classify_time(
             return "left_newer" if left_size > right_size else "right_newer"
         return "size_conflict"
 
-    left_time = left_mtime
-    right_time = right_mtime
-    if rules.ignore_seconds:
-        left_time = float(int(left_time) // 60 * 60)
-        right_time = float(int(right_time) // 60 * 60)
-    delta = left_time - right_time
-    if rules.ignore_exact_hour and abs(abs(delta) - HOUR_SECONDS) <= SMALL_SECONDS:
-        delta = 0.0
-    if rules.ignore_small and abs(delta) <= SMALL_SECONDS:
-        delta = 0.0
+    delta = _rounded_delta(left_mtime, right_mtime, rules)
     if delta == 0.0:
         if left_size == right_size:
             return "equal"
@@ -130,6 +137,55 @@ def classify_time(
             return "left_newer" if left_size > right_size else "right_newer"
         return "size_conflict"
     return "left_newer" if delta > 0 else "right_newer"
+
+
+def equal_reason(profile: Profile, left: FileStat, right: FileStat) -> str:
+    """Display-only explanation for a pair the plan leaves alone.
+
+    The comparison itself never reads file contents for a pair that already
+    matches, so this wording must not imply a content check.
+    """
+
+    rules = profile.timestamps
+    if left.kind != right.kind or left.size != right.size:
+        return "unchanged"
+    if left.kind == "symlink":
+        return "unchanged: same link target" if left.target == right.target else "unchanged"
+    if rules.ignore_timestamp:
+        return "unchanged: same size, timestamps ignored"
+    if _rounded_delta(left.mtime, right.mtime, rules) != 0.0:
+        return "unchanged"
+    ignored = [
+        name for name, on in (
+            ("seconds", rules.ignore_seconds),
+            ("hour offsets", rules.ignore_exact_hour),
+            ("small differences", rules.ignore_small),
+        ) if on
+    ]
+    if ignored and left.mtime != right.mtime:
+        return f"unchanged: same size and time (ignoring {', '.join(ignored)})"
+    return "unchanged: same size and time"
+
+
+def comparison_rule_text(profile: Profile) -> str:
+    """One short sentence about how equal pairs are decided, or an empty string."""
+
+    rules = profile.timestamps
+    if rules.ignore_timestamp:
+        return (
+            "Timestamps ignored: a file counts as unchanged when its size matches. "
+            "Contents are not read, so enable Always copy to overwrite equal-size files."
+        )
+    ignored = [
+        name for name, on in (
+            ("seconds", rules.ignore_seconds),
+            ("hour offsets", rules.ignore_exact_hour),
+            ("small differences", rules.ignore_small),
+        ) if on
+    ]
+    if ignored:
+        return f"Timestamps compared while ignoring {', '.join(ignored)}; equal size and time leaves a file unchanged."
+    return ""
 
 
 def outside_filter(stat: FileStat, profile: Profile, now: float) -> str | None:

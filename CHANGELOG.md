@@ -4,6 +4,12 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-12
+
+### Added
+
+- The comparison window explains itself. Unchanged rows now name the reason they stay out of the plan, such as `unchanged: same size, timestamps ignored`, and a non-default timestamp rule adds one short line above the tree, for example that ignoring timestamps decides from size alone and does not read contents. Both are display-only and never change the plan.
+
 ## [0.4.2] - 2026-11-12
 
 ### Changed
@@ -112,7 +118,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.3.0...v0.4.0

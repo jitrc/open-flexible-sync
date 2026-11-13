@@ -251,3 +251,42 @@ def test_older_tree_is_not_a_source_of_deletes():
     profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR)
     plan = build_plan(profile, {}, {"Older/a.txt": FileStat(1, 1), "gone.txt": FileStat(1, 1)})
     assert [item.rel for item in plan] == ["gone.txt"]
+
+
+def test_equal_pairs_explain_why_the_plan_leaves_them_alone():
+    from ofs.compare import comparison_rule_text, equal_reason
+
+    ignored = Profile(
+        name="timestamps ignored",
+        left="/l",
+        right="/r",
+        timestamps=TimestampRules(ignore_timestamp=True),
+    )
+    left = FileStat(100, 1_700_000_000, "file")
+    right = FileStat(100, 1_600_000_000, "file")
+    assert equal_reason(ignored, left, right) == "unchanged: same size, timestamps ignored"
+    rule = comparison_rule_text(ignored)
+    assert "size matches" in rule and "Always copy" in rule
+    assert build_plan(ignored, {"a": left}, {"a": right}) == []
+
+    plain = Profile(name="plain", left="/l", right="/r")
+    assert equal_reason(plain, left, left) == "unchanged: same size and time"
+    assert comparison_rule_text(plain) == ""
+
+    rounded = Profile(
+        name="rounded",
+        left="/l",
+        right="/r",
+        timestamps=TimestampRules(ignore_seconds=True, ignore_small=True),
+    )
+    near = FileStat(100, left.mtime + 1.5, "file")
+    assert equal_reason(rounded, left, near) == "unchanged: same size and time (ignoring seconds, small differences)"
+    assert "ignoring seconds" in comparison_rule_text(rounded)
+
+    sizes = Profile(
+        name="sizes",
+        left="/l",
+        right="/r",
+        timestamps=TimestampRules(ignore_timestamp=True),
+    )
+    assert build_plan(sizes, {"a": FileStat(100, 1, "file")}, {"a": FileStat(50, 1, "file")})
