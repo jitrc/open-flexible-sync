@@ -44,8 +44,17 @@ def install_imported(profiles: list[Profile]) -> int:
 
 
 def save_profile(profile: Profile) -> Path:
+    from ofs.cache import forget
+
     path = _path_for(profile.name)
     path.write_text(json.dumps(profile.to_json(), indent=2) + "\n", encoding="utf-8")
+    if not profile.cache_destination:
+        # Cache off means no snapshot may survive: switching it back on later
+        # must not reuse destination metadata written before the switch.
+        try:
+            forget(profile.name)
+        except OSError:
+            pass
     return path
 
 
@@ -60,9 +69,15 @@ def load_profiles() -> list[Profile]:
 
 
 def delete_profile(name: str) -> None:
+    from ofs.cache import forget
+
     path = _path_for(name)
     if path.exists():
         path.unlink()
+    try:
+        forget(name)
+    except OSError:
+        pass
 
 
 def path_replacements(profile: Profile, find: str, replace: str, *, sides: str = "both", prefix_only: bool = False) -> dict[str, str]:
@@ -192,6 +207,7 @@ def duplicate_profile(profile: Profile) -> Profile:
     data = profile.to_json()
     data["name"] = name
     data["last_result"] = ""
+    data["last_scan_result"] = ""
     copy = Profile.from_json(data)
     save_profile(copy)
     return copy

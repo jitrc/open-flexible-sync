@@ -175,3 +175,37 @@ def test_checked_scan_records_summary_without_copy_log_or_last_copy_edit(tmp_pat
     assert entries[0].log_path is None
     assert not (home / "logs").exists()
     assert profile.last_result == ""
+
+
+def test_a_missing_folder_is_a_folder_error_that_keeps_the_path(tmp_path, monkeypatch):
+    from ofs.jobs import run_checked
+    from ofs.model import Profile
+
+    _home(tmp_path, monkeypatch)
+    destination = tmp_path / "backup"
+    destination.mkdir()
+    missing = tmp_path / "gone"
+    profile = Profile(name="broken scan", left=str(missing), right=str(destination))
+
+    results = run_checked([profile], checked={profile.name})
+
+    assert results[0].result is None
+    assert results[0].error == f"folder not found: {missing}"
+    assert list_history()[0].summary == f"Scan error: folder not found: {missing}"
+
+
+def test_a_missing_volume_keeps_its_own_message(tmp_path, monkeypatch):
+    from ofs.jobs import run_checked
+    from ofs.model import Profile
+
+    _home(tmp_path, monkeypatch)
+    source = tmp_path / "source"
+    destination = tmp_path / "backup"
+    source.mkdir()
+    destination.mkdir()
+    profile = Profile(name="offline disk", left=str(source), right=str(destination), left_volume="OFS-TEST-NOT-A-LABEL")
+
+    results = run_checked([profile], checked={profile.name})
+
+    assert results[0].error == f"volume is not mounted: OFS-TEST-NOT-A-LABEL ({source})"
+    assert list_history()[0].summary == f"Scan error: volume is not mounted: OFS-TEST-NOT-A-LABEL ({source})"

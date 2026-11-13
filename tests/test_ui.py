@@ -3210,3 +3210,68 @@ def test_scan_panel_names_the_profile_only_in_the_window_title(tmp_path, monkeyp
     assert seen["expander"] == "Scanning"
     assert seen["labels"]
     assert all("named profile" not in text for text in seen["labels"])
+
+
+def test_scan_result_tones_keep_a_completed_scan_informational():
+    from ofs.ui import _scan_parts
+
+    assert _scan_parts("") == ("", "", "dim-label")
+    when, body, tone = _scan_parts("2026-11-12 22:36  Scan error: folder not found: /sample/left")
+    assert (when, body, tone) == ("2026-11-12 22:36", "Scan error: folder not found: /sample/left", "result-error")
+    assert _scan_parts("2026-11-12 22:36  Complete scan: 0 files, 0 B to copy")[2] == "dim-label"
+    assert _scan_parts("Volume unavailable")[2] == "result-error"
+    assert _scan_parts("Skipped")[2] == "result-warn"
+    assert _scan_parts("Partial scan (review only): 2 files")[2] == "result-warn"
+    assert _scan_parts("", "Nothing to be done") == ("", "Nothing to be done", "dim-label")
+
+
+def test_row_parts_prefer_an_applied_run_and_fall_back_to_the_last_scan():
+    from ofs.ui import _profile_status, _row_parts
+
+    scanned = Profile(
+        name="scanned only",
+        left="/sample/left",
+        right="/sample/right",
+        last_scan_result="2026-11-12 22:36  Scan error: folder not found: /sample/left",
+    )
+    assert _row_parts(scanned) == ("2026-11-12 22:36", "Scan error: folder not found: /sample/left", "result-error")
+    assert _profile_status(scanned) == "errors"
+    scanned.last_result = "2026-11-11 10:00  0 copied, 0 deleted, 0 moved"
+    assert _row_parts(scanned)[2] == "result-ok"
+    assert _profile_status(scanned) == "clean"
+    fresh = Profile(name="never touched", left="/sample/left", right="/sample/right", note="Nothing to be done")
+    assert _row_parts(fresh) == ("", "Nothing to be done", "dim-label")
+    assert _profile_status(fresh) == "not_run"
+
+
+def test_a_failed_scan_reaches_the_overview_row_without_a_prior_run(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanFailureRow")
+    missing = tmp_path / "gone"
+    right = tmp_path / "right"
+    right.mkdir()
+    save_profile(Profile(name="broken scan", left=str(missing), right=str(right)))
+    seen = {"tones": [], "icons": []}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            from ofs.jobs import run_checked
+
+            owner = MainWindow(self)
+            results = run_checked([owner.profiles[0]], checked={"broken scan"})
+            owner._show_results(results)
+            saved = load_profiles()[0]
+            seen["last_scan_result"] = saved.last_scan_result
+            seen["label"] = owner._labels["broken scan"].get_text()
+            for widget in _widgets(owner.list_box):
+                if isinstance(widget, Gtk.Label):
+                    seen["tones"].extend(tone for tone in ("result-error", "dim-label") if tone in widget.get_css_classes())
+                if isinstance(widget, Gtk.Image) and widget.get_icon_name() == "dialog-error":
+                    seen["icons"].append(widget.get_tooltip_text())
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["last_scan_result"].endswith(f"Scan error: folder not found: {missing}")
+    assert seen["label"] == f"folder not found: {missing}"
+    assert "result-error" in seen["tones"]
+    assert seen["icons"] and seen["icons"][0].endswith(f"folder not found: {missing}")

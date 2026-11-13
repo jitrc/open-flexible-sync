@@ -4,6 +4,19 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+### Added
+
+- A profile that has never been copied now shows its last scan attempt in the overview row, with date and colour, so a folder that was renamed or moved reaches a visible error instead of an empty "Never run" row. A completed scan stays informational and never claims a clean sync.
+
+### Fixed
+
+- A missing folder no longer reports "Volume unavailable" without a path. The row and the global history now say `folder not found: <path>`, while a genuinely absent or different disk still reports `volume is not mounted: <label> (<path>)`.
+- A copy is no longer stopped by cache bookkeeping when the profile's destination cache is off: invalidation is skipped in that case and never creates the `cache/` folder. An enabled cache that cannot be invalidated still stops the copy before the first write.
+
+### Changed
+
+- Turning the destination cache Off now removes the stored snapshot, and renaming or deleting a profile removes it too, so a later re-enable cannot reuse metadata written before the switch.
+
 ## [0.4.7] - 2026-11-12
 
 ### Fixed

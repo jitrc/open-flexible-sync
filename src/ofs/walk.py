@@ -12,9 +12,18 @@ from ofs.compare import FileStat
 
 
 class MissingVolume(Exception):
+    """A configured path cannot be used: the volume is absent or the folder is gone."""
+
     def __init__(self, path: str):
         super().__init__(path)
         self.path = path
+
+
+class MissingFolder(MissingVolume):
+    """The folder itself does not exist, although its volume may still be mounted."""
+
+    def __init__(self, path: str):
+        super().__init__(path)
 
 
 class WalkStopped(Exception):
@@ -41,7 +50,7 @@ class WalkStats:
 def ensure_dir(path: str) -> Path:
     folder = Path(path)
     if not folder.is_dir():
-        raise MissingVolume(path)
+        raise MissingFolder(path)
     return folder
 
 

@@ -283,6 +283,11 @@ def apply_plan(
         nonlocal cache_invalidated
         if cache_invalidated:
             return True
+        if not profile.cache_destination:
+            # Nothing was stored for this profile, and a cache bookkeeping
+            # problem must never stop a copy that does not use the cache.
+            cache_invalidated = True
+            return True
         try:
             invalidate_destination(profile)
         except OSError as exc:

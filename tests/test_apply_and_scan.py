@@ -183,14 +183,17 @@ def test_cli_never_applies_a_partial_scan(tmp_path, monkeypatch, capsys):
     assert not (right / "known.txt").exists()
 
 
-def test_missing_volume_raises(tmp_path):
+def test_missing_folder_raises_before_scanning(tmp_path):
+    from ofs.walk import MissingFolder
+
     profile = Profile(name="p", left=str(tmp_path / "missing"), right=str(tmp_path))
     try:
         scan_profile(profile)
-    except MissingVolume as exc:
+    except MissingFolder as exc:
         assert exc.path == profile.left
+        assert isinstance(exc, MissingVolume)
     else:
-        raise AssertionError("expected MissingVolume")
+        raise AssertionError("expected MissingFolder")
 
 
 def test_older_keep_rotates_and_drops_the_oldest(tmp_path):

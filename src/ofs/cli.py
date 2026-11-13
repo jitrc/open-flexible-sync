@@ -11,7 +11,7 @@ from ofs.jobs import run_checked
 from ofs.legacy import import_cfg
 from ofs.model import Profile
 from ofs.store import install_imported, load_profiles, save_profile
-from ofs.walk import MissingVolume
+from ofs.walk import MissingFolder, MissingVolume
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -87,6 +87,9 @@ def _scan(name: str, *, apply: bool, uncached: bool = False) -> int:
         return 1
     try:
         results = run_checked([profile], checked={profile.name}, force_uncached=uncached)
+    except MissingFolder as exc:
+        print(f"folder not found: {exc.path}", file=sys.stderr)
+        return 1
     except MissingVolume as exc:
         print(f"volume is not mounted: {exc.path}", file=sys.stderr)
         return 1

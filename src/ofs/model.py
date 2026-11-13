@@ -96,6 +96,7 @@ class Profile:
     group_override: str = ""
     cache_destination: bool = False
     last_result: str = ""
+    last_scan_result: str = ""
     note: str = ""
     imported_settings: bool = False
 
@@ -146,6 +147,7 @@ class Profile:
             "group_override": self.group_override,
             "cache_destination": self.cache_destination,
             "last_result": self.last_result,
+            "last_scan_result": self.last_scan_result,
             "note": self.note,
             "imported_settings": self.imported_settings,
         }
@@ -186,6 +188,7 @@ class Profile:
             group_override=data.get("group_override") or "",
             cache_destination=bool(data.get("cache_destination", False)),
             last_result=data.get("last_result") or "",
+            last_scan_result=data.get("last_scan_result") or "",
             note=data.get("note") or "",
             imported_settings=bool(data.get("imported_settings", False)),
         )

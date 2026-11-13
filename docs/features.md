@@ -10,7 +10,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Imported/name-derived profiles with a shared first-word prefix form collapsible groups; singleton prefixes remain ordinary ungrouped rows. An optional **Group / subgroups** field in Edit allows arbitrary custom groups even for single profiles.
 - Use a path such as `Work / Photos / Archive` for nested groups. Parent counts include subgroups, and each parent has its own tri-state selection checkbox. Grouping is organizational only: changing it does not modify sync paths or invalidate the file database. Clearing the custom field restores name-based grouping.
 - Groups start collapsed. **Expand all**, **Collapse all**, and search help navigate the profile list; search opens matching groups.
-- Each profile row shows its name, Left/Right paths, last OFS run, and color-coded result, with **Run**, **Edit**, **Duplicate**, and **Delete** actions.
+- Each profile row shows its name, Left/Right paths, last OFS run, and color-coded result, with **Run**, **Edit**, **Duplicate**, and **Delete** actions. The result column shows the last applied run. A profile that has never been applied shows its last completed scan instead, so a failed scan is dated, red, and carries the failing path; a scan that finished is informational and never claims a clean sync. A run replaces that text on its next save.
 - Header actions use standard symbolic icons with accessible names and tooltips. Play starts checked scans, refresh forces uncached scans, the gear opens Settings, and the sun/moon toggle shows and changes the appearance.
 - Run an individual profile or scan only the enabled checked profiles. Different profiles scan in parallel. A profile already scanning shows **Scanning…**, its row button becomes **Running** and is disabled, and duplicate requests are ignored. A checked batch retains one combined summary when its parallel scans finish.
 - **Run uncached** is a visible header action for checked profiles. It performs fresh discovery without changing their saved cache preferences.
@@ -18,7 +18,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Search can match custom group/subgroup names and opens each required ancestor. **Expand all** and **Collapse all** also apply to subgroups.
 - Profile rows have subtle separators and alternate theme-derived surfaces, including during Light/Dark switching. Row checks immediately refresh the parent group's partial-selection state.
 - With at least 12 profiles and three real groups, ordinary ungrouped profiles are placed in a collapsed **(ungrouped)** section at the top. It supports the same visible-enabled tri-state selection and expands with search/Expand all. Small catalogs keep plain ungrouped rows, and no profile receives a virtual group setting.
-- Filter by status, never-run state, clean/stopped/error result, current selection, disabled state, minimum days since the last OFS result, or currently available paths. Filtering does not silently change the checked set.
+- Filter by status, never-run state, clean/stopped/error result, current selection, disabled state, minimum days since the last OFS result, or currently available paths. A profile that has only been scanned counts as never applied, but a failed or stopped scan still appears under errors or stopped. Filtering does not silently change the checked set.
 - A persistent **Disabled** setting blocks GUI, CLI, and batch execution without deleting the profile, its paths, history, exclusions, or last results.
 
 ## Profile management and migration
@@ -77,8 +77,9 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 - Live discovery clearly distinguishes **cache off**, **fresh discovery**, **uncached override**, and **cache reused**, independently for each possible destination side. Actual reuse—not merely enabling cache or failing to save it—is reported as cached.
 - Copy, move, delete, and explicit new-folder transfers invalidate destination metadata at the first mutating operation, before targets change, rather than waiting for a whole batch. Failure to invalidate stops with an error. Pre-work cancellation, ASK/no-op rows, and rejected guarded plans do not falsely claim a write.
 - A completed destination walk is saved as an atomic JSON manifest under the OFS `cache/` directory. The manifest stores paths, timestamps, size, kind, link target, permissions, and UID/GID; it never stores file contents.
-- The following fresh destination scan can reuse that metadata and is labeled as cached. The other/source tree is always read fresh. In both-direction mode the two possible destinations have independently validated metadata snapshots.
+- The following fresh destination scan can reuse that metadata and is labeled as cached. The other/source tree is always read fresh. Each destination side is validated independently; a both-direction profile stores the most recent completed destination snapshot.
 - The cache has no time-based expiry and survives restarts for later backup rounds. Its root path and filter settings must match; folder/mask changes or OFS copy/move/delete operations invalidate it. Canceled/skipped scans never become a cached manifest. An uncached refresh creates a fresh completed manifest.
+- Invalidation only ever deletes. Turning the cache Off removes the stored snapshot, so switching it back On cannot reuse metadata written before the switch. Invalidation is skipped for a profile whose cache is off, and it never creates the `cache/` folder, so cache bookkeeping cannot stop a copy that does not use the cache. Renaming or deleting a profile removes its snapshot.
 - **Cached metadata can miss changes made by other programs while the cache is valid.** After external changes, choose **Run uncached** in the header, or use `scan NAME --uncached` / `run NAME --uncached [--apply]`. This is a one-run override and does not turn off the saved setting.
 - A cache is not the file-history SQLite database, stored hashes, content-addressed storage, or post-copy verification. Metadata-only comparison cannot prove equal contents; optional binary comparison still performs its direct byte comparison on candidates.
 
@@ -145,5 +146,5 @@ Normal file copies preserve file mode and timestamps. Optional permission-bit an
 
 Local and OS-mounted folders work on either side, including SMB/CIFS, NFS, SSHFS, rclone, NAS, and other mounted storage. OFS operates on those ordinary filesystem paths without owning a network protocol or account credentials.
 
-Optional Left/Right volume labels identify the required disk. A missing folder or unexpected volume fails that profile rather than scanning the wrong disk, and a checked batch can continue with the next profile.
+Optional Left/Right volume labels identify the required disk. A missing folder or unexpected volume fails that profile rather than scanning the wrong disk, and a checked batch can continue with the next profile. The row says **folder not found** with the path when only the folder is gone, and **volume is not mounted** with the label and path when the disk is absent or different.
 

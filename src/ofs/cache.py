@@ -27,10 +27,24 @@ def destination_sides(profile: Profile) -> tuple[str, ...]:
     return ("Right",)
 
 
+def cache_path(name: str) -> Path:
+    """Where one profile's destination snapshot lives. Never creates the folder."""
+
+    return config_dir() / "cache" / f"{quote(name, safe='')}.json"
+
+
 def _path(profile: Profile) -> Path:
+    """Snapshot path for writing: the cache folder is created on demand."""
+
     folder = config_dir() / "cache"
     folder.mkdir(parents=True, exist_ok=True)
-    return folder / f"{quote(profile.name, safe='')}.json"
+    return cache_path(profile.name)
+
+
+def forget(name: str) -> None:
+    """Remove a profile's snapshot without creating the cache folder."""
+
+    cache_path(name).unlink(missing_ok=True)
 
 
 def _settings_signature(profile: Profile, global_masks: list[str], global_mode) -> list:
@@ -47,7 +61,7 @@ def _settings_signature(profile: Profile, global_masks: list[str], global_mode) 
 def load_destination(profile: Profile, side: str, global_masks: list[str], global_mode) -> tuple[dict[str, FileStat], float] | None:
     if not profile.cache_destination:
         return None
-    path = _path(profile)
+    path = cache_path(profile.name)
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
         if document.get("format") != FORMAT or document.get("version") != VERSION:
@@ -105,6 +119,11 @@ def save_destination(profile: Profile, side: str, global_masks: list[str], globa
 
 
 def invalidate_destination(profile: Profile) -> None:
-    """Remove all side caches after OFS writes, even for manual preview overrides."""
+    """Remove this profile's snapshot after OFS writes, even for manual preview overrides.
 
-    _path(profile).unlink(missing_ok=True)
+    Reading the snapshot never creates the cache folder, so invalidation is a
+    no-op for a profile that never saved one and cannot fail on a missing or
+    read-only cache directory that holds nothing.
+    """
+
+    forget(profile.name)

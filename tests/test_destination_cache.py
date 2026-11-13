@@ -194,3 +194,76 @@ def test_destination_selection_supports_each_direction():
     assert destination_sides(left) == ("Right",)
     assert destination_sides(right) == ("Left",)
     assert destination_sides(both) == ("Left", "Right")
+
+
+def test_invalidation_never_creates_the_cache_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path)
+    invalidate_destination(profile)
+    assert not (config_dir() / "cache").exists()
+    profile.cache_destination = True
+    save_destination(profile, "Right", [], profile.exclusion_mode, {"a": FileStat(1, 1)})
+    assert cache_module.cache_path(profile.name).exists()
+    invalidate_destination(profile)
+    assert not cache_module.cache_path(profile.name).exists()
+
+
+def test_a_copy_that_does_not_use_the_cache_is_never_stopped_by_cache_bookkeeping(tmp_path, monkeypatch):
+    import ofs.apply as apply_module
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path)
+    (tmp_path / "left" / "a").write_text("new")
+    (tmp_path / "right" / "a").write_text("old")
+
+    def refuse(_profile):
+        raise OSError("read-only configuration directory")
+
+    monkeypatch.setattr(apply_module, "invalidate_destination", refuse)
+    report = apply_plan(profile, [Change("a", Action.COPY_LEFT_TO_RIGHT, "different", 3)])
+    assert report.copied == 1 and report.errors == []
+    assert (tmp_path / "right" / "a").read_text() == "new"
+
+
+def test_an_enabled_cache_that_cannot_be_invalidated_stops_before_any_write(tmp_path, monkeypatch):
+    import ofs.apply as apply_module
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    (tmp_path / "left" / "a").write_text("new")
+    (tmp_path / "right" / "a").write_text("old")
+
+    def refuse(_profile):
+        raise OSError("read-only configuration directory")
+
+    monkeypatch.setattr(apply_module, "invalidate_destination", refuse)
+    report = apply_plan(profile, [Change("a", Action.COPY_LEFT_TO_RIGHT, "different", 3)])
+    assert report.copied == 0
+    assert any("invalidation stopped" in error for error in report.errors)
+    assert (tmp_path / "right" / "a").read_text() == "old"
+
+
+def test_turning_the_cache_off_removes_the_snapshot(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    save_profile(profile)
+    save_destination(profile, "Right", [], profile.exclusion_mode, {"a": FileStat(1, 1)})
+    assert cache_module.cache_path(profile.name).exists()
+    profile.cache_destination = False
+    save_profile(profile)
+    assert not cache_module.cache_path(profile.name).exists()
+
+
+def test_rename_and_delete_do_not_leave_snapshots_behind(tmp_path, monkeypatch):
+    from ofs.store import delete_profile, load_profiles, rename_profiles
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _profile(tmp_path, cache_destination=True)
+    save_profile(profile)
+    save_destination(profile, "Right", [], profile.exclusion_mode, {"a": FileStat(1, 1)})
+    rename_profiles([(profile.name, "cache renamed")])
+    assert not cache_module.cache_path(profile.name).exists()
+    renamed = next(item for item in load_profiles() if item.name == "cache renamed")
+    save_destination(renamed, "Right", [], renamed.exclusion_mode, {"a": FileStat(1, 1)})
+    delete_profile(renamed.name)
+    assert not cache_module.cache_path(renamed.name).exists()

@@ -150,7 +150,8 @@ def copy_new_folder(
     if excluded(relative):
         raise FolderCopyError("The selected folder is excluded. Adjust the profile exclusions before using this action.")
 
-    invalidate_destination(profile)
+    if profile.cache_destination:
+        invalidate_destination(profile)
     extra_parents = _create_destination_parents(destination_root, destination)
     temporary = Path(tempfile.mkdtemp(prefix=f".{destination.name}.ofs-", suffix=".new", dir=destination.parent))
     report = ApplyReport()

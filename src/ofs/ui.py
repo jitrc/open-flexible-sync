@@ -25,7 +25,7 @@ from ofs.archive import older_files, restore_version
 from ofs.bulk import FIELDS, bulk_preview, prepare_bulk_edit
 from ofs.cache import destination_sides
 from ofs.compare import Action, Change, comparison_rule_text, format_bytes, plan_summary
-from ofs.jobs import JobResult, run_checked
+from ofs.jobs import JobResult, run_checked, scan_summary
 from ofs.folder_copy import FolderCopyOutcome, copy_new_folder
 from ofs.history import delete_history
 from ofs.legacy import import_cfg, import_global_masks
@@ -456,9 +456,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if status == "disabled":
             return profile.disabled
         if status == "stale":
-            return _not_run_since(profile.last_result, self.stale_days.get_value_as_int())
+            return _not_run_since(_last_activity(profile), self.stale_days.get_value_as_int())
         if status != "all":
-            return _result_status(profile.last_result) == status
+            return _profile_status(profile) == status
         return True
 
     def _update_filter_count(self) -> None:
@@ -638,7 +638,8 @@ class MainWindow(Gtk.ApplicationWindow):
         check.connect("toggled", self._toggled, profile.name)
         name_row = Gtk.Box(spacing=6)
         name_row.append(check)
-        status = _status_icon(profile.last_result)
+        when, body, tone = _row_parts(profile)
+        status = _tone_icon(body, tone)
         if status is not None:
             name_row.append(status)
         if profile.disabled:
@@ -656,7 +657,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if profile.disabled:
             text.add_css_class("profile-disabled")
 
-        when, body, tone = _result_parts(profile.last_result, profile.note)
+        when, body, tone = _row_parts(profile)
         local_scan = profile.name in self._scan_running
         app = self._ofs_app
         active_elsewhere = isinstance(app, SfsApplication) and app.profile_is_active(profile.name)
@@ -1616,7 +1617,26 @@ class MainWindow(Gtk.ApplicationWindow):
         finally:
             self._ofs_app.release()
 
+    def _record_scan_results(self, results: list[JobResult]) -> bool:
+        """Persist the dated scan outcome so a row shows success or error, never nothing."""
+
+        stamp = time.strftime("%Y-%m-%d %H:%M")
+        changed = False
+        for job in results:
+            text = f"{stamp}  {scan_summary(job)}"
+            if job.profile.last_scan_result == text:
+                continue
+            job.profile.last_scan_result = text
+            try:
+                save_profile(job.profile)
+            except OSError:
+                pass
+            changed = True
+        return changed
+
     def _show_results(self, results: list[JobResult]) -> bool:
+        if results and self._record_scan_results(results):
+            self._rebuild()
         if results and all(job.error == "scan stopped" for job in results):
             for job in results:
                 self._live_completed.pop(job.profile.name, None)
@@ -1723,6 +1743,52 @@ def _result_status(last_result: str) -> str:
     return {"result-error": "errors", "result-warn": "stopped"}.get(tone, "clean")
 
 
+def _scan_parts(text: str, note: str = "") -> tuple[str, str, str]:
+    """Timestamp, body, and tone for a scan attempt.
+
+    A completed scan is informational: it does not claim a clean run, so it
+    stays dim and carries no status icon. A failed scan is red and keeps the
+    path, which is what makes a broken profile visible at a glance.
+    """
+
+    stripped = text.strip()
+    if not stripped:
+        return "", note, "dim-label"
+    match = _RUN_RESULT.match(stripped)
+    when, body = match.groups() if match else ("", stripped)
+    lowered = body.lower()
+    if lowered.startswith(("scan error", "folder not found", "volume is not mounted", "volume unavailable", "scan unavailable")):
+        tone = "result-error"
+    elif lowered.startswith(("stopped", "skipped", "partial", "scan stopped")):
+        tone = "result-warn"
+    else:
+        tone = "dim-label"
+    return when, body, tone
+
+
+def _row_parts(profile: Profile) -> tuple[str, str, str]:
+    """Overview row: the last applied run, or the last scan when never applied."""
+
+    when, body, tone = _result_parts(profile.last_result, "")
+    if body:
+        return when, body, tone
+    return _scan_parts(profile.last_scan_result, profile.note)
+
+
+def _last_activity(profile: Profile) -> str:
+    return profile.last_result if profile.last_result.strip() else profile.last_scan_result
+
+
+def _profile_status(profile: Profile) -> str:
+    """Filter status: an applied run first, then a scan that failed or stopped."""
+
+    status = _result_status(profile.last_result)
+    if status == "not_run":
+        tone = _scan_parts(profile.last_scan_result)[2]
+        status = {"result-error": "errors", "result-warn": "stopped"}.get(tone, "not_run")
+    return status
+
+
 def _not_run_since(last_result: str, days: int, now: float | None = None) -> bool:
     """Never/undated runs need attention; dated runs are stale after N days."""
 
@@ -1741,9 +1807,15 @@ def _status_icon(last_result: str) -> Gtk.Image | None:
     """5.71-style row status: green check ran clean, red for errors, orange for stopped, none for never run."""
 
     _when, body, tone = _result_parts(last_result, "")
-    if not body:
+    return _tone_icon(body, tone)
+
+
+def _tone_icon(body: str, tone: str) -> Gtk.Image | None:
+    """Icon for a row tone; informational rows (dim) carry none."""
+
+    name = {"result-error": "dialog-error", "result-warn": "dialog-warning", "result-ok": "emblem-ok"}.get(tone)
+    if not body or name is None:
         return None
-    name = {"result-error": "dialog-error", "result-warn": "dialog-warning"}.get(tone, "emblem-ok")
     icon = Gtk.Image.new_from_icon_name(name)
     icon.set_pixel_size(16)
     icon.set_tooltip_text(body)
@@ -3885,11 +3957,10 @@ class RunHistoryWindow(Gtk.Window):
             kind = {"scan": "Scan", "copy": "Copy", "folder-copy": "New folder"}[entry.kind]
             kind_label = Gtk.Label(label=kind, xalign=0, width_chars=10, css_classes=["dim-label"])
             summary = Gtk.Label(label=entry.summary, xalign=0, wrap=True, hexpand=True, selectable=True)
-            _time, _body, tone = _result_parts(entry.summary, "")
-            if entry.kind == "scan" and entry.summary in {"Volume unavailable", "Scan unavailable"}:
-                tone = "result-error"
-            elif entry.kind == "scan" and (entry.summary == "Skipped" or entry.summary.startswith("Partial scan")):
-                tone = "result-warn"
+            if entry.kind == "scan":
+                tone = _scan_parts(entry.summary)[2]
+            else:
+                _time, _body, tone = _result_parts(entry.summary, "")
             if tone:
                 summary.add_css_class(tone)
             content = Gtk.Box(spacing=12)

@@ -233,7 +233,11 @@ def scan_profile(
 
 
 def remember(profile: Profile) -> None:
-    """Record history and invalidate cached destinations after any OFS changes."""
+    """Record the file-history snapshot for a profile that tracks one.
+
+    Destination-cache invalidation is not done here; the copy paths invalidate
+    before they write, so history can still be recorded after a run.
+    """
 
     masks = global_exclusions()
     mode = global_exclusion_mode()

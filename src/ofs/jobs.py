@@ -10,7 +10,7 @@ from ofs.model import Profile
 from ofs.run_history import record as record_run
 from ofs.scan import ScanResult, scan_profile
 from ofs.settings import record_scan_estimate
-from ofs.walk import MissingVolume, WalkSkipped, WalkStopped
+from ofs.walk import MissingFolder, MissingVolume, WalkSkipped, WalkStopped
 
 
 @dataclass
@@ -20,21 +20,25 @@ class JobResult:
     error: str | None
 
 
-def _record_scan_history(job: JobResult) -> None:
+def scan_summary(job: JobResult) -> str:
+    """One line for the overview row and the global history list."""
+
     if job.result is None:
         if job.error == "scan stopped":
-            summary = "Stopped by user"
-        elif job.error == "scan skipped":
-            summary = "Skipped"
-        elif (job.error or "").startswith("volume is not mounted"):
-            summary = "Volume unavailable"
-        else:
-            summary = "Scan unavailable"
-    elif job.result.partial_sides:
-        summary = f"Partial scan (review only): {plan_summary(job.result.changes)}"
-    else:
-        cache = "cached " if job.result.cached else ""
-        summary = f"Complete {cache}scan: {plan_summary(job.result.changes)}"
+            return "Stopped by user"
+        if job.error == "scan skipped":
+            return "Skipped"
+        # Keep the path: "folder not found" is the actionable part, and both
+        # the row and the history list colour anything with "error" as failed.
+        return f"Scan error: {job.error or 'scan unavailable'}"
+    if job.result.partial_sides:
+        return f"Partial scan (review only): {plan_summary(job.result.changes)}"
+    cache = "cached " if job.result.cached else ""
+    return f"Complete {cache}scan: {plan_summary(job.result.changes)}"
+
+
+def _record_scan_history(job: JobResult) -> None:
+    summary = scan_summary(job)
     try:
         record_run(job.profile.name, "scan", summary)
     except OSError as exc:
@@ -42,7 +46,7 @@ def _record_scan_history(job: JobResult) -> None:
         if job.result is not None:
             job.result.note = (job.result.note + " " if job.result.note else "") + warning
         else:
-            job.error = f"{job.error or 'Scan unavailable'}; {warning}"
+            job.error = f"{job.error or 'scan unavailable'}; {warning}"
 
 
 def run_checked(
@@ -88,6 +92,9 @@ def run_checked(
                 on_entry=None if on_entry is None else report_entry,
                 force_uncached=force_uncached,
             )
+        except MissingFolder as exc:
+            result = None
+            error = f"folder not found: {exc.path}"
         except MissingVolume as exc:
             result = None
             error = f"volume is not mounted: {exc.path}"
