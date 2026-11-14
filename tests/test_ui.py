@@ -3895,9 +3895,17 @@ def test_returning_to_a_result_does_not_scroll_to_an_offscreen_profile(tmp_path,
         save_profile(Profile(name=f"group-{index // 2:02d} profile-{index:02d}", left="/sample/left", right="/sample/right"))
     seen = {}
 
-    def settle():
-        while GLib.MainContext.default().pending():
+    def settle(seconds: float = 0.0):
+        # Focus scrolling is animated, so let the loop run for real time or the
+        # animation's first frame never arrives.
+        deadline = time.monotonic() + seconds
+        while True:
+            while GLib.MainContext.default().pending():
+                GLib.MainContext.default().iteration(False)
+            if time.monotonic() >= deadline:
+                return
             GLib.MainContext.default().iteration(False)
+            time.sleep(0.005)
 
     class App(SfsApplication):
         def do_activate(self):
@@ -3912,7 +3920,7 @@ def test_returning_to_a_result_does_not_scroll_to_an_offscreen_profile(tmp_path,
             # The finished profile is far above the viewport.
             window._focused_profile = "group-00 profile-00"
             window._return_to_profile("group-00 profile-00")
-            settle()
+            settle(0.8)
             seen["after"] = adjustment.get_value()
             seen["maximum"] = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
             seen["focused"] = window._focused_profile

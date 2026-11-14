@@ -400,13 +400,32 @@ class MainWindow(Gtk.ApplicationWindow):
         self._profile_restore_pending = False
         if self._profile_return_pending:
             self._profile_return_pending = False
+            row = self._profile_rows.get(self._focused_profile)
             check = self._profile_check_buttons.get(self._focused_profile)
-            if check is not None and check.get_mapped():
+            # GTK scrolls the focused widget into view, and it animates that
+            # scroll. Focusing an off-screen checkbox therefore drags the whole
+            # overview to the finished profile even though the restore above
+            # deliberately kept the user's position. Only a row the user can
+            # already see may take focus.
+            if check is not None and check.get_mapped() and self._row_in_view(row):
                 check.grab_focus()
-            # Focus scrolling reveals only the checkbox, which can leave the
-            # rest of the finished profile's row below the viewport.
-            self._scroll_profile_into_view(self._profile_rows.get(self._focused_profile))
+                # Focus scrolling reveals only the checkbox, which can leave the
+                # rest of the finished profile's row below the viewport.
+                self._scroll_profile_into_view(row)
         return False
+
+    def _row_in_view(self, row: Gtk.Widget | None) -> bool:
+        """True when any part of the row is inside the profile viewport."""
+
+        if row is None or not row.get_mapped():
+            return False
+        adjustment = self.profiles_scroll.get_vadjustment()
+        page = adjustment.get_page_size()
+        point = row.translate_coordinates(self.list_box, 0, 0)
+        if page <= 0 or point is None:
+            return False
+        top = point[1] - adjustment.get_value()
+        return top + row.get_height() > 0 and top < page
 
     def _scroll_profile_into_view(self, row: Gtk.Widget | None) -> None:
         """Move as little as needed so the whole profile row is readable."""
