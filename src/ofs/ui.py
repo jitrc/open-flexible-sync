@@ -1997,6 +1997,33 @@ def _failed_relative_paths(errors: list[str]) -> list[str]:
     return paths
 
 
+def _error_groups(errors: list[str]) -> list[str]:
+    """One line per failing place: repeated errors in one folder collapse into one line."""
+
+    groups: dict[str, list[str]] = {}
+    order: list[str] = []
+    for message in errors:
+        rel, separator, detail = message.partition(": ")
+        key = detail if separator else message
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        if separator:
+            groups[key].append(rel)
+    lines = []
+    for key in order:
+        rels = groups[key]
+        if len(rels) == 1:
+            lines.append(f"{rels[0]}: {key}")
+        elif rels:
+            folder = _failed_common_folder(rels)
+            where = folder or "several paths"
+            lines.append(f"{where} ({len(rels)} entries): {key}")
+        else:
+            lines.append(key)
+    return lines
+
+
 def _failed_common_folder(paths: list[str]) -> str:
     if not paths:
         return ""
@@ -4274,8 +4301,14 @@ class ResultsWindow(Gtk.Window):
         root.append(headline)
         root.append(grid)
         if report.errors:
-            errors = Gtk.Label(label="\n".join(report.errors), xalign=0, wrap=True)
+            lines = _error_groups(report.errors)
+            if len(lines) != len(report.errors):
+                grouped = Gtk.Label(xalign=0)
+                grouped.set_markup(f"<b>{len(report.errors)} errors in {len(lines)} place(s)</b>")
+                root.append(grouped)
+            errors = Gtk.Label(label="\n".join(lines), xalign=0, wrap=True)
             errors.add_css_class("error")
+            errors.set_tooltip_text("\n".join(report.errors))
             root.append(errors)
             failed_paths = _failed_relative_paths(report.errors)
             common_folder = _failed_common_folder(failed_paths)

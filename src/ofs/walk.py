@@ -111,6 +111,7 @@ def walk(
     on_stats=None,
     on_entry=None,
     symlinks: str = "follow",
+    on_unreadable=None,
 ) -> dict[str, FileStat]:
     """Return file/link metadata, with optional following and cycle protection."""
 
@@ -157,13 +158,19 @@ def walk(
         report(child)
         return True
 
+    def unreadable(rel: str, exc: OSError) -> None:
+        # Never treat a folder that cannot be read as an empty folder: its contents are unknown.
+        if on_unreadable is not None:
+            on_unreadable(rel or ".", str(exc))
+
     def visit(directory: Path, rel: str, ancestors: set[tuple[int, int]]) -> bool:
         nonlocal discovered, filtered
         check()
         try:
             info = directory.stat()
             identity = (info.st_dev, info.st_ino)
-        except OSError:
+        except OSError as exc:
+            unreadable(rel, exc)
             return False
         if identity in ancestors:
             filtered += 1
@@ -173,7 +180,8 @@ def walk(
         report(rel)
         try:
             entries = list(os.scandir(directory))
-        except OSError:
+        except OSError as exc:
+            unreadable(rel, exc)
             return False
         for entry in entries:
             check()
@@ -181,7 +189,11 @@ def walk(
             path = Path(entry.path)
             try:
                 info = entry.stat(follow_symlinks=False)
-            except OSError:
+            except OSError as exc:
+                # An entry that cannot even be examined is unknown, not absent. Treating it as
+                # absent is what turns a filesystem error into a silent mirror deletion.
+                if not (skip_dir(child) or (skip_file is not None and skip_file(child))):
+                    unreadable(child, exc)
                 continue
             discovered += 1
             if stat.S_ISLNK(info.st_mode):

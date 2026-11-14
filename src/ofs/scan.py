@@ -6,12 +6,12 @@ import os
 import stat
 import time
 from contextlib import nullcontext
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from ofs.apply import files_identical
 from ofs.cache import destination_sides, invalidate_destination, load_destination, save_destination
-from ofs.compare import Change, FileStat, build_plan, classify_time
+from ofs.compare import Action, Change, FileStat, build_plan, classify_time
 from ofs.history import adjust_plan, load_history, save_history
 from ofs.masks import any_match
 from ofs.model import ExclusionMode, Profile
@@ -37,6 +37,7 @@ class ScanResult:
     set_last: str = ""
     set_next: str = ""
     set_total: int = 0
+    unreadable: tuple[tuple[str, str, str], ...] = ()
 
 
 def missing_destination(profile: Profile) -> tuple[str, str] | None:
@@ -158,6 +159,39 @@ def root_names(left: Path, right: Path) -> list[str]:
     return sorted(names)
 
 
+def _inside_folder(rel: str, folder: str) -> bool:
+    if folder in {"", "."}:
+        # An unreadable profile root makes every entry unknown.
+        return True
+    return rel == folder or rel.startswith(folder + "/")
+
+
+def block_unknown_subtrees(changes: list[Change], unreadable) -> list[Change]:
+    """Leave entries inside unreadable folders as ASK: their contents are unknown, not absent."""
+
+    if not unreadable:
+        return changes
+    result = []
+    for change in changes:
+        hit = None
+        for side, folder, message in unreadable:
+            if _inside_folder(change.rel, folder) or (change.dest_rel and _inside_folder(change.dest_rel, folder)):
+                hit = (side, folder, message)
+                break
+        if change.action == Action.ASK or hit is None:
+            result.append(change)
+            continue
+        side, folder, _message = hit
+        result.append(
+            replace(
+                change,
+                action=Action.ASK,
+                reason=f"contents unknown: {folder} could not be read on the {side.lower()}, so this is left as it is",
+            )
+        )
+    return result
+
+
 def scan_profile(
     profile: Profile,
     *,
@@ -218,6 +252,7 @@ def scan_profile(
     cache_notes = []
     cached_sides: set[str] = set()
     partial_sides = []
+    unreadable: list[tuple[str, str, str]] = []
 
     def read_names(side: str, root: Path, destination: bool, names: list[str]) -> dict[str, FileStat]:
         """Read only the named root children. A set scan never uses or saves the cache."""
@@ -272,6 +307,9 @@ def scan_profile(
                 if on_entry is not None:
                     on_entry(side, f"{name}/{rel}", item)
 
+            def scoped_unreadable(rel: str, message: str, name: str = name) -> None:
+                unreadable.append((side, name if rel == "." else f"{name}/{rel}", message))
+
             try:
                 subtree = walk(
                     path,
@@ -282,6 +320,7 @@ def scan_profile(
                     on_stats=scoped_stats,
                     on_entry=None if on_entry is None else scoped_entry,
                     symlinks=profile.symlinks.value,
+                    on_unreadable=scoped_unreadable,
                 )
             except WalkSkipped as exc:
                 partial_sides.append(side)
@@ -329,6 +368,7 @@ def scan_profile(
                 on_stats=stats(side),
                 on_entry=None if on_entry is None else lambda rel, stat: on_entry(side, rel, stat),
                 symlinks=profile.symlinks.value,
+                on_unreadable=lambda rel, message: unreadable.append((side, rel, message)),
             )
             files = drop_session(files)
         except WalkSkipped as exc:
@@ -343,7 +383,12 @@ def scan_profile(
             if control is not None:
                 control.clear_skip()
             return files
-        if destination and profile.cache_destination and not partial_sides and not session_filters_used:
+        if destination and profile.cache_destination and unreadable and not partial_sides:
+            # A manifest that is missing an unreadable folder would claim that folder is empty later.
+            cache_notes.append(
+                "The destination cache was not saved because a folder could not be read; a later scan must read the destination fresh."
+            )
+        elif destination and profile.cache_destination and not partial_sides and not session_filters_used:
             try:
                 save_destination(profile, side, masks, mode, files)
             except OSError as exc:
@@ -390,6 +435,7 @@ def scan_profile(
             global_masks=masks,
             global_mode=mode,
         )
+    changes = block_unknown_subtrees(changes, unreadable)
     note = ""
     if partial_sides:
         sides = " and ".join(partial_sides)
@@ -406,10 +452,23 @@ def scan_profile(
             note = history_note
         elif history is not None:
             with rules_lock:
-                changes = adjust_plan(
-                    profile, changes, left, right, history, global_masks=masks,
-                    session_skips=session_skips, session_masks=session_masks,
+                changes = block_unknown_subtrees(
+                    adjust_plan(
+                        profile, changes, left, right, history, global_masks=masks,
+                        session_skips=session_skips, session_masks=session_masks,
+                    ),
+                    unreadable,
                 )
+    unreadable_note = ""
+    if unreadable:
+        side, folder, message = unreadable[0]
+        more = "" if len(unreadable) == 1 else f" (and {len(unreadable) - 1} more)"
+        count = "1 path" if len(unreadable) == 1 else f"{len(unreadable)} paths"
+        unreadable_note = (
+            f"{count} could not be read, so the contents are unknown: "
+            f"{folder} on the {side.lower()} ({message}){more}. Entries inside are left as they are: "
+            "no copy, move, or delete touches an unreadable path. Repair or remount that folder, or exclude it, then rescan."
+        )
     return ScanResult(
         changes,
         len(left),
@@ -420,6 +479,7 @@ def scan_profile(
             part
             for part in (
                 note,
+                unreadable_note,
                 *cache_notes,
                 f"Created the missing destination folder {created_destination}; this first copy is a full copy of the source."
                 if created_destination
@@ -434,6 +494,7 @@ def scan_profile(
         set_last=set_last,
         set_next=set_next,
         set_total=set_total,
+        unreadable=tuple(unreadable),
     )
 
 

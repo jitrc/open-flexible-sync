@@ -6,10 +6,12 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Added
 
+- A folder that cannot be read is no longer treated as an empty folder. OFS now records it, leaves every entry inside it undecided, and says which folder failed and why, so a mirror run cannot delete a good copy because the source folder could not be listed, and cannot try to write into a destination folder it cannot open. The destination cache is not saved while a folder is unreadable.
 - Settings has **Scan in sets of (files, 0 = one complete scan)** for very large trees. Each set walks whole root names in sorted order up to the limit and is a complete plan for those names, so Start, deletes, moves, and safeguards work normally while memory follows the set instead of the whole tree. After a set is copied cleanly, OFS scans the next one in the same window; its copy still needs the normal Start. Set scans skip the destination cache and the file-history baseline, and a rename crossing two sets becomes a copy plus a delete.
 
 ### Changed
 
+- Copying results group repeated failures by folder and reason, and a folder that cannot be opened fails once instead of once per file inside it. The remaining entries under it are skipped and counted, and the detail stays in the log and the tooltip.
 - Rows, plan changes, and file metadata use slotted records, cutting the per-file object overhead for large comparisons.
 
 ## [0.4.8] - 2026-11-13

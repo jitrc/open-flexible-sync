@@ -3501,3 +3501,51 @@ def test_a_set_preview_names_its_set_and_continues_after_a_clean_copy(tmp_path, 
     assert "the next set continues after this copy" in seen["detail"]
     assert seen["started"] == ["one"]
     assert seen["started_after_error"] == ["one"]
+
+
+def test_copying_results_group_repeated_errors_into_one_place(tmp_path, monkeypatch):
+    from ofs.apply import ApplyReport
+    from ofs.scan import ScanResult
+    from ofs.ui import _error_groups
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestGroupedErrors")
+    errors = [
+        "archive/2024/batch/J7KQ/a.c9r: [Errno 22] Invalid argument",
+        "archive/2024/batch/J7KQ/b.c9r: [Errno 22] Invalid argument",
+        "archive/2024/batch/J7KQ/c.c9r: [Errno 22] Invalid argument",
+        "unrelated/file.bin: [Errno 13] Permission denied",
+    ]
+    assert _error_groups(errors) == [
+        "archive/2024/batch/J7KQ (3 entries): [Errno 22] Invalid argument",
+        "unrelated/file.bin: [Errno 13] Permission denied",
+    ]
+    profile = Profile(name="grouped errors", left="/sample/left", right="/sample/right")
+    save_profile(profile)
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            owner = MainWindow(self)
+            preview = owner._preview(JobResult(profile, ScanResult([]), None))
+            window = ResultsWindow(preview, ApplyReport(errors=errors), None)
+            labels = []
+
+            def collect(widget):
+                if isinstance(widget, Gtk.Label):
+                    labels.append(widget.get_text())
+                child = widget.get_first_child()
+                while child is not None:
+                    collect(child)
+                    child = child.get_next_sibling()
+
+            collect(window)
+            seen["labels"] = labels
+            window.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    joined = "\n".join(seen["labels"])
+    assert "4 errors in 2 place(s)" in joined
+    assert "archive/2024/batch/J7KQ (3 entries): [Errno 22] Invalid argument" in joined
+    assert "a.c9r: [Errno 22]" not in joined

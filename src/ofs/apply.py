@@ -259,6 +259,73 @@ def _inside(root: Path, rel: str, *, link_ok: bool = False) -> Path:
     return target
 
 
+def _change_sides(change: Change) -> list[tuple[str, str]]:
+    """The (side, relative path) pairs a change touches, in the order they are opened."""
+
+    if change.action == Action.COPY_LEFT_TO_RIGHT:
+        return [("left", change.rel), ("right", change.rel)]
+    if change.action == Action.COPY_RIGHT_TO_LEFT:
+        return [("right", change.rel), ("left", change.rel)]
+    if change.action == Action.DELETE_RIGHT:
+        return [("right", change.rel)]
+    if change.action == Action.DELETE_LEFT:
+        return [("left", change.rel)]
+    if change.action == Action.MOVE_ON_RIGHT:
+        return [("right", change.rel), ("right", change.dest_rel)]
+    if change.action == Action.MOVE_ON_LEFT:
+        return [("left", change.rel), ("left", change.dest_rel)]
+    return []
+
+
+def _folder_is_unusable(path: Path) -> bool:
+    """True when the folder itself cannot be opened, as opposed to one file inside it."""
+
+    try:
+        with os.scandir(path) as entries:
+            next(entries, None)
+    except OSError:
+        return True
+    return False
+
+
+def _folder_failure(exc: BaseException, roots: dict[str, Path], change: Change) -> tuple[str, str] | None:
+    """The folder that stopped the change, when the folder itself cannot be opened.
+
+    One unreadable folder must fail once, not once per file inside it. A single
+    unreadable file leaves its siblings alone, so only the folder is tested.
+    """
+
+    if not isinstance(exc, OSError):
+        # A policy refusal names one entry; it must never collapse a whole folder.
+        return None
+    for side, rel in _change_sides(change):
+        root = roots.get(side)
+        if root is None:
+            continue
+        parent = (root / rel).parent
+        if not _folder_is_unusable(parent):
+            continue
+        try:
+            folder = parent.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        return side, "" if folder == "." else folder
+    return None
+
+
+def _blocked_by_folder(change: Change, failed: dict[tuple[str, str], list]) -> tuple[str, str] | None:
+    if not failed:
+        return None
+    for side, rel in _change_sides(change):
+        for folder in failed:
+            if folder[0] != side:
+                continue
+            name = folder[1]
+            if rel == name or rel.startswith(name + "/"):
+                return folder
+    return None
+
+
 def apply_plan(
     profile: Profile,
     changes: list[Change],
@@ -316,6 +383,19 @@ def apply_plan(
         report.errors.extend(layout_errors)
         progress.finish()
         return report
+    failed_folders: dict[tuple[str, str], list] = {}
+
+    def report_folder_failures() -> None:
+        for (side, folder), record in failed_folders.items():
+            message, skipped = record
+            label = f"{folder}/" if folder else "./"
+            if skipped:
+                more = "1 more entry" if skipped == 1 else f"{skipped} more entries"
+                verb = "was" if skipped == 1 else "were"
+                report.errors.append(f"{label}: {message} — {more} inside this folder {verb} skipped. ({side})")
+            else:
+                report.errors.append(f"{label}: {message} ({side})")
+
     for index, change in enumerate(ordered):
         progress.begin(index, change)
         if control is not None and not control.checkpoint():
@@ -325,8 +405,16 @@ def apply_plan(
             report.skipped += 1
             progress.complete(index, change)
             continue
+        blocked = _blocked_by_folder(change, failed_folders)
+        if blocked is not None:
+            # One failure per folder: do not retry every file inside a folder that cannot be opened.
+            failed_folders[blocked][1] += 1
+            report.skipped += 1
+            progress.complete(index, change)
+            continue
         if change.action in {Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT, Action.MOVE_ON_RIGHT, Action.MOVE_ON_LEFT, Action.DELETE_RIGHT, Action.DELETE_LEFT}:
             if not invalidate_before_write():
+                report_folder_failures()
                 return report
         try:
             if change.action == Action.COPY_LEFT_TO_RIGHT:
@@ -345,8 +433,15 @@ def apply_plan(
             report.cancelled = True
             break
         except (OSError, ApplyError) as exc:
-            report.errors.append(f"{change.rel}: {exc}")
+            folder = _folder_failure(exc, {"left": left_root, "right": right_root}, change)
+            if folder is None:
+                report.errors.append(f"{change.rel}: {exc}")
+            elif folder in failed_folders:
+                failed_folders[folder][1] += 1
+            else:
+                failed_folders[folder] = [str(exc), 0]
         progress.complete(index, change)
+    report_folder_failures()
     progress.finish()
     return report
 
