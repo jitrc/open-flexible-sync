@@ -36,6 +36,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Fixed
 
+- Closing every OFS window while a scan or copy is still running now ends the process once that operation finishes, instead of leaving an invisible instance running in the background.
 - Clicking Scan no longer moves the profile overview back to the first profile. Every overview rebuild (scan start, scan finish, checkbox toggle) restores the saved scroll position and the focused row's offset; only filter and Expand-all changes start at the top.
 - A scan that cannot run now says **Scan failed** in the window title, shows a red banner with the exact reason and path, names the unavailable side, and points at Edit for the path; a user-stopped scan still says **Scan stopped** and explains the review-only rows.
 - A missing folder no longer reports "Volume unavailable" without a path. The row and the global history now say `folder not found: <path>`, while a genuinely absent or different disk still reports `volume is not mounted: <label> (<path>)`.

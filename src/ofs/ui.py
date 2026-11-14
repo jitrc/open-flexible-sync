@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import threading
 import time
+import weakref
 from collections import Counter, deque
 from pathlib import Path, PurePosixPath
 
@@ -383,6 +384,10 @@ class MainWindow(Gtk.ApplicationWindow):
     ) -> bool:
         if generation != self._profile_scroll_generation:
             return False
+        # A coordinate query makes GTK allocate the rebuilt rows first; without
+        # it the adjustment still reports the old, shorter content and clamping
+        # would strand the view near the top.
+        self.list_box.translate_coordinates(self.profiles_scroll, 0, 0)
         adjustment = self.profiles_scroll.get_vadjustment()
         maximum = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
         requested = saved_scroll
@@ -5890,6 +5895,44 @@ class SfsApplication(Gtk.Application):
         )
         self._active_profiles: set[str] = set()
         self._profile_operation_lock = threading.Lock()
+        # A scan or copy holds the application so OFS survives closing its
+        # windows. When the last hold is released and no window is visible,
+        # the process must end instead of lingering invisibly.
+        self._holds = 0
+        # Only windows that were actually shown count: a window built but never
+        # presented (tests, pre-built dialogs) must not decide when OFS ends.
+        self._ever_mapped: weakref.WeakSet = weakref.WeakSet()
+        self.connect("window-added", self._track_window)
+        self.connect("window-removed", self._quit_if_finished)
+
+    def hold(self) -> None:
+        self._holds += 1
+        super().hold()
+
+    def release(self) -> None:
+        if self._holds > 0:
+            self._holds -= 1
+        super().release()
+        self._quit_if_finished()
+
+    def _track_window(self, _app, window) -> None:
+        reference = weakref.ref(window)
+
+        def remember(*_args) -> None:
+            target = reference()
+            if target is not None and target.get_mapped():
+                self._ever_mapped.add(target)
+
+        window.connect("notify::mapped", remember)
+
+    def _quit_if_finished(self, *_args) -> None:
+        if self._holds:
+            return
+        if not self._ever_mapped:
+            return
+        if any(window.get_visible() for window in self.get_windows()):
+            return
+        self.quit()
 
     def open_new_window(self) -> MainWindow:
         apply_appearance(theme())

@@ -3801,6 +3801,36 @@ def test_a_big_plan_opens_collapsed_and_loads_a_folder_when_expanded(tmp_path, m
     assert seen["plan_after"] == seen["plan"]
 
 
+def test_closing_every_window_ends_the_app_after_the_held_scan_finishes(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestQuitAfterHold")
+    save_profile(Profile(name="closing", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window.present()
+            self.hold()          # e.g. a scan keeps OFS alive
+            window.close()       # the last visible window goes away
+            GLib.timeout_add(80, self._operation_finished)
+            GLib.timeout_add(3000, self._give_up)
+
+        def _operation_finished(self) -> bool:
+            seen["released"] = True
+            self.release()
+            return False
+
+        def _give_up(self) -> bool:
+            seen["timed_out"] = True
+            self.quit()
+            return False
+
+    assert App().run(None) == 0
+    assert seen["released"] is True
+    assert seen.get("timed_out") is not True
+
+
 def test_copy_start_warns_when_the_destination_lacks_free_space(tmp_path, monkeypatch):
     import types
 
