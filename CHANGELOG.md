@@ -4,6 +4,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-14
+
 ### Added
 
 - Settings has **Stop a scan that makes no progress for (minutes, 0 = never)**, five minutes by default. An unavailable mount now stops with the path named and that side review-only, instead of the window appearing to hang; copying and deleting stay disabled until a rescan completes.
@@ -196,7 +198,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.8...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.8...v0.5.0
 [0.4.8]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.6...v0.4.7
 [0.4.6]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.5...v0.4.6
