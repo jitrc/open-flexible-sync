@@ -3678,3 +3678,70 @@ def test_a_big_plan_opens_collapsed_and_loads_a_folder_when_expanded(tmp_path, m
     assert seen["alpha_rows_after"][:5] == ["file-0.bin", "file-1.bin", "file-2.bin", "file-3.bin", "file-4.bin"]
     assert seen["alpha_rows_after"][-1] != "Show 3 more file(s)…"
     assert seen["plan_after"] == seen["plan"]
+
+
+def test_incremental_row_changes_update_folder_totals_without_a_rebuild():
+    """One row or folder change patches the model instead of rebuilding it."""
+
+    from ofs.review import build_tree
+    from ofs.ui import Preview
+
+    class Store:
+        def __init__(self):
+            self.values = {}
+
+        def set_value(self, it, column, value):
+            self.values[(it, column)] = value
+
+    class Fake:
+        _apply_row_changes = Preview._apply_row_changes
+        _refresh_folder_row = Preview._refresh_folder_row
+        _refresh_file_row = Preview._refresh_file_row
+        _ancestors = staticmethod(Preview._ancestors)
+
+        def __init__(self, rows):
+            self.rows = rows
+            self._folder_iters = {"area": ("folder", "area")}
+            self._file_iters = {"area/a.txt": ("file", "a"), "area/b.txt": ("file", "b")}
+            self._folder_stats = {}
+            self._folder_totals = {}
+            self._visible_changes = {}
+            self._completed_rows = {}
+            self.tree_store = Store()
+            self.detail_refreshed = 0
+            node = build_tree(rows, top_level_only=True)[0]
+            assert node.name == "area"
+            self._folder_stats["area"] = {mark: [count, size] for mark, (count, size) in node.groups.items()}
+            self._folder_totals["area"] = node.size
+
+        def _refresh_detail(self):
+            self.detail_refreshed += 1
+
+    rows = [
+        Listed(Change("area/a.txt", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False),
+        Listed(Change("area/b.txt", Action.COPY_LEFT_TO_RIGHT, "only on source", 20), True, False),
+    ]
+    fake = Fake(rows)
+
+    before = rows[0].change
+    rows[0].change = Change("area/a.txt", Action.ASK, "chosen in preview", 10)
+    fake._apply_row_changes([(rows[0], before, rows[0].change)])
+
+    assert fake.tree_store.values[(("folder", "area"), 3)] == "1 to copy to the right · 1 undecided"
+    assert fake.tree_store.values[(("file", "a"), 3)] == "chosen in preview"
+    assert fake.tree_store.values[(("file", "a"), 2)].startswith("L ──? R")
+    assert fake._visible_changes["area/a.txt"].action == Action.ASK
+    assert fake.detail_refreshed == 1
+
+    # A direction change for the folder flips both rows and the folder wording.
+    updates = []
+    for row in rows:
+        old = row.change
+        row.change = Change(row.change.rel, Action.COPY_RIGHT_TO_LEFT, "chosen in preview", row.change.size)
+        updates.append((row, old, row.change))
+    fake._apply_row_changes(updates)
+
+    assert fake.tree_store.values[(("folder", "area"), 2)] == "L ◀── R  2"
+    assert fake.tree_store.values[(("folder", "area"), 3)] == "2 to copy to the left"
+    assert fake.tree_store.values[(("folder", "area"), 1)] == "30 B"
+    assert fake.tree_store.values[(("file", "b"), 3)] == "chosen in preview"

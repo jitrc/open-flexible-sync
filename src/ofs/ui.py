@@ -43,6 +43,10 @@ from ofs.review import (
     safety_text,
     build_tree,
     deletion_violations,
+    direction_mark,
+    file_detail,
+    group_rank,
+    group_verb,
     point_change,
     shown_summary,
     status_lines,
@@ -2337,6 +2341,11 @@ class Preview(Gtk.Window):
         self._visible_rows: list[Listed] = []
         self._deferred: set[str] = set()
         self._loaded_files: dict[str, int] = {}
+        self._folder_stats: dict[str, dict[str, list[int]]] = {}
+        self._row_index_generation = 0
+        self._row_index_rel = -1
+        self._rows_by_rel: dict[str, object] = {}
+        self._folder_totals: dict[str, int] = {}
         self._more_counts: dict[str, int] = {}
         self.partial = bool(job.result.partial_sides)
         if self.partial:
@@ -3023,9 +3032,6 @@ class Preview(Gtk.Window):
 
         if rel not in self._folder_iters:
             return False
-        row = next((item for item in self._visible_rows if item.change.rel == rel), None)
-        if row is not None:
-            self.tree_store.set_value(self._folder_iters[rel], 3, _completed_or(row, self._completed_rows))
         folders, files, remaining = folder_children(
             self._visible_rows,
             rel,
@@ -3189,6 +3195,7 @@ class Preview(Gtk.Window):
             self.shown.set_text("Scan stopped: no comparison plan. Nothing can be copied from an incomplete scan.")
             self._refresh_detail()
             return
+        self._row_index_generation += 1
         visible = [row for row in self.rows if matches(row, **self.filters)]
         self._visible_rows = visible
         self._deferred = set()
@@ -3261,6 +3268,90 @@ class Preview(Gtk.Window):
             node.more_folder if node.more else "",
         ]
 
+    def _remember_folder_stats(self, node) -> None:
+        """Keep a materialised folder's totals so one row change can update them."""
+
+        if not getattr(node, "groups", None):
+            self._folder_stats.pop(node.rel, None)
+            self._folder_totals.pop(node.rel, None)
+            return
+        self._folder_stats[node.rel] = {mark: [count, size] for mark, (count, size) in node.groups.items()}
+        self._folder_totals[node.rel] = node.size
+
+    @staticmethod
+    def _ancestors(rel: str) -> list[str]:
+        parts = rel.split("/")
+        return ["/".join(parts[:depth]) for depth in range(1, len(parts))]
+
+    def _refresh_folder_row(self, rel: str) -> None:
+        it = self._folder_iters.get(rel)
+        if it is None or rel not in self._folder_stats:
+            return
+        groups = self._folder_stats[rel]
+        total = self._folder_totals.get(rel, 0)
+        parts = [
+            f"{count} {group_verb(mark)}"
+            for mark, (count, _size) in sorted(groups.items(), key=lambda item: group_rank(item[0]))
+            if count
+        ]
+        status = " · ".join(parts) if parts else "unchanged"
+        direction = "    ".join(
+            f"{mark}  {count}"
+            for mark, (count, _size) in sorted(groups.items(), key=lambda item: group_rank(item[0]))
+            if count
+        ) or "L ─── R"
+        self.tree_store.set_value(it, 0, f"{rel.rsplit('/', 1)[-1]}    {format_bytes(total)}")
+        self.tree_store.set_value(it, 1, format_bytes(total))
+        self.tree_store.set_value(it, 2, direction)
+        self.tree_store.set_value(it, 3, status)
+
+    def _refresh_file_row(self, listed) -> None:
+        change = listed.change
+        it = self._file_iters.get(change.rel)
+        if it is None:
+            return
+        self.tree_store.set_value(it, 2, direction_mark(change.action))
+        self.tree_store.set_value(it, 3, file_detail(change))
+        self.tree_store.set_value(it, 5, change.rel in self._completed_rows)
+
+    def _apply_row_changes(self, updates: list[tuple[object, Change, Change]]) -> None:
+        """Update rows and folder totals in place; no model rebuild.
+
+        A rebuild costs a full pass over the plan, which is why one row or one
+        folder direction used to stall a large preview.
+        """
+
+        touched_folders: set[str] = set()
+        for listed, old, new in updates:
+            if old.action == new.action and old.size == new.size:
+                continue
+            rel = new.rel
+            old_mark = direction_mark(old.action)
+            new_mark = direction_mark(new.action)
+            for folder in self._ancestors(rel):
+                stats = self._folder_stats.get(folder)
+                if stats is None:
+                    continue
+                if old.action != Action.UNCHANGED:
+                    entry = stats.get(old_mark)
+                    if entry is not None:
+                        entry[0] -= 1
+                        entry[1] -= old.size
+                        if entry[0] <= 0:
+                            stats.pop(old_mark, None)
+                if new.action != Action.UNCHANGED:
+                    entry = stats.setdefault(new_mark, [0, 0])
+                    entry[0] += 1
+                    entry[1] += new.size
+                if old.size != new.size:
+                    self._folder_totals[folder] = self._folder_totals.get(folder, 0) + new.size - old.size
+                touched_folders.add(folder)
+            self._visible_changes[rel] = new
+            self._refresh_file_row(listed)
+        for folder in sorted(touched_folders):
+            self._refresh_folder_row(folder)
+        self._refresh_detail()
+
     def _placeholder_child(self) -> object:
         from ofs.review import TreeNode
 
@@ -3287,6 +3378,7 @@ class Preview(Gtk.Window):
                     self._file_iters[node.rel] = current
             else:
                 self._folder_iters[node.rel] = current
+                self._remember_folder_stats(node)
             if getattr(node, "deferred", False):
                 self._deferred.add(node.rel)
                 self.tree_store.append(current, self._node_values(self._placeholder_child()))
@@ -3314,6 +3406,7 @@ class Preview(Gtk.Window):
                     self.store.append(PlanRow(self._visible_changes[node.rel]))
             else:
                 self._folder_iters[node.rel] = current
+                self._remember_folder_stats(node)
                 if not getattr(node, "deferred", False):
                     self._queue_folder_expansion(node.rel, current)
             if getattr(node, "deferred", False):
@@ -3430,16 +3523,14 @@ class Preview(Gtk.Window):
             self.detail.set_text(f"No known in-scope files under {folder} on {side}; nothing was added to the plan.")
             return False
         action = Action.DELETE_LEFT if side == "left" else Action.DELETE_RIGHT
+        updates = []
         for item in selected:
-            item.change = Change(
-                item.change.rel,
-                action,
-                "chosen folder deletion in preview",
-                item.change.size,
-            )
+            before = item.change
+            item.change = Change(before.rel, action, "chosen folder deletion in preview", before.size)
+            updates.append((item, before, item.change))
         count = len(selected)
         total = sum(item.change.size for item in selected)
-        self._refill()
+        self._apply_row_changes(updates)
         self.detail.set_text(f"Added {count} folder deletions ({format_bytes(total)}) on {side}. Review them, then Start for the normal deletion confirmation.")
         return True
 
@@ -3477,6 +3568,12 @@ class Preview(Gtk.Window):
         popover.set_child(box)
         self._popover = popover
         popover.popup()
+
+    def _listed_row(self, rel: str):
+        if self._row_index_rel != self._row_index_generation:
+            self._row_index_rel = self._row_index_generation
+            self._rows_by_rel = {row.change.rel: row for row in self.rows}
+        return self._rows_by_rel.get(rel)
 
     def _planned(self) -> list[Change]:
         return [row.change for row in self.rows if row.change.action not in (Action.UNCHANGED, Action.SKIPPED)]
@@ -3650,33 +3747,37 @@ class Preview(Gtk.Window):
             self.detail.set_text(f"Could not run {command}: {exc}")
 
     def _set_action(self, row: PlanRow, action: Action | None) -> None:
-        listed = next((item for item in self.rows if item.change.rel == row.change.rel), None)
+        listed = self._listed_row(row.change.rel)
         if listed is None:
             return
-        original = self._original.get(row.change.rel, listed.change)
+        before = listed.change
+        original = self._original.get(row.change.rel, before)
         if action is None:
             listed.change = original
         else:
-            listed.change = Change(
-                listed.change.rel, action, "chosen in preview", listed.change.size, listed.change.dest_rel
-            )
-        self._refill()
+            listed.change = Change(before.rel, action, "chosen in preview", before.size, before.dest_rel)
+        self._apply_row_changes([(listed, before, listed.change)])
 
     def _set_folder_direction(self, rel: str, toward: str) -> None:
         prefix = rel.strip("/")
         if not prefix:
             return
         prefix += "/"
+        updates = []
         for item in self.rows:
             path = item.change.rel
             if path == rel or path.startswith(prefix):
+                before = item.change
                 item.change = point_change(
                     item.change,
                     toward,
                     on_left=item.on_left,
                     on_right=item.on_right,
                 )
-        self._refill()
+                if item.change is not before:
+                    updates.append((item, before, item.change))
+        if updates:
+            self._apply_row_changes(updates)
 
     def _ignore_folder(self, rel: str) -> None:
         folder = rel.strip().strip("/")

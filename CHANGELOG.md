@@ -12,6 +12,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Changed
 
+- Changing a row, pointing a folder either way, or adding folder deletions now updates those rows and their folder totals in place instead of rebuilding the comparison tree, so a single action no longer costs a full pass over the plan on large previews.
 - A comparison of 20,000 files or more now opens collapsed with only its top-level folders. Expanding a folder loads its children (the first 200, then **Show N more file(s)…** streams the next batch), so a huge plan costs rows only where you look; the plan, Start, and the deletion safeguards are unchanged.
 - Folder rows name the work in the Status column ("427 undecided", "12 to copy to the right") instead of repeating a byte total that the Size column already shows.
 - Exclusion masks are prepared once per scan instead of being re-parsed for every entry, which makes a large walk with many rules dramatically faster on the same trees; the matching rules are unchanged and checked against the original algorithm, including a randomized comparison. The live preview also stops adding rows after 50,000 paths and says so, so a million-entry scan no longer pins gigabytes of live rows before the comparison finishes; the completed plan still shows every row.

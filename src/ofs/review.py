@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
@@ -140,6 +140,9 @@ class TreeNode:
     # many files this folder still holds back, and `more_folder` names it.
     more: int = 0
     more_folder: str = ""
+    # Counts and sizes per direction group, so a later single-row change can
+    # update this folder's totals without rescanning the whole plan.
+    groups: dict[str, tuple[int, int]] = field(default_factory=dict)
     # Large plans render the top level only; a folder's children are built when
     # it is expanded, so the window never holds a row per file up front.
     deferred: bool = False
@@ -257,6 +260,49 @@ _GROUP_VERBS = {
     Action.ASK: "undecided",
     Action.SKIPPED: "skipped",
 }
+
+
+def group_counts(changes: list[Change]) -> dict[str, tuple[int, int]]:
+    """Files and bytes per direction group, the numbers a folder row displays."""
+
+    counts: dict[str, tuple[int, int]] = {}
+    for mark, chosen in _active_groups(changes):
+        counts[mark] = (len(chosen), sum(change.size for change in chosen))
+    return counts
+
+
+def group_verb(mark: str) -> str:
+    """The words for a direction group, keyed by the mark a row displays."""
+
+    return {
+        direction_mark(Action.COPY_LEFT_TO_RIGHT): _GROUP_VERBS[Action.COPY_LEFT_TO_RIGHT],
+        direction_mark(Action.COPY_RIGHT_TO_LEFT): _GROUP_VERBS[Action.COPY_RIGHT_TO_LEFT],
+        direction_mark(Action.DELETE_RIGHT): _GROUP_VERBS[Action.DELETE_RIGHT],
+        direction_mark(Action.DELETE_LEFT): _GROUP_VERBS[Action.DELETE_LEFT],
+        direction_mark(Action.ASK): _GROUP_VERBS[Action.ASK],
+        direction_mark(Action.SKIPPED): _GROUP_VERBS[Action.SKIPPED],
+    }.get(mark, "changed")
+
+
+_GROUP_ORDER = {
+    direction_mark(action): index
+    for index, action in enumerate(
+        (
+            Action.COPY_LEFT_TO_RIGHT,
+            Action.COPY_RIGHT_TO_LEFT,
+            Action.DELETE_RIGHT,
+            Action.DELETE_LEFT,
+            Action.ASK,
+            Action.SKIPPED,
+        )
+    )
+}
+
+
+def group_rank(mark: str) -> int:
+    """Keep folder wording in the same order the direction column uses."""
+
+    return _GROUP_ORDER.get(mark, len(_GROUP_ORDER))
 
 
 def folder_status(changes: list[Change]) -> tuple[int, str]:
@@ -381,6 +427,7 @@ def build_tree(
                     direction=direction_summary(changes),
                     status=status,
                     children=emit(child, child["rel"]),
+                    groups=group_counts(changes),
                 )
             )
         files, hidden = file_nodes(node["files"])
@@ -421,6 +468,7 @@ def build_tree(
                 status=status,
                 children=[],
                 deferred=True,
+                groups=group_counts(changes),
             )
         )
     files, hidden = file_nodes(root["files"])
@@ -506,6 +554,7 @@ def folder_children(
                 status=status,
                 children=[],
                 deferred=True,
+                groups=group_counts(changes),
             )
         )
     nodes = [
