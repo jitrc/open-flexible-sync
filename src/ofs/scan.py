@@ -168,11 +168,35 @@ def root_names(left: Path, right: Path) -> list[str]:
     return sorted(names)
 
 
-def _inside_folder(rel: str, folder: str) -> bool:
-    if folder in {"", "."}:
-        # An unreadable profile root makes every entry unknown.
-        return True
-    return rel == folder or rel.startswith(folder + "/")
+def _folder_lookup(unreadable) -> tuple[dict[str, tuple[str, str]], str]:
+    """Unreadable folders by relative path, plus the side whose whole root is unknown."""
+
+    folders: dict[str, tuple[str, str]] = {}
+    whole_root = ""
+    for side, rel, message in unreadable:
+        if rel in {"", "."}:
+            whole_root = whole_root or side
+            continue
+        folders.setdefault(rel, (side, message))
+    return folders, whole_root
+
+
+def _blocking_folder(rel: str, folders: dict[str, tuple[str, str]]) -> tuple[str, str, str] | None:
+    """The unreadable folder covering `rel`, checked through its ancestors only.
+
+    A plan can hold millions of rows and a broken mount can report thousands of
+    unreadable folders, so this must never compare every row with every folder.
+    """
+
+    if not folders:
+        return None
+    current = ""
+    for part in rel.split("/"):
+        current = part if not current else current + "/" + part
+        hit = folders.get(current)
+        if hit is not None:
+            return hit[0], current, hit[1]
+    return None
 
 
 def block_unknown_subtrees(changes: list[Change], unreadable) -> list[Change]:
@@ -180,22 +204,30 @@ def block_unknown_subtrees(changes: list[Change], unreadable) -> list[Change]:
 
     if not unreadable:
         return changes
+    folders, whole_root = _folder_lookup(unreadable)
+    if not folders and not whole_root:
+        return changes
+
+    def covered(rel: str) -> tuple[str, str, str] | None:
+        if not rel:
+            return None
+        if whole_root:
+            return whole_root, ".", "root"
+        return _blocking_folder(rel, folders)
+
     result = []
     for change in changes:
-        hit = None
-        for side, folder, message in unreadable:
-            if _inside_folder(change.rel, folder) or (change.dest_rel and _inside_folder(change.dest_rel, folder)):
-                hit = (side, folder, message)
-                break
+        hit = covered(change.rel) or (covered(change.dest_rel) if change.dest_rel else None)
         if change.action == Action.ASK or hit is None:
             result.append(change)
             continue
         side, folder, _message = hit
+        where = "the profile root" if folder == "." else folder
         result.append(
             replace(
                 change,
                 action=Action.ASK,
-                reason=f"contents unknown: {folder} could not be read on the {side.lower()}, so this is left as it is",
+                reason=f"contents unknown: {where} could not be read on the {side.lower()}, so this is left as it is",
             )
         )
     return result
@@ -318,8 +350,10 @@ def scan_profile(
                 if on_entry is not None:
                     on_entry(side, f"{name}/{rel}", item)
 
-            def scoped_unreadable(rel: str, message: str, name: str = name) -> None:
-                unreadable.append((side, name if rel == "." else f"{name}/{rel}", message))
+            def scoped_unreadable(rel: str, message: str, name: str = name, side: str = side) -> None:
+                entry = (side, name if rel == "." else f"{name}/{rel}", message)
+                if entry not in unreadable:
+                    unreadable.append(entry)
 
             try:
                 subtree = walk(

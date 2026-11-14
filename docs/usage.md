@@ -22,6 +22,8 @@ Settings holds the compare command and the global exclusions. Until you save tha
 
 Restore Older… in the header operates on the one checked profile. It is also available in Edit, including for a disabled profile. Select file versions and choose a destination outside both synchronized folders. Restoration copies the archive atomically without changing the archive or either live tree. Existing destination files are not overwritten. Relative paths are recreated below the chosen folder.
 
+A large comparison opens with only its top-level folders. Expanding one loads that folder's files (the first 200, then **Show N more file(s)…** brings the next batch), so a million-file plan stays light to look at while Start still applies the whole plan.
+
 Settings also has **Stop a scan that makes no progress for (minutes, 0 = never)** (5 minutes by default). It is a safety net for an unavailable mount: when a scan discovers nothing new for that long it stops, names the path that stalled, and leaves that side review-only instead of looking frozen.
 
 Settings also has **Scan in sets of (files, 0 = one complete scan)**. Set it to a few hundred thousand for very large trees: each scan then covers whole root folders up to about that many files, the preview says which set it is, and after that set is copied OFS scans the next one in the same window. Each set is a complete plan for its folders, so Start, deletes, and safeguards work as usual; only the memory footprint is bounded. Leave it at 0 to scan everything at once. A single root folder bigger than the limit cannot be split further. Set scans do not use the destination cache or update the file-history baseline, and a rename that crosses two sets becomes a copy plus a delete instead of a move.

@@ -166,6 +166,11 @@ _PREVIEW_BATCH_SIZE = 250
 # A live preview is a courtesy, not the plan: stop queueing rows past this point so a
 # million-entry scan cannot pin gigabytes of GTK rows before the comparison finishes.
 _PREVIEW_LIVE_LIMIT = 50_000
+# A finished comparison over a big plan opens collapsed, top-level folders only;
+# expanding a folder builds its children then, so rows cost what you look at.
+_LAZY_TREE_ROWS = 20_000
+_FOLDER_FILE_BATCH = 200
+_FOLDER_MORE_BATCH = 1_000
 _PREVIEW_ASYNC_THRESHOLD = 1000
 
 
@@ -2328,6 +2333,11 @@ class Preview(Gtk.Window):
         self._record_tree_state = True
         self._expand_queue = deque()
         self._expand_scheduled = False
+        self._lazy_tree = False
+        self._visible_rows: list[Listed] = []
+        self._deferred: set[str] = set()
+        self._loaded_files: dict[str, int] = {}
+        self._more_counts: dict[str, int] = {}
         self.partial = bool(job.result.partial_sides)
         if self.partial:
             self.set_title(f"{job.profile.name} — Partial scan (review only)")
@@ -2446,13 +2456,15 @@ class Preview(Gtk.Window):
         if rule:
             header.append(self.rule_label)
 
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str])
         self.view = Gtk.TreeView(model=self.tree_store)
         self.view.set_headers_visible(True)
         self.view.set_enable_tree_lines(True)
         self.view.set_enable_search(True)
         self.view.set_search_column(0)
         self.view.connect("row-expanded", self._remember_tree_state, True)
+        self.view.connect("row-expanded", self._folder_expanded)
+        self.view.connect("row-activated", self._row_activated)
         self.view.connect("row-collapsed", self._remember_tree_state, False)
         for index, title, width in (
             (0, "Name", 320),
@@ -2681,13 +2693,13 @@ class Preview(Gtk.Window):
             prefix = "/".join(parts[:depth])
             folder = self._folder_iters.get(prefix)
             if folder is None:
-                folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False])
+                folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False, ""])
                 self._folder_iters[prefix] = folder
                 self._queue_folder_expansion(prefix, folder)
             parent = folder
         current = self.tree_store.append(
             parent,
-            [parts[-1], format_bytes(row.change.size), "L ··· R", row.change.reason, rel, False],
+            [parts[-1], format_bytes(row.change.size), "L ··· R", row.change.reason, rel, False, ""],
         )
         self._file_iters[rel] = current
         self.store.append(PlanRow(row.change))
@@ -2970,9 +2982,10 @@ class Preview(Gtk.Window):
     def _refresh_tree_layout(self) -> None:
         self._record_tree_state = False
         try:
-            if self._tree_default_expanded:
+            if self._tree_default_expanded and not self._lazy_tree:
                 self.view.expand_all()
             else:
+                # A big plan opens collapsed: expanding a folder loads its children then.
                 self.view.collapse_all()
             self._apply_tree_overrides()
         finally:
@@ -2995,6 +3008,112 @@ class Preview(Gtk.Window):
                     self.view.collapse_row(path)
         finally:
             self._record_tree_state = True
+
+    def _folder_expanded(self, _view, tree_iter, _path) -> None:
+        rel = self.tree_store.get_value(tree_iter, 4)
+        if not rel or rel not in self._deferred:
+            return
+        self._deferred.discard(rel)
+        GLib.idle_add(self._load_folder_children, rel, tree_iter)
+
+    def _load_folder_children(self, rel: str, parent_iter) -> bool:
+        """Build one folder's children now, so only opened folders cost rows."""
+
+        from ofs.review import folder_children
+
+        if rel not in self._folder_iters:
+            return False
+        row = next((item for item in self._visible_rows if item.change.rel == rel), None)
+        if row is not None:
+            self.tree_store.set_value(self._folder_iters[rel], 3, _completed_or(row, self._completed_rows))
+        folders, files, remaining = folder_children(
+            self._visible_rows,
+            rel,
+            file_limit=_FOLDER_FILE_BATCH,
+            minimum_size=self.review_min_size,
+            size_target=self.review_size_target,
+            size_scope=self.review_size_scope,
+            sort_by=self._tree_sort,
+        )
+        placeholder = self.tree_store.iter_children(parent_iter)
+        if placeholder is not None:
+            self.tree_store.remove(placeholder)
+        for node in folders:
+            current = self.tree_store.append(parent_iter, self._node_values(node))
+            self._folder_iters[node.rel] = current
+            self._deferred.add(node.rel)
+            self.tree_store.append(current, self._node_values(self._placeholder_child()))
+        for node in files:
+            current = self.tree_store.append(parent_iter, self._node_values(node))
+            if node.rel:
+                self._file_iters[node.rel] = current
+                change = self._visible_changes.get(node.rel)
+                if change is not None:
+                    self.store.append(PlanRow(change))
+        self._loaded_files[rel] = len(files)
+        if remaining:
+            self._append_more_row(rel, parent_iter, remaining)
+        return False
+
+    def _append_more_row(self, folder: str, parent_iter, remaining: int) -> None:
+        from ofs.review import TreeNode
+
+        node = TreeNode(
+            name=f"Show {remaining:,} more file(s)…",
+            rel="",
+            is_file=False,
+            size_text="",
+            size=0,
+            direction="",
+            status="Hidden to keep the window light; the plan includes them",
+            children=[],
+            more=remaining,
+            more_folder=folder,
+        )
+        self._more_counts[folder] = remaining
+        self.tree_store.append(parent_iter, self._node_values(node))
+
+    def _row_activated(self, _view, path, _column) -> None:
+        tree_iter = self.tree_store.get_iter(path)
+        if tree_iter is None:
+            return
+        folder = self.tree_store.get_value(tree_iter, 6)
+        if folder:
+            self._show_more_files(folder, tree_iter)
+
+    def _show_more_files(self, folder: str, more_iter) -> None:
+        from ofs.review import folder_children
+
+        already = self._loaded_files.get(folder, 0)
+        folders, files, remaining = folder_children(
+            self._visible_rows,
+            folder,
+            file_offset=already,
+            file_limit=_FOLDER_MORE_BATCH,
+            minimum_size=self.review_min_size,
+            size_target=self.review_size_target,
+            size_scope=self.review_size_scope,
+            sort_by=self._tree_sort,
+        )
+        parent_iter = self.tree_store.iter_parent(more_iter)
+        self.tree_store.remove(more_iter)
+        target = parent_iter
+        for node in folders:
+            current = self.tree_store.append(target, self._node_values(node))
+            self._folder_iters[node.rel] = current
+            self._deferred.add(node.rel)
+            self.tree_store.append(current, self._node_values(self._placeholder_child()))
+        for node in files:
+            current = self.tree_store.append(target, self._node_values(node))
+            if node.rel:
+                self._file_iters[node.rel] = current
+                change = self._visible_changes.get(node.rel)
+                if change is not None:
+                    self.store.append(PlanRow(change))
+        self._loaded_files[folder] = already + len(files)
+        if remaining:
+            if parent_iter is not None:
+                self._append_more_row(folder, parent_iter, remaining)
 
     def _queue_folder_expansion(self, rel: str, folder_iter) -> None:
         """Expand a folder only after it has children, in bounded idle batches.
@@ -3071,6 +3190,31 @@ class Preview(Gtk.Window):
             self._refresh_detail()
             return
         visible = [row for row in self.rows if matches(row, **self.filters)]
+        self._visible_rows = visible
+        self._deferred = set()
+        self._loaded_files = {}
+        self._more_counts = {}
+        self._lazy_tree = len(visible) >= _LAZY_TREE_ROWS
+        if self._lazy_tree:
+            self._pending_tree = [
+                (None, node)
+                for node in reversed(
+                    build_tree(
+                        visible,
+                        minimum_size=self.review_min_size,
+                        size_target=self.review_size_target,
+                        size_scope=self.review_size_scope,
+                        sort_by=self._tree_sort,
+                        folder_limit=_FOLDER_FILE_BATCH,
+                        top_level_only=True,
+                    )
+                )
+            ]
+            self._visible_changes = {row.change.rel: row.change for row in visible}
+            self._replace_tree_model = True
+            self._refresh_detail()
+            GLib.idle_add(self._fill_some, self._fill_generation)
+            return
         if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD and (self.review_min_size or self._tree_sort != "name"):
             self._tree_nodes(visible)
             return
@@ -3096,7 +3240,7 @@ class Preview(Gtk.Window):
         self._refresh_detail()
 
     def _reset_tree_model(self) -> None:
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str])
         # Replace only the GTK model. Exclusion/filter helpers own the flat store.
         self.view.set_model(self.tree_store)
         self._folder_iters = {}
@@ -3105,19 +3249,48 @@ class Preview(Gtk.Window):
         self._expand_queue.clear()
 
     def _node_values(self, node) -> list:
-        label = node.name if node.is_file else f"{node.name}    {node.size_text}"
+        label = node.name if node.is_file or not node.size_text else f"{node.name}    {node.size_text}"
         status = self._completed_rows.get(node.rel, node.status)
-        return [label, node.size_text, node.direction, status, node.rel, node.rel in self._completed_rows]
+        return [
+            label,
+            node.size_text,
+            node.direction,
+            status,
+            node.rel,
+            bool(node.rel) and node.rel in self._completed_rows,
+            node.more_folder if node.more else "",
+        ]
+
+    def _placeholder_child(self) -> object:
+        from ofs.review import TreeNode
+
+        return TreeNode(
+            name="Loading…",
+            rel="",
+            is_file=True,
+            size_text="",
+            size=0,
+            direction="",
+            status="Expand to load this folder",
+            children=[],
+        )
 
     def _fill_tree(self, visible: list[Listed]) -> None:
         self._reset_tree_model()
 
         def add(parent, node) -> None:
             current = self.tree_store.append(parent, self._node_values(node))
+            if node.more:
+                self._more_counts[node.more_folder] = getattr(self, "_more_counts", {}).get(node.more_folder, 0)
             if node.is_file:
-                self._file_iters[node.rel] = current
+                if node.rel:
+                    self._file_iters[node.rel] = current
             else:
                 self._folder_iters[node.rel] = current
+            if getattr(node, "deferred", False):
+                self._deferred.add(node.rel)
+                self.tree_store.append(current, self._node_values(self._placeholder_child()))
+                return
             for child in node.children:
                 add(current, child)
 
@@ -3136,11 +3309,17 @@ class Preview(Gtk.Window):
             parent, node = self._pending_tree.pop()
             current = self.tree_store.append(parent, self._node_values(node))
             if node.is_file:
-                self._file_iters[node.rel] = current
-                self.store.append(PlanRow(self._visible_changes[node.rel]))
+                if node.rel:
+                    self._file_iters[node.rel] = current
+                    self.store.append(PlanRow(self._visible_changes[node.rel]))
             else:
                 self._folder_iters[node.rel] = current
-                self._queue_folder_expansion(node.rel, current)
+                if not getattr(node, "deferred", False):
+                    self._queue_folder_expansion(node.rel, current)
+            if getattr(node, "deferred", False):
+                self._deferred.add(node.rel)
+                self.tree_store.append(current, self._node_values(self._placeholder_child()))
+                continue
             self._pending_tree.extend((current, child) for child in reversed(node.children))
         if self._pending_tree:
             return True
@@ -3567,8 +3746,15 @@ class Preview(Gtk.Window):
         left, right = status_lines(planned)
         self.left_status.set_text(left)
         self.right_status.set_text(right)
-        visible = [self.store.get_item(index) for index in range(self.store.get_n_items())]
-        summary = shown_summary([Listed(item.change, False, False) for item in visible])
+        if self._lazy_tree:
+            # Nothing beyond the top level is rendered, so count the plan, not the rows.
+            summary = (
+                f"{len(self._visible_rows)} files in the plan. "
+                "Folders start collapsed; expand one to load its files."
+            )
+        else:
+            visible = [self.store.get_item(index) for index in range(self.store.get_n_items())]
+            summary = shown_summary([Listed(item.change, False, False) for item in visible])
         if self.review_min_size:
             target = {"files": "files", "folders": "folders", "all": "files and folders"}[self.review_size_target]
             location = self.review_size_scope or "whole preview"

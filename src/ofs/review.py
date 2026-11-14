@@ -136,6 +136,13 @@ class TreeNode:
     direction: str
     status: str
     children: list["TreeNode"]
+    # A folder keeps its structure but shows its files on demand: `more` is how
+    # many files this folder still holds back, and `more_folder` names it.
+    more: int = 0
+    more_folder: str = ""
+    # Large plans render the top level only; a folder's children are built when
+    # it is expanded, so the window never holds a row per file up front.
+    deferred: bool = False
 
 
 def direction_mark(action: Action) -> str:
@@ -240,16 +247,35 @@ def point_change(
     return Change(change.rel, new, "chosen in preview", change.size, change.dest_rel)
 
 
+_GROUP_VERBS = {
+    Action.COPY_LEFT_TO_RIGHT: "to copy to the right",
+    Action.COPY_RIGHT_TO_LEFT: "to copy to the left",
+    Action.MOVE_ON_RIGHT: "to move on the right",
+    Action.MOVE_ON_LEFT: "to move on the left",
+    Action.DELETE_RIGHT: "to delete on the right",
+    Action.DELETE_LEFT: "to delete on the left",
+    Action.ASK: "undecided",
+    Action.SKIPPED: "skipped",
+}
+
+
 def folder_status(changes: list[Change]) -> tuple[int, str]:
-    """Total size under a folder, and the byte size of each arrow group."""
+    """Total size under a folder, and what happens there in words.
+
+    The size column already shows the total, so this must not repeat a byte
+    count; it names the work instead ("427 undecided", "12 to copy to the right").
+    """
 
     total = sum(change.size for change in changes)
     groups = _active_groups(changes)
     if not groups:
         noun = "file" if len(changes) == 1 else "files"
         return total, f"{len(changes)} {noun} unchanged"
-    parts = [format_bytes(sum(change.size for change in chosen)) for _mark, chosen in groups]
-    return total, "; ".join(parts)
+    parts = []
+    for _mark, chosen in groups:
+        verb = _GROUP_VERBS.get(chosen[0].action, "changed")
+        parts.append(f"{len(chosen)} {verb}")
+    return total, " · ".join(parts)
 
 
 def build_tree(
@@ -259,8 +285,16 @@ def build_tree(
     size_target: str = "files",
     size_scope: str = "",
     sort_by: str = "name",
+    file_limit: int = 0,
+    folder_limit: int = 0,
+    top_level_only: bool = False,
 ) -> list[TreeNode]:
-    """Review-only size filters and sibling sorting; the caller's rows stay untouched."""
+    """Review-only size filters and sibling sorting; the caller's rows stay untouched.
+
+    `file_limit` bounds how many file rows are built for the whole tree, and
+    `folder_limit` bounds one folder, so a huge plan keeps every folder but
+    renders its files on demand. Folder totals always describe the whole plan.
+    """
 
     scope = size_scope.strip().strip("/")
     minimum_size = max(0, minimum_size)
@@ -299,7 +333,38 @@ def build_tree(
             return sorted(items, key=lambda item: (item.size, item.name.lower()), reverse=reverse)
         return sorted(items, key=lambda item: item.name.lower())
 
-    def emit(node: dict) -> list[TreeNode]:
+    budget = {"files": file_limit if file_limit > 0 else 0}
+
+    def file_nodes(items: list[Listed]) -> tuple[list[TreeNode], int]:
+        """Leaf rows within the remaining budget, plus the count left for later."""
+
+        shown = []
+        hidden = 0
+        for index, row in enumerate(items):
+            if folder_limit and index >= folder_limit:
+                hidden = len(items) - index
+                break
+            if budget["files"] == 0 and (file_limit or folder_limit):
+                hidden = len(items) - index
+                break
+            change = row.change
+            shown.append(
+                TreeNode(
+                    name=change.rel.rsplit("/", 1)[-1],
+                    rel=change.rel,
+                    is_file=True,
+                    size_text=format_bytes(change.size),
+                    size=change.size,
+                    direction=direction_mark(change.action),
+                    status=file_detail(change),
+                    children=[],
+                )
+            )
+            if budget["files"]:
+                budget["files"] -= 1
+        return shown, hidden
+
+    def emit(node: dict, rel: str = "") -> list[TreeNode]:
         folders = []
         for name, child in node["children"].items():
             changes = collect(child)
@@ -315,27 +380,205 @@ def build_tree(
                     size=total,
                     direction=direction_summary(changes),
                     status=status,
-                    children=emit(child),
+                    children=emit(child, child["rel"]),
                 )
             )
-        files = []
-        for row in node["files"]:
-            change = row.change
+        files, hidden = file_nodes(node["files"])
+        if hidden:
             files.append(
                 TreeNode(
-                    name=change.rel.rsplit("/", 1)[-1],
-                    rel=change.rel,
-                    is_file=True,
-                    size_text=format_bytes(change.size),
-                    size=change.size,
-                    direction=direction_mark(change.action),
-                    status=file_detail(change),
+                    name=f"Show {hidden:,} more file(s)…",
+                    rel="",
+                    is_file=False,
+                    size_text=format_bytes(sum(item.change.size for item in node["files"][-hidden:])),
+                    size=0,
+                    direction="",
+                    status="Hidden to keep the window light; the plan includes them",
                     children=[],
+                    more=hidden,
+                    more_folder=rel,
                 )
             )
         return order(folders) + order(files)
 
-    return emit(root)
+    if not top_level_only:
+        return emit(root)
+
+    folders = []
+    for name, child in root["children"].items():
+        changes = collect(child)
+        total, status = folder_status(changes)
+        if minimum_size and size_target in {"folders", "all"} and in_scope(child["rel"]) and total < minimum_size:
+            continue
+        folders.append(
+            TreeNode(
+                name=name,
+                rel=child["rel"],
+                is_file=False,
+                size_text=format_bytes(total),
+                size=total,
+                direction=direction_summary(changes),
+                status=status,
+                children=[],
+                deferred=True,
+            )
+        )
+    files, hidden = file_nodes(root["files"])
+    if hidden:
+        files.append(
+            TreeNode(
+                name=f"Show {hidden:,} more file(s)…",
+                rel="",
+                is_file=False,
+                size_text="",
+                size=0,
+                direction="",
+                status="Hidden to keep the window light; the plan includes them",
+                children=[],
+                more=hidden,
+                more_folder="",
+            )
+        )
+    return order(folders) + order(files)
+
+
+def folder_children(
+    rows: list[Listed],
+    folder: str,
+    *,
+    file_offset: int = 0,
+    file_limit: int = 200,
+    minimum_size: int = 0,
+    size_target: str = "files",
+    size_scope: str = "",
+    sort_by: str = "name",
+) -> tuple[list[TreeNode], list[TreeNode], int]:
+    """One folder's immediate children, built on demand.
+
+    Returns the subfolders (still deferred), the next batch of files, and how
+    many files this folder still holds back.
+    """
+
+    prefix = folder.strip("/")
+    scope = size_scope.strip().strip("/")
+
+    def in_scope(rel: str) -> bool:
+        return not scope or rel == scope or rel.startswith(scope + "/")
+
+    subtrees: dict[str, list[Change]] = {}
+    files: list[Listed] = []
+    for row in rows:
+        rel = row.change.rel
+        if prefix:
+            if not rel.startswith(prefix + "/"):
+                continue
+            rest = rel[len(prefix) + 1:]
+        else:
+            rest = rel
+        if "/" in rest:
+            name = rest.split("/", 1)[0]
+            subtrees.setdefault(f"{prefix}/{name}" if prefix else name, []).append(row.change)
+            continue
+        if minimum_size and size_target in {"files", "all"} and in_scope(rel) and row.change.size < minimum_size:
+            continue
+        files.append(row)
+
+    if sort_by in {"size_desc", "size_asc"}:
+        files.sort(key=lambda row: (row.change.size, row.change.rel.lower()), reverse=sort_by == "size_desc")
+    else:
+        files.sort(key=lambda row: row.change.rel.rsplit("/", 1)[-1].lower())
+    batch = files[file_offset:file_offset + max(1, file_limit)] if file_limit else files[file_offset:]
+    remaining = max(0, len(files) - file_offset - len(batch))
+
+    folders = []
+    for rel, changes in subtrees.items():
+        total, status = folder_status(changes)
+        if minimum_size and size_target in {"folders", "all"} and in_scope(rel) and total < minimum_size:
+            continue
+        folders.append(
+            TreeNode(
+                name=rel.rsplit("/", 1)[-1],
+                rel=rel,
+                is_file=False,
+                size_text=format_bytes(total),
+                size=total,
+                direction=direction_summary(changes),
+                status=status,
+                children=[],
+                deferred=True,
+            )
+        )
+    nodes = [
+        TreeNode(
+            name=row.change.rel.rsplit("/", 1)[-1],
+            rel=row.change.rel,
+            is_file=True,
+            size_text=format_bytes(row.change.size),
+            size=row.change.size,
+            direction=direction_mark(row.change.action),
+            status=file_detail(row.change),
+            children=[],
+        )
+        for row in batch
+    ]
+    return order_nodes(folders, sort_by), nodes, remaining
+
+
+def order_nodes(items: list[TreeNode], sort_by: str) -> list[TreeNode]:
+    if sort_by in {"size_desc", "size_asc"}:
+        return sorted(items, key=lambda item: (item.size, item.name.lower()), reverse=sort_by == "size_desc")
+    return sorted(items, key=lambda item: item.name.lower())
+
+
+def stream_files(
+    rows: list[Listed],
+    folder: str,
+    *,
+    offset: int,
+    limit: int,
+    minimum_size: int = 0,
+    size_target: str = "files",
+    size_scope: str = "",
+    sort_by: str = "name",
+) -> tuple[list[TreeNode], int]:
+    """The next batch of one folder's files, ordered like `build_tree`.
+
+    Returns the rows and how many files that folder still holds back.
+    """
+
+    prefix = folder.strip("/")
+    scope = size_scope.strip().strip("/")
+
+    def in_scope(rel: str) -> bool:
+        return not scope or rel == scope or rel.startswith(scope + "/")
+
+    items = []
+    for row in rows:
+        rel = row.change.rel
+        if (rel.rsplit("/", 1)[0] if "/" in rel else "") != prefix:
+            continue
+        if minimum_size and size_target in {"files", "all"} and in_scope(rel) and row.change.size < minimum_size:
+            continue
+        items.append(row)
+    if sort_by in {"size_desc", "size_asc"}:
+        items.sort(key=lambda row: (row.change.size, row.change.rel.lower()), reverse=sort_by == "size_desc")
+    else:
+        items.sort(key=lambda row: row.change.rel.rsplit("/", 1)[-1].lower())
+    batch = items[offset:offset + limit]
+    nodes = [
+        TreeNode(
+            name=row.change.rel.rsplit("/", 1)[-1],
+            rel=row.change.rel,
+            is_file=True,
+            size_text=format_bytes(row.change.size),
+            size=row.change.size,
+            direction=direction_mark(row.change.action),
+            status=file_detail(row.change),
+            children=[],
+        )
+        for row in batch
+    ]
+    return nodes, max(0, len(items) - offset - len(batch))
 
 
 def shown_summary(rows: list[Listed]) -> str:

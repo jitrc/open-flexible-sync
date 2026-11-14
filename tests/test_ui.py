@@ -3591,3 +3591,90 @@ def test_live_preview_stops_queueing_rows_past_its_limit(tmp_path, monkeypatch):
     assert seen["rows"] == 20
     assert seen["queue_still_empty"] is True
     assert seen["complete_rows"] == ["folder/item-1"]
+
+
+def test_a_big_plan_opens_collapsed_and_loads_a_folder_when_expanded(tmp_path, monkeypatch):
+    import ofs.ui as ui_module
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLazyTree")
+    monkeypatch.setattr(ui_module, "_LAZY_TREE_ROWS", 5)
+    monkeypatch.setattr(ui_module, "_FOLDER_FILE_BATCH", 2)
+    profile = Profile(name="lazy plan", left="/sample/left", right="/sample/right")
+    save_profile(profile)
+    rows = [
+        Listed(Change(f"alpha/file-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+        for index in range(5)
+    ] + [
+        Listed(Change("beta/sub/deep.bin", Action.DELETE_RIGHT, "only on destination", 20), False, True)
+    ]
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            job = JobResult(window.profiles[0], ScanResult([row.change for row in rows], listing=rows), None)
+            preview = window._preview(job)
+            preview._finish_scan(job)
+            for _ in range(50):
+                if not preview._fill_some(preview._fill_generation):
+                    break
+            seen["lazy"] = preview._lazy_tree
+            seen["top_names"] = [preview.tree_store.get_value(it, 0).split("  ")[0] for it in _root_iters(preview.tree_store)]
+            seen["deferred"] = set(preview._deferred)
+            seen["plan"] = [change.rel for change in preview._planned()]
+            seen["notice"] = preview.shown.get_text()
+            seen["start"] = preview.start_button.get_sensitive()
+
+            alpha = preview._folder_iters["alpha"]
+            seen["alpha_rows"] = _child_names(preview.tree_store, alpha)
+            seen["before_iters"] = sorted(rel for rel in preview._file_iters if rel.startswith("alpha/"))
+            preview._folder_expanded(None, alpha, None)
+            preview._load_folder_children("alpha", alpha)
+            seen["alpha_loaded"] = _child_names(preview.tree_store, alpha)
+            seen["file_iters"] = sorted(rel for rel in preview._file_iters if rel.startswith("alpha/"))
+            seen["more"] = dict(preview._more_counts)
+            more_iter = _child_iter(preview.tree_store, alpha, 2)
+            preview._show_more_files("alpha", more_iter)
+            seen["alpha_rows_after"] = _child_names(preview.tree_store, alpha)
+            seen["plan_after"] = [change.rel for change in preview._planned()]
+            preview.close()
+            self.quit()
+
+    def _root_iters(store):
+        node = store.get_iter_first()
+        while node is not None:
+            yield node
+            node = store.iter_next(node)
+
+    def _child_names(store, parent):
+        names = []
+        node = store.iter_children(parent)
+        while node is not None:
+            names.append(store.get_value(node, 0))
+            node = store.iter_next(node)
+        return names
+
+    def _child_iter(store, parent, index):
+        node = store.iter_children(parent)
+        for _ in range(index):
+            node = store.iter_next(node)
+        return node
+
+    assert App().run(None) == 0
+    assert seen["lazy"] is True
+    assert seen["top_names"] == ["alpha", "beta"]
+    assert seen["deferred"] == {"alpha", "beta"}
+    assert "Folders start collapsed" in seen["notice"]
+    assert seen["alpha_rows"] == ["Loading…"]
+    assert "alpha/file-0.bin" not in seen["before_iters"]
+    assert seen["plan"] == [row.change.rel for row in rows]
+    assert seen["start"] is True
+    # Expanding builds only that folder, in batches, with a "show more" row.
+    assert seen["alpha_loaded"][:2] == ["file-0.bin", "file-1.bin"]
+    assert seen["alpha_loaded"][-1] == "Show 3 more file(s)…"
+    assert seen["more"] == {"alpha": 3}
+    # Streaming adds the rest without touching the plan.
+    assert seen["alpha_rows_after"][:5] == ["file-0.bin", "file-1.bin", "file-2.bin", "file-3.bin", "file-4.bin"]
+    assert seen["alpha_rows_after"][-1] != "Show 3 more file(s)…"
+    assert seen["plan_after"] == seen["plan"]

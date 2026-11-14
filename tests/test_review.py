@@ -5,6 +5,7 @@ from ofs.review import (
     build_listing,
     build_tree,
     direction_mark,
+    folder_children,
     log_body,
     matches,
     point_change,
@@ -43,7 +44,7 @@ def test_tree_shows_folder_size_and_status():
     assert folder.is_file is False
     assert folder.size_text == format_bytes(1500)
     assert folder.direction == "L ──▶ R  2"
-    assert folder.status == format_bytes(1500)
+    assert folder.status == "2 to copy to the right"
     assert [child.name for child in folder.children] == ["a.mp3", "b.mp3"]
     assert folder.children[0].size_text == format_bytes(1000)
     assert folder.children[0].direction == direction_mark(Action.COPY_LEFT_TO_RIGHT)
@@ -304,3 +305,42 @@ def test_reason_filter_keeps_parent_folders_of_visible_files():
     tree = build_tree(visible)
     assert [node.name for node in tree] == ["keep"]
     assert [child.name for child in tree[0].children] == ["a.txt"]
+
+
+def test_folder_status_names_the_work_instead_of_repeating_a_size():
+    rows = [
+        _row("mix/a.bin", Action.COPY_LEFT_TO_RIGHT, 1000, left=True, right=False),
+        _row("mix/b.bin", Action.ASK, 500, left=True, right=True),
+        _row("mix/c.bin", Action.UNCHANGED, 20, left=True, right=True),
+    ]
+    folder = build_tree(rows)[0]
+    assert folder.size_text == format_bytes(1520)
+    assert folder.status == "1 to copy to the right · 1 undecided"
+    assert "B" not in folder.status or "1520" not in folder.status
+
+
+def test_a_big_plan_can_render_the_top_level_only_and_load_children_later():
+    rows = [
+        _row(f"area{index % 2}/sub/file-{index}.bin", Action.COPY_LEFT_TO_RIGHT, 10, right=False)
+        for index in range(40)
+    ]
+    top = build_tree(rows, top_level_only=True)
+    assert [node.name for node in top] == ["area0", "area1"]
+    assert all(node.deferred for node in top)
+    assert all(node.children == [] for node in top)
+    assert top[0].status == "20 to copy to the right"
+
+    folders, files, remaining = folder_children(rows, "area0", file_limit=5)
+    assert [node.name for node in folders] == ["sub"]
+    assert files == []
+    assert remaining == 0
+
+    ordered = sorted(f"file-{index}.bin" for index in range(0, 40, 2))
+    folders, files, remaining = folder_children(rows, "area0/sub", file_limit=5)
+    assert [node.name for node in files] == ordered[:5]
+    assert remaining == 15
+
+    later, files, remaining = folder_children(rows, "area0/sub", file_offset=15, file_limit=5)
+    assert later == []
+    assert [node.name for node in files] == ordered[15:20]
+    assert remaining == 0
