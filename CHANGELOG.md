@@ -4,6 +4,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-14
+
 ### Fixed
 
 - Closing the **Copying Results** window after a clean set copy no longer cancels the next set's discovery or discards a next set that is already prepared. The report belongs to the set that was copied; the preview, which now scans or holds the next set, stays open.
@@ -202,7 +204,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.8...v0.5.0
 [0.4.8]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.7...v0.4.8
 [0.4.7]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.6...v0.4.7
