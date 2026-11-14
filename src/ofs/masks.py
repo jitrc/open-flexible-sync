@@ -9,6 +9,7 @@ folder and everything under it. A leading slash is ignored so
 from __future__ import annotations
 
 import fnmatch
+import re
 
 
 def split_masks(text: str) -> list[str]:
@@ -87,8 +88,131 @@ def _path_matches(rel: str, mask: str) -> bool:
     return False
 
 
-def any_match(rel: str, masks: list[str]) -> bool:
-    return any(path_matches(rel, mask) for mask in masks if mask and mask != "(none)")
+class MaskSet:
+    """A mask list prepared once, so a walk does not re-parse it for every entry.
+
+    The matching rules are exactly those of `_path_matches`: a mask matches the
+    entry itself, any parent folder, or a single path component, and a lone `*`
+    matches nothing. Patterns are translated once and combined into one regular
+    expression per kind, which keeps a walk with a hundred masks fast.
+    """
+
+    __slots__ = ("all", "names", "paths", "prefix", "name", "parents")
+
+    def __init__(self, masks) -> None:
+        match_all = False
+        names: set[str] = set()
+        paths: set[str] = set()
+        prefix: list[str] = []
+        name: list[str] = []
+        for mask in masks:
+            if not mask or mask == "(none)":
+                continue
+            for item in split_masks(mask):
+                normalized = _normalize(item)
+                if not normalized:
+                    continue
+                if normalized == "(all)":
+                    match_all = True
+                    continue
+                if normalized in {"(none)", "*"}:
+                    continue
+                if not _has_glob(normalized):
+                    if "/" in normalized:
+                        paths.add(normalized)
+                    else:
+                        names.add(normalized)
+                    continue
+                prefix.append(fnmatch.translate(_escape_brackets(normalized)))
+                if normalized.startswith(("**/", "*/")):
+                    # A leading star must also match at the profile root.
+                    prefix.append(fnmatch.translate(_escape_brackets(normalized.split("/", 1)[1])))
+                if "/" not in normalized:
+                    name.append(fnmatch.translate(_escape_brackets(normalized)))
+        self.all = match_all
+        self.names = frozenset(names)
+        self.paths = frozenset(paths)
+        self.prefix = re.compile("|".join(prefix)) if prefix else None
+        self.name = re.compile("|".join(name)) if name else None
+        # Files arrive grouped by folder, so the ancestor answer is reused instead of
+        # being recomputed for every entry in the same folder.
+        self.parents: dict[str, bool] = {}
+
+    def _ancestor_hit(self, parts: list[str]) -> bool:
+        prefix = self.prefix
+        name = self.name
+        paths = self.paths
+        if prefix is None and name is None and not paths:
+            return False
+        current = ""
+        for part in parts:
+            current = part if not current else current + "/" + part
+            if paths and current in paths:
+                return True
+            if prefix is not None and prefix.match(current):
+                return True
+            if name is not None and name.match(part):
+                return True
+        return False
+
+    def matches(self, rel: str) -> bool:
+        rel = rel.replace("\\", "/").strip("/")
+        if not rel:
+            return False
+        if self.all:
+            return True
+        parts = rel.split("/")
+        if self.names and not self.names.isdisjoint(parts):
+            return True
+        prefix = self.prefix
+        name = self.name
+        paths = self.paths
+        if prefix is None and name is None and not paths:
+            return False
+        if len(parts) > 1:
+            parent = rel.rsplit("/", 1)[0]
+            known = self.parents.get(parent)
+            if known is None:
+                known = self._ancestor_hit(parts[:-1])
+                if len(self.parents) > 1024:
+                    self.parents.clear()
+                self.parents[parent] = known
+            if known:
+                return True
+        if paths and rel in paths:
+            return True
+        if prefix is not None and prefix.match(rel):
+            return True
+        if name is not None and name.match(parts[-1]):
+            return True
+        return False
+
+
+_recent_sets: list[tuple[tuple[str, ...], MaskSet]] = []
+
+
+def mask_set(masks) -> MaskSet:
+    """The prepared matcher for a mask list, reused across entries.
+
+    The key is the mask contents, so editing a rule list in place (a live
+    exclusion) takes effect immediately; comparing tuples of the same strings is
+    cheap because each element compares by identity first.
+    """
+
+    key = tuple(masks)
+    for known, prepared in _recent_sets:
+        if known == key:
+            return prepared
+    prepared = MaskSet(key)
+    _recent_sets.insert(0, (key, prepared))
+    del _recent_sets[4:]
+    return prepared
+
+
+def any_match(rel: str, masks) -> bool:
+    if not masks:
+        return False
+    return mask_set(masks).matches(rel)
 
 
 def included(rel: str, masks: list[str]) -> bool:

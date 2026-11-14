@@ -3549,3 +3549,45 @@ def test_copying_results_group_repeated_errors_into_one_place(tmp_path, monkeypa
     assert "4 errors in 2 place(s)" in joined
     assert "archive/2024/batch/J7KQ (3 entries): [Errno 22] Invalid argument" in joined
     assert "a.c9r: [Errno 22]" not in joined
+
+
+def test_live_preview_stops_queueing_rows_past_its_limit(tmp_path, monkeypatch):
+    import ofs.ui as ui_module
+    from ofs.compare import FileStat
+    from ofs.scan import ScanResult
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLiveLimit")
+    monkeypatch.setattr(ui_module, "_PREVIEW_LIVE_LIMIT", 20)
+    save_profile(Profile(name="capped", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, ScanResult([]), None))
+            preview._begin_scan(ScanWindow(window))
+            for index in range(100):
+                preview._queue_entry("Left", f"folder/item-{index}", FileStat(index + 1, 2))
+            preview._drain_pending()
+            seen["shown"] = preview.shown.get_text()
+            seen["queued_after_cap"] = len(preview._entry_queue)
+            seen["capped"] = preview._live_capped
+            seen["rows"] = len(preview.rows)
+            preview._queue_entry("Left", "folder/late.txt", FileStat(1, 2))
+            seen["queue_still_empty"] = len(preview._entry_queue) == 0
+            result = ScanResult([Change("folder/item-1", Action.COPY_LEFT_TO_RIGHT, "only on source", 2)])
+            preview._finish_scan(JobResult(profile, result, None))
+            seen["complete_rows"] = [row.change.rel for row in preview.rows]
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["capped"] is True
+    assert seen["queued_after_cap"] == 0
+    assert "Live list paused after 20 shown paths" in seen["shown"]
+    assert "nothing is copied or deleted" in seen["shown"]
+    assert seen["rows"] == 20
+    assert seen["queue_still_empty"] is True
+    assert seen["complete_rows"] == ["folder/item-1"]

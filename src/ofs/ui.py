@@ -161,6 +161,9 @@ _UNGROUPED = "(ungrouped)"
 _UNGROUPED_PROFILE_MINIMUM = 12
 _UNGROUPED_GROUP_MINIMUM = 3
 _PREVIEW_BATCH_SIZE = 250
+# A live preview is a courtesy, not the plan: stop queueing rows past this point so a
+# million-entry scan cannot pin gigabytes of GTK rows before the comparison finishes.
+_PREVIEW_LIVE_LIMIT = 50_000
 _PREVIEW_ASYNC_THRESHOLD = 1000
 
 
@@ -2283,6 +2286,7 @@ class Preview(Gtk.Window):
         self.scan_details: Gtk.Expander | None = None
         self.copy_details: Gtk.Expander | None = None
         self._entry_queue = deque()
+        self._live_capped = False
         self._entry_lock = threading.Lock()
         self._entry_refresh_scheduled = False
         self._live_refill_pending = False
@@ -2509,6 +2513,7 @@ class Preview(Gtk.Window):
         """Drop the previous set's rows before the same window scans again."""
 
         self.job = JobResult(self.job.profile, ScanResult(changes=[]), None)
+        self._live_capped = False
         self.rows = []
         self._original = {}
         self._copy_planned = {}
@@ -2568,6 +2573,8 @@ class Preview(Gtk.Window):
         return False
 
     def _queue_entry(self, side: str, rel: str, stat) -> None:
+        if self._live_capped:
+            return
         with self._entry_lock:
             self._entry_queue.append((side, rel, stat))
             if self._entry_refresh_scheduled:
@@ -2614,6 +2621,9 @@ class Preview(Gtk.Window):
                 if existing.on_left and existing.on_right:
                     existing.change = Change(rel, Action.ASK, "Seen on both sides; awaiting comparison", stat.size)
             self._append_pending(existing)
+            if len(self._live_seen) >= _PREVIEW_LIVE_LIMIT:
+                self._cap_live_rows()
+                return False
         if self._live_refill_pending and not (self._pending_tree or self._replace_tree_model):
             self._live_refill_pending = False
             self._refill()
@@ -2627,6 +2637,17 @@ class Preview(Gtk.Window):
                 self._entry_refresh_scheduled = True
             return True
         return False
+
+    def _cap_live_rows(self) -> None:
+        """Stop the live courtesy list; the completed comparison still shows every row."""
+
+        self._live_capped = True
+        with self._entry_lock:
+            self._entry_queue.clear()
+        self.shown.set_text(
+            f"Live list paused after {_PREVIEW_LIVE_LIMIT:,} shown paths. "
+            "The complete plan appears when the scan finishes; nothing is copied or deleted."
+        )
 
     def _append_pending(self, row: Listed) -> None:
         rel = row.change.rel

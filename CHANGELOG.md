@@ -11,6 +11,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Changed
 
+- Exclusion masks are prepared once per scan instead of being re-parsed for every entry, which makes a large walk with many rules dramatically faster on the same trees; the matching rules are unchanged and checked against the original algorithm, including a randomized comparison. The live preview also stops adding rows after 50,000 paths and says so, so a million-entry scan no longer pins gigabytes of live rows before the comparison finishes; the completed plan still shows every row.
 - Copying results group repeated failures by folder and reason, and a folder that cannot be opened fails once instead of once per file inside it. The remaining entries under it are skipped and counted, and the detail stays in the log and the tooltip.
 - Rows, plan changes, and file metadata use slotted records, cutting the per-file object overhead for large comparisons.
 
