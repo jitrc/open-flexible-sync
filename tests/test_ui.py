@@ -3801,6 +3801,119 @@ def test_a_big_plan_opens_collapsed_and_loads_a_folder_when_expanded(tmp_path, m
     assert seen["plan_after"] == seen["plan"]
 
 
+def test_show_more_and_show_all_stream_one_folder_without_duplicates(tmp_path, monkeypatch):
+    import ofs.ui as ui_module
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestStreamAll")
+    monkeypatch.setattr(ui_module, "_LAZY_TREE_ROWS", 5)
+    monkeypatch.setattr(ui_module, "_FOLDER_FILE_BATCH", 2)
+    monkeypatch.setattr(ui_module, "_FOLDER_MORE_BATCH", 2)
+    profile = Profile(name="streamed plan", left="/sample/left", right="/sample/right")
+    save_profile(profile)
+    rows = [
+        Listed(Change(f"alpha/file-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+        for index in range(7)
+    ] + [
+        Listed(Change(f"alpha/nested/deep-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+        for index in range(3)
+    ] + [
+        Listed(Change(f"beta/item-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+        for index in range(9)
+    ]
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    def children(store, parent):
+        found = []
+        node = store.iter_children(parent)
+        while node is not None:
+            found.append((store.get_value(node, 0), store.get_value(node, 6)))
+            node = store.iter_next(node)
+        return found
+
+    def more_iter(store, parent):
+        for name, folder in children(store, parent):
+            if folder:
+                return name, store.iter_children(parent) and _iter_for(store, parent, folder)
+        return None, None
+
+    def _iter_for(store, parent, folder):
+        node = store.iter_children(parent)
+        while node is not None:
+            if store.get_value(node, 6) == folder:
+                return node
+            node = store.iter_next(node)
+        return None
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            job = JobResult(window.profiles[0], ScanResult([row.change for row in rows], listing=rows), None)
+            preview = window._preview(job)
+            preview._finish_scan(job)
+            for _ in range(50):
+                if not preview._fill_some(preview._fill_generation):
+                    break
+            settle()
+            seen["single_click"] = preview.view.get_activate_on_single_click()
+
+            alpha = preview._folder_iters["alpha"]
+            preview._folder_expanded(None, alpha, None)
+            settle()
+            first = [name for name, _ in children(preview.tree_store, alpha)]
+            seen["first"] = first
+            _name, more = more_iter(preview.tree_store, alpha)
+            preview._row_activated(None, preview.tree_store.get_path(more), None)
+            settle()
+            second = [name for name, _ in children(preview.tree_store, alpha)]
+            seen["second"] = second
+            _name, more = more_iter(preview.tree_store, alpha)
+            preview._show_more_files("alpha", more)
+            settle()
+            seen["third"] = [name for name, _ in children(preview.tree_store, alpha)]
+            seen["nested_rows"] = sum(1 for name in seen["third"] if name.startswith("nested"))
+
+            beta = preview._folder_iters["beta"]
+            preview._folder_expanded(None, beta, None)
+            settle()
+            _name, more = more_iter(preview.tree_store, beta)
+            preview._show_all_files("beta", more)
+            settle()
+            names = [name for name, _ in children(preview.tree_store, beta)]
+            seen["beta"] = names
+            seen["beta_more_gone"] = not any(name.startswith("Show ") for name in names)
+            seen["detail"] = preview.detail.get_text()
+            seen["plan"] = [change.rel for change in preview._planned()]
+
+            # Expand all on a big plan opens the loaded folders instead of collapsing them.
+            preview._set_tree_expanded(None, True)
+            settle()
+            seen["expanded"] = preview.view.row_expanded(preview.tree_store.get_path(alpha))
+            seen["tooltip"] = preview.expand_all_button.get_tooltip_text()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["single_click"] is True
+    # A folder shows its subfolders once, then streams files batch by batch.
+    assert seen["first"][0].startswith("nested")
+    assert seen["first"][-1] == "Show 5 more file(s)…"
+    assert len(seen["second"]) == len(seen["first"]) + 2
+    assert seen["nested_rows"] == 1
+    # "Show all" streams the whole folder, leaving no "Show …" row, plan unchanged.
+    assert seen["beta"][0] == "item-0.bin"
+    assert len([name for name in seen["beta"] if name.startswith("item-")]) == 9
+    assert seen["beta_more_gone"] is True
+    assert "Showing all 9 files under beta" in seen["detail"]
+    assert seen["plan"] == [row.change.rel for row in rows]
+    assert seen["expanded"] is True
+    assert "already loaded" in seen["tooltip"]
+
+
 def test_incremental_row_changes_update_folder_totals_without_a_rebuild():
     """One row or folder change patches the model instead of rebuilding it."""
 

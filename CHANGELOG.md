@@ -12,6 +12,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Changed
 
+- A large comparison's **Show N more file(s)…** row now opens on a single click, and its right-click menu can stream **all** remaining files of that folder in the background. Repeat clicks no longer duplicate a folder's subfolder rows, and **Expand all** on such a plan opens the folders already loaded (one level per click) instead of collapsing them. Showing more still only adds rows; the synchronization plan never changes.
 - **Exclude failing paths…** now opens an editable rule window seeded with suggestions instead of confirming one fixed list. Repeated failures that share a folder collapse into that folder (for example `config/systemd/user` instead of five files), unshared failures stay exact paths, and **Exclude common folder…** starts from the single shared folder when one exists. Rules can be edited, added, removed, and tested before saving; nothing is excluded before **Save exclusions**.
 - Copy progress and Copying Results windows no longer block the rest of OFS. A modal window would make every other window unusable, so another profile's scan could not be started or cancelled while a copy ran or a result waited for an answer; per-profile locks still prevent duplicate work on the same profile.
 - Changing a row, pointing a folder either way, or adding folder deletions now updates those rows and their folder totals in place instead of rebuilding the comparison tree, so a single action no longer costs a full pass over the plan on large previews.

@@ -2425,6 +2425,7 @@ class Preview(Gtk.Window):
         self._rows_by_rel: dict[str, object] = {}
         self._folder_totals: dict[str, int] = {}
         self._more_counts: dict[str, int] = {}
+        self._streaming_all = 0
         self.partial = bool(job.result.partial_sides)
         if self.partial:
             self.set_title(f"{job.profile.name} — Partial scan (review only)")
@@ -2552,6 +2553,9 @@ class Preview(Gtk.Window):
         self.view.connect("row-expanded", self._remember_tree_state, True)
         self.view.connect("row-expanded", self._folder_expanded)
         self.view.connect("row-activated", self._row_activated)
+        # The "Show N more file(s)…" row is a button in disguise. Requiring a
+        # double click (the default) hid the streaming feature; Enter still works.
+        self.view.set_activate_on_single_click(True)
         self.view.connect("row-collapsed", self._remember_tree_state, False)
         for index, title, width in (
             (0, "Name", 320),
@@ -3045,7 +3049,9 @@ class Preview(Gtk.Window):
     def _set_tree_expanded(self, _button, expanded: bool) -> None:
         self._tree_default_expanded = expanded
         self._tree_state_overrides.clear()
-        self._refresh_tree_layout()
+        # An explicit Expand all opens what a large plan has loaded; layout after a
+        # refill keeps a large plan collapsed instead of materialising every file.
+        self._refresh_tree_layout(expand_now=True)
 
     def _remember_tree_state(self, _view, tree_iter, _path, expanded: bool) -> None:
         if not self._record_tree_state:
@@ -3066,13 +3072,14 @@ class Preview(Gtk.Window):
                 return True
         return False
 
-    def _refresh_tree_layout(self) -> None:
+    def _refresh_tree_layout(self, *, expand_now: bool = False) -> None:
         self._record_tree_state = False
         try:
-            if self._tree_default_expanded and not self._lazy_tree:
+            if self._tree_default_expanded and (expand_now or not self._lazy_tree):
+                # A large plan loads one level per explicit Expand all: expanding the
+                # rows it already has builds those folders, not one row per file.
                 self.view.expand_all()
             else:
-                # A big plan opens collapsed: expanding a folder loads its children then.
                 self.view.collapse_all()
             self._apply_tree_overrides()
         finally:
@@ -3139,7 +3146,7 @@ class Preview(Gtk.Window):
             self._append_more_row(rel, parent_iter, remaining)
         return False
 
-    def _append_more_row(self, folder: str, parent_iter, remaining: int) -> None:
+    def _append_more_row(self, folder: str, parent_iter, remaining: int):
         from ofs.review import TreeNode
 
         node = TreeNode(
@@ -3149,13 +3156,13 @@ class Preview(Gtk.Window):
             size_text="",
             size=0,
             direction="",
-            status="Hidden to keep the window light; the plan includes them",
+            status="Click for the next batch; right-click to show all here",
             children=[],
             more=remaining,
             more_folder=folder,
         )
         self._more_counts[folder] = remaining
-        self.tree_store.append(parent_iter, self._node_values(node))
+        return self.tree_store.append(parent_iter, self._node_values(node))
 
     def _row_activated(self, _view, path, _column) -> None:
         tree_iter = self.tree_store.get_iter(path)
@@ -3166,14 +3173,19 @@ class Preview(Gtk.Window):
             self._show_more_files(folder, tree_iter)
 
     def _show_more_files(self, folder: str, more_iter) -> None:
-        from ofs.review import folder_children
+        self._stream_file_batch(folder, more_iter, _FOLDER_MORE_BATCH)
+
+    def _stream_file_batch(self, folder: str, more_iter, limit: int):
+        """Append the next files of one folder in place, before its "more" row."""
+
+        from ofs.review import stream_files
 
         already = self._loaded_files.get(folder, 0)
-        folders, files, remaining = folder_children(
+        files, remaining = stream_files(
             self._visible_rows,
             folder,
-            file_offset=already,
-            file_limit=_FOLDER_MORE_BATCH,
+            offset=already,
+            limit=limit,
             minimum_size=self.review_min_size,
             size_target=self.review_size_target,
             size_scope=self.review_size_scope,
@@ -3182,11 +3194,6 @@ class Preview(Gtk.Window):
         parent_iter = self.tree_store.iter_parent(more_iter)
         self.tree_store.remove(more_iter)
         target = parent_iter
-        for node in folders:
-            current = self.tree_store.append(target, self._node_values(node))
-            self._folder_iters[node.rel] = current
-            self._deferred.add(node.rel)
-            self.tree_store.append(current, self._node_values(self._placeholder_child()))
         for node in files:
             current = self.tree_store.append(target, self._node_values(node))
             if node.rel:
@@ -3195,9 +3202,45 @@ class Preview(Gtk.Window):
                 if change is not None:
                     self.store.append(PlanRow(change))
         self._loaded_files[folder] = already + len(files)
-        if remaining:
-            if parent_iter is not None:
-                self._append_more_row(folder, parent_iter, remaining)
+        more_iter = None
+        if remaining and parent_iter is not None:
+            more_iter = self._append_more_row(folder, parent_iter, remaining)
+        elif not remaining:
+            self._more_counts.pop(folder, None)
+        return more_iter, len(files), remaining
+
+    def _show_all_files(self, folder: str, more_iter) -> None:
+        """Stream every remaining file of one folder, one bounded batch per idle pass.
+
+        Materialising a folder with hundreds of thousands of files in one pass
+        would freeze the window; the batches keep it responsive and only add
+        rows, so the synchronization plan is untouched.
+        """
+
+        self._streaming_all += 1
+        token = self._streaming_all
+        generation = self._fill_generation
+        self.detail.set_text(f"Showing all files under {folder}…")
+        GLib.idle_add(
+            self._stream_all_step, token, generation, folder, more_iter,
+            priority=GLib.PRIORITY_DEFAULT_IDLE,
+        )
+
+    def _stream_all_step(self, token: int, generation: int, folder: str, more_iter) -> bool:
+        if token != self._streaming_all or generation != self._fill_generation:
+            return False
+        if more_iter is None or self.tree_store.get_path(more_iter) is None:
+            return False
+        more_iter, _added, remaining = self._stream_file_batch(folder, more_iter, _FOLDER_MORE_BATCH)
+        if not remaining:
+            shown = self._loaded_files.get(folder, 0)
+            self.detail.set_text(f"Showing all {shown:,} files under {folder}. The plan is unchanged.")
+            return False
+        GLib.idle_add(
+            self._stream_all_step, token, generation, folder, more_iter,
+            priority=GLib.PRIORITY_DEFAULT_IDLE,
+        )
+        return False
 
     def _queue_folder_expansion(self, rel: str, folder_iter) -> None:
         """Expand a folder only after it has children, in bounded idle batches.
@@ -3279,7 +3322,15 @@ class Preview(Gtk.Window):
         self._deferred = set()
         self._loaded_files = {}
         self._more_counts = {}
+        # A refill invalidates a running "show all" stream; it must not append
+        # to a model that no longer exists.
+        self._streaming_all += 1
         self._lazy_tree = len(visible) >= _LAZY_TREE_ROWS
+        self.expand_all_button.set_tooltip_text(
+            "Opens the folders this large comparison has already loaded; open a folder to load its children"
+            if self._lazy_tree
+            else "Show every nested folder and file"
+        )
         if self._lazy_tree:
             self._pending_tree = [
                 (None, node)
@@ -3521,6 +3572,12 @@ class Preview(Gtk.Window):
         return self.tree_store.get_value(tree_iter, 4)
 
     def _tree_pressed(self, _gesture, _n, x: float, y: float) -> None:
+        path, _column, _cell_x, _cell_y = self.view.get_path_at_pos(int(x), int(y))
+        tree_iter = self.tree_store.get_iter(path) if path is not None else None
+        folder = self.tree_store.get_value(tree_iter, 6) if tree_iter is not None else ""
+        if folder:
+            self._popup_more(folder, tree_iter, x, y)
+            return
         rel = self._rel_at(x, y)
         if rel is None:
             return
@@ -3529,6 +3586,43 @@ class Preview(Gtk.Window):
             self._popup_folder(rel, x, y)
             return
         self._popup(PlanRow(listed.change), self.view, x, y)
+
+    def _popup_more(self, folder: str, more_iter, x: float, y: float) -> None:
+        """Controls for the hidden remainder of one folder, without changing the plan."""
+
+        if self._popover is not None:
+            self._popover.unparent()
+        popover = Gtk.Popover()
+        popover.set_parent(self.view)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        remaining = self._more_counts.get(folder, 0)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        actions = [
+            (
+                f"Show next {min(_FOLDER_MORE_BATCH, remaining):,} file(s)",
+                "Add the next batch of this folder's files to the tree",
+                lambda: self._show_more_files(folder, more_iter),
+            ),
+            (
+                f"Show all {remaining:,} files in this folder",
+                "Stream every remaining file here in the background; the plan does not change",
+                lambda: self._show_all_files(folder, more_iter),
+            ),
+        ]
+        for text, tip, callback in actions:
+            button = Gtk.Button(label=text)
+            if tip:
+                button.set_tooltip_text(tip)
+            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
+            box.append(button)
+        popover.set_child(box)
+        self._popover = popover
+        popover.popup()
 
     def _confirm_tree_folder_copy(self, relative: str) -> None:
         """Only a complete preview can launch the separate guarded copy action."""
