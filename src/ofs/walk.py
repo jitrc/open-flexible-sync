@@ -43,6 +43,15 @@ class WalkStopped(Exception):
     """Pause/cancel control asked the walk to stop."""
 
 
+class WalkStalled(Exception):
+    """No progress for a long time: the path may be unavailable, not merely slow."""
+
+    def __init__(self, rel: str, seconds: float):
+        super().__init__(rel)
+        self.rel = rel
+        self.seconds = seconds
+
+
 class WalkSkipped(Exception):
     """Skip Rest preserves discovered metadata for a review-only listing."""
 
@@ -112,6 +121,7 @@ def walk(
     on_entry=None,
     symlinks: str = "follow",
     on_unreadable=None,
+    stall_seconds: float = 0,
 ) -> dict[str, FileStat]:
     """Return file/link metadata, with optional following and cycle protection."""
 
@@ -120,12 +130,17 @@ def walk(
     discovered = 0
     filtered = 0
     last_report = 0.0
+    progress_at = time.monotonic()
+    current = ""
 
     def report(rel: str, force: bool = False) -> None:
-        nonlocal last_report
+        nonlocal last_report, progress_at, current
+        now = time.monotonic()
+        if rel:
+            current = rel
+        progress_at = now
         if on_progress is None and on_stats is None:
             return
-        now = time.monotonic()
         if not force and now - last_report < 0.1:
             return
         last_report = now
@@ -140,6 +155,9 @@ def walk(
             on_entry(rel, found[rel])
 
     def check() -> None:
+        nonlocal progress_at
+        if stall_seconds and time.monotonic() - progress_at > stall_seconds:
+            raise WalkStalled(current or ".", stall_seconds)
         if control is not None:
             if not control.checkpoint():
                 raise WalkStopped
@@ -183,6 +201,8 @@ def walk(
         except OSError as exc:
             unreadable(rel, exc)
             return False
+        # Listing a huge folder can take a while; it is not a stall.
+        progress_at = time.monotonic()
         for entry in entries:
             check()
             child = f"{rel}/{entry.name}" if rel else entry.name

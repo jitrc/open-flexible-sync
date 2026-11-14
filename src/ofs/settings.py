@@ -126,6 +126,19 @@ def set_scan_set_limit(entries: float) -> None:
     _save("scan_set_limit", max(0, int(entries)))
 
 
+def scan_stall_minutes() -> int:
+    """Minutes without progress before a scan gives up on a path. Zero never stops."""
+
+    try:
+        return max(0, int(load_settings().get("scan_stall_minutes", 5)))
+    except (TypeError, ValueError):
+        return 5
+
+
+def set_scan_stall_minutes(minutes: float) -> None:
+    _save("scan_stall_minutes", max(0, int(minutes)))
+
+
 def record_scan_estimate(name: str, entries: int, seconds: float) -> None:
     if entries <= 0 or seconds <= 0:
         return

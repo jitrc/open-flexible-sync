@@ -16,9 +16,18 @@ from ofs.history import adjust_plan, load_history, save_history
 from ofs.masks import any_match
 from ofs.model import ExclusionMode, Profile
 from ofs.review import Listed, build_listing
-from ofs.settings import global_exclusion_mode, global_exclusions
+from ofs.settings import global_exclusion_mode, global_exclusions, scan_stall_minutes
 from ofs.volume import ensure_volume
-from ofs.walk import DestinationMissing, MissingFolder, WalkSkipped, WalkStopped, ensure_dir, entry_stat, walk
+from ofs.walk import (
+    DestinationMissing,
+    MissingFolder,
+    WalkSkipped,
+    WalkStalled,
+    WalkStopped,
+    ensure_dir,
+    entry_stat,
+    walk,
+)
 
 
 @dataclass
@@ -214,6 +223,7 @@ def scan_profile(
     walked = {"Left": 0, "Right": 0}
     rules_lock = getattr(control, "rules_lock", None) or nullcontext()
     session_filters_used = False
+    stall_seconds = scan_stall_minutes() * 60
 
     def session_hidden(rel: str) -> bool:
         nonlocal session_filters_used
@@ -253,6 +263,7 @@ def scan_profile(
     cached_sides: set[str] = set()
     partial_sides = []
     unreadable: list[tuple[str, str, str]] = []
+    stalled_sides: list[tuple[str, str, float]] = []
 
     def read_names(side: str, root: Path, destination: bool, names: list[str]) -> dict[str, FileStat]:
         """Read only the named root children. A set scan never uses or saves the cache."""
@@ -321,7 +332,12 @@ def scan_profile(
                     on_entry=None if on_entry is None else scoped_entry,
                     symlinks=profile.symlinks.value,
                     on_unreadable=scoped_unreadable,
+                    stall_seconds=stall_seconds,
                 )
+            except WalkStalled as exc:
+                partial_sides.append(side)
+                stalled_sides.append((side, exc.rel, exc.seconds))
+                return files
             except WalkSkipped as exc:
                 partial_sides.append(side)
                 walked[side] = exc.discovered
@@ -369,8 +385,13 @@ def scan_profile(
                 on_entry=None if on_entry is None else lambda rel, stat: on_entry(side, rel, stat),
                 symlinks=profile.symlinks.value,
                 on_unreadable=lambda rel, message: unreadable.append((side, rel, message)),
+                stall_seconds=stall_seconds,
             )
             files = drop_session(files)
+        except WalkStalled as exc:
+            partial_sides.append(side)
+            stalled_sides.append((side, exc.rel, exc.seconds))
+            return {}
         except WalkSkipped as exc:
             # Keep the known entries for exclusions, but never treat them as complete.
             partial_sides.append(side)
@@ -437,7 +458,15 @@ def scan_profile(
         )
     changes = block_unknown_subtrees(changes, unreadable)
     note = ""
-    if partial_sides:
+    if stalled_sides:
+        side, rel, seconds = stalled_sides[0]
+        minutes = max(1, round(seconds / 60))
+        note = (
+            f"Scan stopped: the {side.lower()} side made no progress for {minutes} minute(s) at {rel}. "
+            "That path may be unavailable rather than slow, so the listing is incomplete and review only; "
+            "copying and deleting are disabled until a rescan completes."
+        )
+    if partial_sides and not stalled_sides:
         sides = " and ".join(partial_sides)
         note = f"Partial scan: skipped {sides} discovery. Review only; copying and deleting are disabled. Add exclusions, then rescan. No new cache manifest or file history was saved."
     if profile.track and not partial_sides and names is None:

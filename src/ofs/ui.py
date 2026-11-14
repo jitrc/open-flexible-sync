@@ -63,7 +63,9 @@ from ofs.settings import (
     global_exclusions,
     scan_estimate,
     scan_set_limit,
+    scan_stall_minutes,
     set_scan_set_limit,
+    set_scan_stall_minutes,
     copy_speed_limit,
     set_compare_command,
     set_copy_speed_limit,
@@ -1087,6 +1089,14 @@ class MainWindow(Gtk.ApplicationWindow):
             "and after a set is copied the next set is scanned. 0 scans everything at once."
         )
         box.append(set_size)
+        box.append(Gtk.Label(label="Stop a scan that makes no progress for (minutes, 0 = never)", xalign=0))
+        stall = Gtk.SpinButton.new_with_range(0, 240, 1)
+        stall.set_value(scan_stall_minutes())
+        stall.set_tooltip_text(
+            "Safety net for an unavailable mount: when a scan discovers nothing new for this long, it stops, "
+            "marks that side review-only, and says which path stalled instead of appearing to hang."
+        )
+        box.append(stall)
         box.append(Gtk.Label(label="Global exclusions", xalign=0))
         masks = Gtk.TextView()
         masks.set_monospace(True)
@@ -1113,6 +1123,7 @@ class MainWindow(Gtk.ApplicationWindow):
             set_compare_command(entry.get_text())
             set_copy_speed_limit(speed.get_value() * 1024 * 1024)
             set_scan_set_limit(set_size.get_value())
+            set_scan_stall_minutes(stall.get_value())
             buffer = masks.get_buffer()
             text = buffer.get_text(buffer.get_start_iter(), buffer.get_end_iter(), True)
             set_global_exclusions([line.strip() for line in text.splitlines() if line.strip()])

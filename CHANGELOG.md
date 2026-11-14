@@ -6,6 +6,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Added
 
+- Settings has **Stop a scan that makes no progress for (minutes, 0 = never)**, five minutes by default. An unavailable mount now stops with the path named and that side review-only, instead of the window appearing to hang; copying and deleting stay disabled until a rescan completes.
 - A folder that cannot be read is no longer treated as an empty folder. OFS now records it, leaves every entry inside it undecided, and says which folder failed and why, so a mirror run cannot delete a good copy because the source folder could not be listed, and cannot try to write into a destination folder it cannot open. The destination cache is not saved while a folder is unreadable.
 - Settings has **Scan in sets of (files, 0 = one complete scan)** for very large trees. Each set walks whole root names in sorted order up to the limit and is a complete plan for those names, so Start, deletes, moves, and safeguards work normally while memory follows the set instead of the whole tree. After a set is copied cleanly, OFS scans the next one in the same window; its copy still needs the normal Start. Set scans skip the destination cache and the file-history baseline, and a rename crossing two sets becomes a copy plus a delete.
 
