@@ -268,6 +268,71 @@ def test_completed_run_reload_preserves_scroll_and_expanded_groups(tmp_path, mon
     assert seen["top"] == 0
 
 
+def test_starting_a_scan_keeps_the_overview_scroll_position(tmp_path, monkeypatch):
+    """Clicking Scan must not jump the overview back to the first profile."""
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanScroll")
+    for index in range(40):
+        save_profile(Profile(name=f"group-{index // 2:02d} profile-{index:02d}", left=str(tmp_path / "left"), right=str(tmp_path / "right")))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window._set_groups(True)
+            window.present()
+            settle()
+            adjustment = window.profiles_scroll.get_vadjustment()
+            adjustment.set_value((adjustment.get_upper() - adjustment.get_page_size()) * 0.6)
+            settle()
+            page = adjustment.get_page_size()
+            target = None
+            for name, row in window._profile_rows.items():
+                point = row.translate_coordinates(window.list_box, 0, 0)
+                if point is None or not row.get_mapped():
+                    continue
+                top = point[1] - adjustment.get_value()
+                if top >= 0 and top + row.get_height() <= page:
+                    target = name
+                    break
+            # Same state a clicked checkbox leaves behind.
+            window._focused_profile = target
+            window.checked = {target}
+            seen["target"] = target
+            row = window._profile_rows[target]
+            seen["before"] = adjustment.get_value()
+            seen["before_top"] = row.translate_coordinates(window.list_box, 0, 0)[1] - adjustment.get_value()
+
+            # Click Scan. The scan thread itself is stubbed; the overview rebuild is real.
+            window._start_profile_scan = lambda *args, **kwargs: seen.setdefault("started", args[0].name)
+            window._run()
+            settle()
+            seen["scanning_row"] = window.tree_status = window._labels[target].get_text()
+            rebuilt = window._profile_rows[target]
+            seen["after"] = adjustment.get_value()
+            seen["after_top"] = rebuilt.translate_coordinates(window.list_box, 0, 0)[1] - adjustment.get_value()
+            seen["after_height"] = rebuilt.get_height()
+            # A filter change still starts the new list at the top.
+            window.search.set_text("group-00")
+            settle()
+            seen["filtered"] = adjustment.get_value()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["target"] is not None
+    assert seen["started"] == seen["target"]
+    assert seen["scanning_row"] == "Scanning…"
+    assert seen["before"] > 0
+    assert seen["after"] == pytest.approx(seen["before"], abs=1)
+    assert seen["after_top"] == pytest.approx(seen["before_top"], abs=1)
+    assert seen["filtered"] == 0
+
+
 def test_overview_groups_and_preview_actions(tmp_path, monkeypatch):
     home = tmp_path / "home"
     left = tmp_path / "left"
@@ -1139,54 +1204,110 @@ def test_copy_speed_presets_cover_common_mib_per_second_limits(tmp_path, monkeyp
     assert copy_speed_limit() == 100 * 1024 ** 2
 
 
-def test_failed_results_can_exclude_paths_or_their_common_folder(tmp_path, monkeypatch):
+def test_failed_results_offer_editable_exclusion_rules(tmp_path, monkeypatch):
     from ofs.apply import ApplyReport
+    from ofs.masks import path_matches
     from ofs.scan import ScanResult
-    from ofs.ui import _failed_common_folder, _failed_relative_paths
+    from ofs.ui import FailingPathsWindow, _failed_common_folder, _failed_relative_paths, _suggest_masks
 
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestFailedExclusions")
     errors = [
-        "project/service/volumes/redis/dump.db: Permission denied",
-        "project/service/volumes/app/modules.db: Permission denied",
+        "config/systemd/user/default.target.wants/pipewire.service: Not a directory",
+        "config/systemd/user/default.target.wants/pipewire-pulse.service: Not a directory",
+        "config/systemd/user/sockets.target.wants/pipewire.socket: Not a directory",
+        "config/systemd/user/sockets.target.wants/pipewire-pulse.socket: Not a directory",
+        "config/menus/applications-merged: Not a directory",
     ]
-    assert _failed_relative_paths(errors) == [
-        "project/service/volumes/redis/dump.db",
-        "project/service/volumes/app/modules.db",
+    failed = _failed_relative_paths(errors)
+    assert failed == [
+        "config/systemd/user/default.target.wants/pipewire.service",
+        "config/systemd/user/default.target.wants/pipewire-pulse.service",
+        "config/systemd/user/sockets.target.wants/pipewire.socket",
+        "config/systemd/user/sockets.target.wants/pipewire-pulse.socket",
+        "config/menus/applications-merged",
     ]
-    assert _failed_common_folder(_failed_relative_paths(errors)) == "project/service/volumes"
+    # Repeated failures under one folder become that folder, not one rule per file.
+    assert _suggest_masks(failed) == ["config/menus/applications-merged", "config/systemd/user"]
+    assert _failed_common_folder(failed) == "config"
     assert _failed_relative_paths(["/absolute/private/path: permission denied", "../escape: denied"]) == []
     profile = Profile(name="failing job", left="/sample/left", right="/sample/right", exclusions=["existing"])
     save_profile(profile)
     seen = {}
-
-    class Dialog:
-        def __init__(self, choice):
-            self.choice = choice
-
-        def choose_finish(self, _result):
-            return self.choice
 
     class App(SfsApplication):
         def do_activate(self):
             owner = MainWindow(self)
             preview = owner._preview(JobResult(profile, ScanResult([]), None))
             results = ResultsWindow(preview, ApplyReport(errors=errors), None)
-            seen["button"] = results.exclude_common_button.get_label()
-            results._exclude_failed_chosen(Dialog(0), None, ["project/service/volumes"])
-            seen["cancel"] = load_profiles()[0].exclusions
-            results._exclude_failed_chosen(Dialog(1), None, ["project/service/volumes"])
+            progress = ProgressWindow(preview, profile.name)
+            seen["results_modal"] = results.get_modal()
+            seen["progress_modal"] = progress.get_modal()
+            seen["suggested"] = results.suggested_masks
+            seen["common_sensitive"] = results.exclude_common_button.get_sensitive()
+            assert all(any(path_matches(fail, mask) for mask in seen["suggested"]) for fail in failed)
+
+            results._exclude_failed(seen["suggested"], failed)
+            window = next(item for item in self.get_windows() if isinstance(item, FailingPathsWindow))
+            seen["window_modal"] = window.get_modal()
+            seen["seeded"] = window.editor.rules()
+            seen["listed"] = len(window.paths)
+            window.editor.entry.set_text("config/systemd/user/*.socket")
+            window.editor._save_rule()
+            window._save()
             seen["saved"] = load_profiles()[0].exclusions
             seen["notice"] = results.exclusion_notice.get_text()
-            seen["disabled"] = not results.exclude_paths_button.get_sensitive() and not results.exclude_common_button.get_sensitive()
+
+            # (all) is an include rule; saving it as an exclusion is refused.
+            window = FailingPathsWindow(results, ["(all)"], failed)
+            window._save()
+            seen["guard"] = window.error_label.get_text()
+            seen["guard_visible"] = window.error_label.get_visible()
+            seen["after_guard"] = load_profiles()[0].exclusions
+            progress.close()
+            results.close()
             self.quit()
 
     assert App().run(None) == 0
-    assert seen["button"] == "Exclude common folder…"
-    assert seen["cancel"] == ["existing"]
-    assert seen["saved"] == ["existing", "project/service/volumes"]
+    assert seen["results_modal"] is False
+    assert seen["progress_modal"] is False
+    assert seen["window_modal"] is False
+    assert seen["suggested"] == ["config/menus/applications-merged", "config/systemd/user"]
+    assert seen["common_sensitive"] is True
+    assert seen["seeded"] == seen["suggested"]
+    assert seen["listed"] == len(failed)
+    assert seen["saved"] == [
+        "existing",
+        "config/menus/applications-merged",
+        "config/systemd/user",
+        "config/systemd/user/*.socket",
+    ]
     assert "Retry Failed" in seen["notice"]
-    assert seen["disabled"] is True
+    assert "(all)" in seen["guard"] and seen["guard_visible"] is True
+    assert seen["after_guard"] == seen["saved"]
+
+
+def test_exclusion_suggestions_prefer_narrow_folders():
+    from ofs.ui import _suggest_masks
+
+    # One cluster with repeated branches becomes its own folder; unrelated
+    # failures stay exact paths instead of widening to a shared parent.
+    assert _suggest_masks(
+        [
+            "config/systemd/user/default.target.wants/a.service",
+            "config/systemd/user/default.target.wants/b.service",
+            "config/systemd/user/sockets.target.wants/a.socket",
+            "config/systemd/user/sockets.target.wants/b.socket",
+            "config/menus/applications-merged",
+        ]
+    ) == ["config/menus/applications-merged", "config/systemd/user"]
+    # Many siblings in one folder collapse into that folder.
+    assert _suggest_masks([f"cache/part-{index}/blob.bin" for index in range(20)]) == ["cache"]
+    # A single failure stays exactly that path.
+    assert _suggest_masks(["notes.txt"]) == ["notes.txt"]
+    assert _suggest_masks([]) == []
+    # Never propose the profile root itself as a rule.
+    assert _suggest_masks(["a.txt", "b.txt", "c.txt", "d.txt"]) == ["a.txt", "b.txt", "c.txt", "d.txt"]
 
 
 def test_confirmed_new_folder_copy_uses_chunked_engine_and_invalidates_cache(tmp_path, monkeypatch):

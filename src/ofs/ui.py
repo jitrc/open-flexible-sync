@@ -307,11 +307,11 @@ class MainWindow(Gtk.ApplicationWindow):
         self.stale_days = Gtk.SpinButton.new_with_range(1, 3650, 1)
         self.stale_days.set_value(7)
         self.stale_days.set_tooltip_text("Include profiles never run or last run at least this many days ago")
-        self.stale_days.connect("value-changed", lambda *_: self._rebuild())
+        self.stale_days.connect("value-changed", lambda *_: self._rebuild(preserve_scroll=False))
         self.stale_days_label = Gtk.Label(label="days")
         self.available_only = Gtk.CheckButton(label="Available paths only")
         self.available_only.set_tooltip_text("Show only profiles whose left and right folders exist now")
-        self.available_only.connect("toggled", lambda *_: self._rebuild())
+        self.available_only.connect("toggled", lambda *_: self._rebuild(preserve_scroll=False))
         self.filter_count = Gtk.Label(xalign=1, hexpand=True)
         self.filter_count.add_css_class("dim-label")
         filters = Gtk.Box(spacing=10)
@@ -350,20 +350,24 @@ class MainWindow(Gtk.ApplicationWindow):
         if row is None or not row.get_mapped():
             return name, None
         point = row.translate_coordinates(self.list_box, 0, 0)
-        return name, point[1] if point is not None else None
+        offset = point[1] if point is not None else None
+        # Rows rebuilt a moment ago all report y=0 until GTK lays them out.
+        # That is not a usable anchor while the list is scrolled down; keeping
+        # it would move the view by a bogus delta.
+        if offset == 0 and self.profiles_scroll.get_vadjustment().get_value() > 0:
+            offset = None
+        return name, offset
 
     def reload(self) -> None:
-        adjustment = self.profiles_scroll.get_vadjustment()
-        saved_scroll = adjustment.get_value()
-        profile, old_offset = self._profile_anchor()
-        self._profile_scroll_generation += 1
-        generation = self._profile_scroll_generation
-        self._profile_restore_pending = True
         self.profiles = load_profiles()
         self._path_available.clear()
         self._rebuild()
         folder = config_dir() / "profiles"
         self.status.set_text(f"{len(self.profiles)} profiles in {folder}")
+
+    def _schedule_profile_restore(
+        self, generation: int, saved_scroll: float, profile: str | None, old_offset: float | None,
+    ) -> None:
         # GTK resizes/allocates rebuilt children at a higher priority than this restore.
         GLib.idle_add(
             self._restore_profile_scroll, generation, saved_scroll, profile, old_offset,
@@ -453,7 +457,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _status_filter_changed(self, *_args) -> None:
         self._set_stale_visibility(self.status_filter.get_selected() == 6)
-        self._rebuild()
+        self._rebuild(preserve_scroll=False)
 
     def _is_grouped(self, profile: Profile) -> bool:
         return bool(profile.group_override.strip()) or self._group_sizes[profile.group] > 1
@@ -489,7 +493,22 @@ class MainWindow(Gtk.ApplicationWindow):
     def _update_filter_count(self) -> None:
         self.filter_count.set_text(f"{self._visible_count} of {len(self.profiles)} shown · {len(self.checked)} checked")
 
-    def _rebuild(self) -> None:
+    def _rebuild(self, *, preserve_scroll: bool = True) -> None:
+        """Rebuild the profile rows, normally staying where the user was.
+
+        Removing every row clamps the vertical adjustment to zero, so a scan
+        start or finish, a checkbox toggle, or a reload used to jump back to
+        the first profile. Save the value (and the focused row's offset inside
+        the list) before the rows go, then restore after GTK has laid the new
+        rows out. Filter and Expand-all changes start a new list instead.
+        """
+
+        adjustment = self.profiles_scroll.get_vadjustment()
+        saved_scroll = adjustment.get_value() if preserve_scroll else 0.0
+        anchor, anchor_offset = self._profile_anchor() if preserve_scroll else (None, None)
+        self._profile_scroll_generation += 1
+        generation = self._profile_scroll_generation
+        self._profile_restore_pending = True
         while child := self.list_box.get_first_child():
             self.list_box.remove(child)
         self._labels.clear()
@@ -507,6 +526,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if self.profiles:
                 text = "No profiles match."
             self.list_box.append(Gtk.Label(label=text, xalign=0))
+            self._schedule_profile_restore(generation, 0.0, None, None)
             return
         def grouped(profile: Profile) -> bool:
             return self._is_grouped(profile)
@@ -569,6 +589,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 self.list_box.append(emit(roots[root], root, root_sizes[root]))
         finally:
             self._applying_groups = False
+        self._schedule_profile_restore(generation, saved_scroll, anchor, anchor_offset)
 
     def _on_search(self) -> None:
         query = self.search.get_text().strip().lower()
@@ -582,7 +603,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         self._group_expanded[_UNGROUPED] = True
                     for index in range(1, len(parts) + 1):
                         self._group_expanded["/".join(parts[:index])] = True
-        self._rebuild()
+        self._rebuild(preserve_scroll=False)
 
     def _set_groups(self, expanded: bool) -> None:
         self._group_expanded[_UNGROUPED] = expanded
@@ -590,7 +611,7 @@ class MainWindow(Gtk.ApplicationWindow):
             parts = _group_parts(profile)
             for index in range(1, len(parts) + 1):
                 self._group_expanded["/".join(parts[:index])] = expanded
-        self._rebuild()
+        self._rebuild(preserve_scroll=False)
 
     def _remember_group(self, expander: Gtk.Expander, _pspec, group: str) -> None:
         if self._applying_groups:
@@ -2045,6 +2066,63 @@ def _error_groups(errors: list[str]) -> list[str]:
         else:
             lines.append(key)
     return lines
+
+
+def _suggest_masks(paths: list[str]) -> list[str]:
+    """Editable folder rules that cover repeated failures, then exact paths.
+
+    A folder rule covers everything under that folder, so failures that share
+    a real cluster become one rule instead of one literal path each. A cluster
+    is a folder whose failing entries split into at least two failing branches
+    (or into four or more entries); elsewhere the walk descends into the single
+    branch, and an unshared failure stays an exact path. Everything is offered
+    for editing before it is saved.
+    """
+
+    root: dict = {"files": set(), "folders": {}}
+    for rel in dict.fromkeys(paths):
+        parts = PurePosixPath(rel).parts
+        if not rel or rel.startswith("/") or ".." in parts:
+            continue
+        node = root
+        for part in parts[:-1]:
+            node = node["folders"].setdefault(part, {"files": set(), "folders": {}})
+        node["files"].add(parts[-1])
+
+    def total(node: dict) -> int:
+        return len(node["files"]) + sum(total(child) for child in node["folders"].values())
+
+    found: list[str] = []
+
+    def walk(node: dict, prefix: str) -> None:
+        entries: list[tuple[bool, str, dict | None, int]] = [
+            (False, name, None, 1) for name in sorted(node["files"])
+        ]
+        entries.extend(
+            (True, name, child, total(child))
+            for name, child in sorted(node["folders"].items())
+        )
+        entries = [entry for entry in entries if entry[3] > 0]
+        if not entries:
+            return
+        count = sum(entry[3] for entry in entries)
+        branches = sum(1 for entry in entries if entry[0] and entry[3] >= 2)
+        if prefix and count >= 2 and (branches >= 2 or len(entries) >= 4):
+            found.append(prefix)
+            return
+        for is_folder, name, child, _count in entries:
+            path = f"{prefix}/{name}" if prefix else name
+            if is_folder and child is not None:
+                walk(child, path)
+            else:
+                found.append(path)
+
+    walk(root, "")
+    # A rule that is already covered by a folder rule above it adds nothing.
+    return sorted(
+        rule for rule in dict.fromkeys(found)
+        if not any(rule.startswith(other + "/") for other in found if other != rule)
+    )
 
 
 def _failed_common_folder(paths: list[str]) -> str:
@@ -4309,7 +4387,10 @@ def _duration(seconds: float) -> str:
 
 class ProgressWindow(Gtk.Window):
     def __init__(self, owner: Preview, title: str):
-        super().__init__(transient_for=owner, modal=True, title=f"Copying {title}")
+        # Not application-modal: GTK would block every other OFS window, including
+        # another profile's independent scan or copy. Per-profile claims already
+        # reject duplicate work on this profile.
+        super().__init__(transient_for=owner, modal=False, title=f"Copying {title}")
         app = _owner_application(owner) if owner is not None else None
         if app is not None:
             self.set_application(app)
@@ -4575,9 +4656,101 @@ class RunHistoryWindow(Gtk.Window):
             open_uri(self._selected_entry.log_path)
 
 
+class FailingPathsWindow(Gtk.Window):
+    """Editable exclusion rules seeded from the paths a run could not process.
+
+    The rules are only a starting point: failed syncs mostly share folders, and
+    the user usually wants to widen, narrow, or replace them before saving.
+    """
+
+    def __init__(self, owner: "ResultsWindow", masks: list[str], paths: list[str]):
+        name = (owner.profile_name or "this profile").strip()
+        super().__init__(transient_for=owner, modal=False, title=f"Exclude failing paths — {name}")
+        self.set_application(_owner_application(owner))
+        _install_css()
+        self.owner = owner
+        self.paths = list(paths)
+        self.set_default_size(780, 620)
+
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        for edge in ("start", "end", "top", "bottom"):
+            getattr(root, f"set_margin_{edge}")(14)
+
+        heading = Gtk.Label(xalign=0, wrap=True)
+        heading.set_markup(f"<b>Exclude paths that failed on {GLib.markup_escape_text(name)}</b>")
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.add_css_class("dim-label")
+        hint.set_text(
+            "These rules are editable. A folder rule covers that folder and everything under it, "
+            "so one rule can replace many failing files. No files are deleted; the test field shows "
+            "which rule a relative path matches. After saving, choose Retry Failed… for a fresh scan."
+        )
+        root.append(heading)
+        root.append(hint)
+
+        self.error_label = Gtk.Label(xalign=0, wrap=True, css_classes=["result-error"])
+        self.error_label.set_visible(False)
+        root.append(self.error_label)
+
+        self.editor = ExclusionEditor(list(masks))
+        self.editor.set_vexpand(True)
+        root.append(self.editor)
+
+        expander = Gtk.Expander(label=f"All {len(self.paths)} failing path(s)")
+        expander.set_expanded(False)
+        listed = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        listed.add_css_class("monospace")
+        listed.set_text("\n".join(self.paths))
+        scrolled = Gtk.ScrolledWindow(min_content_height=90, max_content_height=170)
+        scrolled.set_child(listed)
+        expander.set_child(scrolled)
+        root.append(expander)
+
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_: self.close())
+        self.save_button = Gtk.Button(label="Save exclusions")
+        self.save_button.add_css_class("suggested-action")
+        self.save_button.connect("clicked", self._save)
+        self.set_default_widget(self.save_button)
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        buttons.append(cancel)
+        buttons.append(self.save_button)
+        root.append(buttons)
+
+        self.set_child(root)
+
+    def new_rules(self) -> list[str]:
+        profile = self.owner.owner.job.profile
+        return [rule for rule in self.editor.rules() if rule and rule not in profile.exclusions]
+
+    def _save(self, *_args) -> None:
+        profile = self.owner.owner.job.profile
+        rules = [rule.strip() for rule in self.editor.rules() if rule.strip()]
+        if any(rule == "(all)" for rule in rules):
+            self.error_label.set_text("(all) is an include rule and would exclude every file. Remove it before saving.")
+            self.error_label.set_visible(True)
+            return
+        added = [rule for rule in rules if rule not in profile.exclusions]
+        if not added:
+            self.owner.exclusion_notice.set_text(
+                "No new exclusion rules: the profile's current list already contains these."
+            )
+            self.close()
+            return
+        profile.exclusions.extend(added)
+        save_profile(profile)
+        self.owner.owner.owner.reload()
+        self.owner.exclusion_notice.set_text(
+            f"Saved {len(added)} new exclusion(s) on this profile. Choose Retry Failed… for a fresh complete scan."
+        )
+        self.close()
+
+
 class ResultsWindow(Gtk.Window):
     def __init__(self, owner: Preview, report: ApplyReport, log_path: Path | None):
-        super().__init__(transient_for=owner, modal=True, title="Copying Results")
+        # Not application-modal: the overview and other profiles stay usable while
+        # this result waits for its own Exclude/Retry/OK answer.
+        super().__init__(transient_for=owner, modal=False, title="Copying Results")
         self.set_application(_owner_application(owner))
         _install_css()
         self.owner = owner
@@ -4632,13 +4805,24 @@ class ResultsWindow(Gtk.Window):
             failed_paths = _failed_relative_paths(report.errors)
             common_folder = _failed_common_folder(failed_paths)
             if failed_paths:
-                self.exclude_paths_button = Gtk.Button(label=f"Exclude {len(failed_paths)} failing path(s)…")
-                self.exclude_paths_button.set_tooltip_text("Add each failing path as a literal exclusion on this profile, after confirmation")
-                self.exclude_paths_button.connect("clicked", lambda *_: self._exclude_failed(failed_paths))
+                self.suggested_masks = _suggest_masks(failed_paths)
+                self.exclude_paths_button = Gtk.Button(label="Exclude failing paths…")
+                self.exclude_paths_button.set_tooltip_text(
+                    "Propose folder rules for the failing paths, then edit the list before saving"
+                )
+                self.exclude_paths_button.connect(
+                    "clicked", lambda *_: self._exclude_failed(self.suggested_masks, failed_paths)
+                )
                 self.exclude_common_button = Gtk.Button(label="Exclude common folder…")
                 self.exclude_common_button.set_sensitive(bool(common_folder))
-                self.exclude_common_button.set_tooltip_text(f"Exclude {common_folder} and everything under it" if common_folder else "The failures have no common folder below the profile root")
-                self.exclude_common_button.connect("clicked", lambda *_: self._exclude_failed([common_folder], folder=True))
+                self.exclude_common_button.set_tooltip_text(
+                    f"Start from {common_folder} and everything under it, then edit before saving"
+                    if common_folder
+                    else "The failures have no common folder below the profile root"
+                )
+                self.exclude_common_button.connect(
+                    "clicked", lambda *_: self._exclude_failed([common_folder], failed_paths)
+                )
                 exclusions = Gtk.Box(spacing=8, halign=Gtk.Align.CENTER)
                 exclusions.append(self.exclude_paths_button)
                 exclusions.append(self.exclude_common_button)
@@ -4654,38 +4838,11 @@ class ResultsWindow(Gtk.Window):
         self.owner.close()
         return False
 
-    def _exclude_failed(self, masks: list[str], *, folder: bool = False) -> None:
+    def _exclude_failed(self, masks: list[str], paths: list[str]) -> None:
         if not masks or not masks[0]:
             return
-        dialog = Gtk.AlertDialog()
-        title = f"Exclude the common folder {masks[0]!r}?" if folder else f"Exclude {len(masks)} failing path(s)?"
-        dialog.set_message(title)
-        shown = "\n".join(masks[:12])
-        if len(masks) > 12:
-            shown += f"\n… and {len(masks) - 12} more"
-        dialog.set_detail(f"Add to {self.profile_name}'s permanent exclusions:\n\n{shown}\n\nNo files are deleted. Folder exclusions include everything under the folder. After saving, choose Retry Failed… to rescan.")
-        dialog.set_buttons(["Cancel", "Save exclusions"])
-        dialog.set_cancel_button(0)
-        dialog.set_default_button(0)
-        dialog.choose(self, None, self._exclude_failed_chosen, masks)
-
-    def _exclude_failed_chosen(self, dialog, result, masks: list[str]) -> None:
-        try:
-            choice = dialog.choose_finish(result)
-        except GLib.Error:
-            return
-        if choice != 1:
-            return
-        profile = self.owner.job.profile
-        added = [mask for mask in masks if mask and mask not in profile.exclusions]
-        profile.exclusions.extend(added)
-        save_profile(profile)
-        self.owner.owner.reload()
-        self.exclusion_notice.set_text(
-            f"Saved {len(added)} new exclusion(s) on this profile. Choose Retry Failed… for a fresh complete scan."
-        )
-        self.exclude_paths_button.set_sensitive(False)
-        self.exclude_common_button.set_sensitive(False)
+        window = FailingPathsWindow(self, masks, paths)
+        window.present()
 
     def _retry(self, *_args) -> None:
         dialog = Gtk.AlertDialog()

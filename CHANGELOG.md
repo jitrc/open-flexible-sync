@@ -12,6 +12,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Changed
 
+- **Exclude failing paths…** now opens an editable rule window seeded with suggestions instead of confirming one fixed list. Repeated failures that share a folder collapse into that folder (for example `config/systemd/user` instead of five files), unshared failures stay exact paths, and **Exclude common folder…** starts from the single shared folder when one exists. Rules can be edited, added, removed, and tested before saving; nothing is excluded before **Save exclusions**.
+- Copy progress and Copying Results windows no longer block the rest of OFS. A modal window would make every other window unusable, so another profile's scan could not be started or cancelled while a copy ran or a result waited for an answer; per-profile locks still prevent duplicate work on the same profile.
 - Changing a row, pointing a folder either way, or adding folder deletions now updates those rows and their folder totals in place instead of rebuilding the comparison tree, so a single action no longer costs a full pass over the plan on large previews.
 - A comparison of 20,000 files or more now opens collapsed with only its top-level folders. Expanding a folder loads its children (the first 200, then **Show N more file(s)…** streams the next batch), so a huge plan costs rows only where you look; the plan, Start, and the deletion safeguards are unchanged.
 - Folder rows name the work in the Status column ("427 undecided", "12 to copy to the right") instead of repeating a byte total that the Size column already shows.
@@ -28,6 +30,7 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ### Fixed
 
+- Clicking Scan no longer moves the profile overview back to the first profile. Every overview rebuild (scan start, scan finish, checkbox toggle) restores the saved scroll position and the focused row's offset; only filter and Expand-all changes start at the top.
 - A scan that cannot run now says **Scan failed** in the window title, shows a red banner with the exact reason and path, names the unavailable side, and points at Edit for the path; a user-stopped scan still says **Scan stopped** and explains the review-only rows.
 - A missing folder no longer reports "Volume unavailable" without a path. The row and the global history now say `folder not found: <path>`, while a genuinely absent or different disk still reports `volume is not mounted: <label> (<path>)`.
 - A copy is no longer stopped by cache bookkeeping when the profile's destination cache is off: invalidation is skipped in that case and never creates the `cache/` folder. An enabled cache that cannot be invalidated still stops the copy before the first write.
