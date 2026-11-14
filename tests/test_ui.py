@@ -3801,6 +3801,72 @@ def test_a_big_plan_opens_collapsed_and_loads_a_folder_when_expanded(tmp_path, m
     assert seen["plan_after"] == seen["plan"]
 
 
+def test_several_selected_rows_are_excluded_or_ignored_together(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestMultiSelect")
+    profile = Profile(name="multi select", left="/sample/left", right="/sample/right")
+    save_profile(profile)
+    rows = [
+        Listed(Change("alpha/a.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False),
+        Listed(Change("alpha/b.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False),
+        Listed(Change("beta/c.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False),
+        Listed(Change("top.txt", Action.COPY_LEFT_TO_RIGHT, "only on source", 5), True, False),
+    ]
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            job = JobResult(window.profiles[0], ScanResult([row.change for row in rows], listing=rows), None)
+            preview = window._preview(job)
+            preview._finish_scan(job)
+            seen["mode"] = preview.view.get_selection().get_mode()
+            seen["shortcuts"] = preview.shortcut_count
+            seen["controller"] = any(
+                isinstance(item, Gtk.ShortcutController) for item in preview.observe_controllers()
+            )
+            selection = preview.view.get_selection()
+            selection.select_iter(preview._folder_iters["alpha"])
+            selection.select_iter(preview._folder_iters["beta"])
+            seen["entries"] = preview._selected_entries()
+            # Right-clicking inside the selection keeps it; elsewhere it selects one row.
+            preview._keep_selection(preview._folder_iters["beta"])
+            seen["after_right_click"] = sorted(rel for rel, _folder in preview._selected_entries())
+            preview._keep_selection(preview._file_iters["top.txt"])
+            seen["after_other_row"] = preview._selected_entries()
+
+            # One editable window holds every selected path.
+            dialog = preview._ask_exclusions(seen["entries"])
+            seen["seeded"] = dialog.exclusion_editor.rules()
+            dialog.exclusion_save_button.emit("clicked")
+            seen["excluded"] = load_profiles()[0].exclusions
+            seen["left"] = [row.change.rel for row in preview.rows]
+
+            selection.unselect_all()
+            listed = preview._listed_row("top.txt")
+            selection.select_iter(preview._file_iters["top.txt"])
+            preview._ignore_selected()
+            seen["skipped"] = sorted(window.session_skips.get("multi select", set()))
+            seen["left_after_ignore"] = [row.change.rel for row in preview.rows]
+            seen["detail"] = preview.detail.get_text()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["mode"] == Gtk.SelectionMode.MULTIPLE
+    assert seen["shortcuts"] == 8
+    assert seen["controller"] is True
+    assert seen["entries"] == [("alpha", True), ("beta", True)]
+    assert seen["after_right_click"] == ["alpha", "beta"]
+    assert seen["after_other_row"] == [("top.txt", False)]
+    assert seen["seeded"] == ["alpha", "beta"]
+    assert seen["excluded"] == ["alpha", "beta"]
+    assert seen["left"] == ["top.txt"]
+    assert seen["skipped"] == ["top.txt"]
+    assert seen["left_after_ignore"] == []
+    assert "Ignored 1 file" in seen["detail"]
+
+
 def test_show_more_and_show_all_stream_one_folder_without_duplicates(tmp_path, monkeypatch):
     import ofs.ui as ui_module
 
@@ -3831,20 +3897,14 @@ def test_show_more_and_show_all_stream_one_folder_without_duplicates(tmp_path, m
         found = []
         node = store.iter_children(parent)
         while node is not None:
-            found.append((store.get_value(node, 0), store.get_value(node, 6)))
+            found.append((store.get_value(node, 0), store.get_value(node, 6), store.get_value(node, 7)))
             node = store.iter_next(node)
         return found
 
-    def more_iter(store, parent):
-        for name, folder in children(store, parent):
-            if folder:
-                return name, store.iter_children(parent) and _iter_for(store, parent, folder)
-        return None, None
-
-    def _iter_for(store, parent, folder):
+    def more_iter(store, parent, *, all_files=False):
         node = store.iter_children(parent)
         while node is not None:
-            if store.get_value(node, 6) == folder:
+            if store.get_value(node, 6) and (store.get_value(node, 7) == "all") == all_files:
                 return node
             node = store.iter_next(node)
         return None
@@ -3860,56 +3920,72 @@ def test_show_more_and_show_all_stream_one_folder_without_duplicates(tmp_path, m
                     break
             settle()
             seen["single_click"] = preview.view.get_activate_on_single_click()
+            seen["multi_select"] = preview.view.get_selection().get_mode()
 
             alpha = preview._folder_iters["alpha"]
             preview._folder_expanded(None, alpha, None)
             settle()
-            first = [name for name, _ in children(preview.tree_store, alpha)]
-            seen["first"] = first
-            _name, more = more_iter(preview.tree_store, alpha)
-            preview._row_activated(None, preview.tree_store.get_path(more), None)
+            seen["first"] = [name for name, _rel, _all in children(preview.tree_store, alpha)]
+            preview._row_activated(None, preview.tree_store.get_path(more_iter(preview.tree_store, alpha)), None)
             settle()
-            second = [name for name, _ in children(preview.tree_store, alpha)]
-            seen["second"] = second
-            _name, more = more_iter(preview.tree_store, alpha)
-            preview._show_more_files("alpha", more)
+            seen["second"] = [name for name, _rel, _all in children(preview.tree_store, alpha)]
+            preview._show_more_files("alpha", more_iter(preview.tree_store, alpha))
             settle()
-            seen["third"] = [name for name, _ in children(preview.tree_store, alpha)]
+            seen["third"] = [name for name, _rel, _all in children(preview.tree_store, alpha)]
             seen["nested_rows"] = sum(1 for name in seen["third"] if name.startswith("nested"))
 
             beta = preview._folder_iters["beta"]
             preview._folder_expanded(None, beta, None)
             settle()
-            _name, more = more_iter(preview.tree_store, beta)
-            preview._show_all_files("beta", more)
+            names = [name for name, _rel, _all in children(preview.tree_store, beta)]
+            seen["beta_before"] = names
+            # The toolbar button works on the selected folder, for sorting or review.
+            preview.view.get_selection().select_iter(beta)
             settle()
-            names = [name for name, _ in children(preview.tree_store, beta)]
+            seen["button_sensitive"] = preview.show_all_button.get_sensitive()
+            seen["button_tip"] = preview.show_all_button.get_tooltip_text()
+            preview.show_all_button.emit("clicked")
+            settle()
+            names = [name for name, _rel, _all in children(preview.tree_store, beta)]
             seen["beta"] = names
             seen["beta_more_gone"] = not any(name.startswith("Show ") for name in names)
             seen["detail"] = preview.detail.get_text()
             seen["plan"] = [change.rel for change in preview._planned()]
 
-            # Expand all on a big plan opens the loaded folders instead of collapsing them.
+            # A sort keeps the folder fully shown instead of collapsing the work.
+            preview.sort_results.set_selected(1)
+            settle()
+            beta = preview._folder_iters.get("beta")
+            seen["beta_sorted"] = [] if beta is None else [
+                name for name, _rel, _all in children(preview.tree_store, beta) if name.startswith("item-")
+            ]
+
             preview._set_tree_expanded(None, True)
             settle()
-            seen["expanded"] = preview.view.row_expanded(preview.tree_store.get_path(alpha))
+            alpha = preview._folder_iters.get("alpha")
+            seen["expanded"] = bool(alpha is not None and preview.view.row_expanded(preview.tree_store.get_path(alpha)))
             seen["tooltip"] = preview.expand_all_button.get_tooltip_text()
             preview.close()
             self.quit()
 
     assert App().run(None) == 0
     assert seen["single_click"] is True
+    assert seen["multi_select"] == Gtk.SelectionMode.MULTIPLE
     # A folder shows its subfolders once, then streams files batch by batch.
     assert seen["first"][0].startswith("nested")
-    assert seen["first"][-1] == "Show 5 more file(s)…"
+    assert seen["first"][-1] == "Show all 5 file(s) here…"
+    assert seen["first"][-2] == "Show 2 more file(s)…"
     assert len(seen["second"]) == len(seen["first"]) + 2
     assert seen["nested_rows"] == 1
-    # "Show all" streams the whole folder, leaving no "Show …" row, plan unchanged.
-    assert seen["beta"][0] == "item-0.bin"
+    # The toolbar streams the whole folder: no "Show …" rows left, plan unchanged.
+    assert seen["beta_before"][-1] == "Show all 7 file(s) here…"
+    assert seen["button_sensitive"] is True
+    assert "hidden file" in seen["button_tip"]
     assert len([name for name in seen["beta"] if name.startswith("item-")]) == 9
     assert seen["beta_more_gone"] is True
-    assert "Showing all 9 files under beta" in seen["detail"]
+    assert "already shown" in seen["detail"] or "Showing all" in seen["detail"]
     assert seen["plan"] == [row.change.rel for row in rows]
+    assert len(seen["beta_sorted"]) == 9
     assert seen["expanded"] is True
     assert "already loaded" in seen["tooltip"]
 

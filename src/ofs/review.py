@@ -140,6 +140,8 @@ class TreeNode:
     # many files this folder still holds back, and `more_folder` names it.
     more: int = 0
     more_folder: str = ""
+    # The row that loads every remaining file of its folder, not just a batch.
+    more_all: bool = False
     # Counts and sizes per direction group, so a later single-row change can
     # update this folder's totals without rescanning the whole plan.
     groups: dict[str, tuple[int, int]] = field(default_factory=dict)

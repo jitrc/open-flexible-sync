@@ -173,7 +173,10 @@ _PREVIEW_LIVE_LIMIT = 50_000
 # A finished comparison over a big plan opens collapsed, top-level folders only;
 # expanding a folder builds its children then, so rows cost what you look at.
 _LAZY_TREE_ROWS = 20_000
-_FOLDER_FILE_BATCH = 200
+# Opening a folder shows this many files before offering "Show more"; the
+# streaming row then adds the same amount per click, and "Show all" streams
+# the rest. Users asked for more than the old 200 by default.
+_FOLDER_FILE_BATCH = 1_000
 _FOLDER_MORE_BATCH = 1_000
 _PREVIEW_ASYNC_THRESHOLD = 1000
 
@@ -2191,6 +2194,11 @@ class ExclusionEditor(Gtk.Box):
     def rules(self) -> list[str]:
         return list(self._rules)
 
+    def set_rules(self, masks: list[str]) -> None:
+        self._rules = [mask for mask in masks if mask]
+        self._reset_entry()
+        self._refresh()
+
     def _reset_entry(self) -> None:
         self._editing = None
         self.entry.set_text("")
@@ -2426,6 +2434,7 @@ class Preview(Gtk.Window):
         self._folder_totals: dict[str, int] = {}
         self._more_counts: dict[str, int] = {}
         self._streaming_all = 0
+        self._fully_shown: set[str] = set()
         self.partial = bool(job.result.partial_sides)
         if self.partial:
             self.set_title(f"{job.profile.name} — Partial scan (review only)")
@@ -2457,6 +2466,17 @@ class Preview(Gtk.Window):
         self.collapse_all_button.connect("clicked", self._set_tree_expanded, False)
         for button in (self.expand_all_button, self.collapse_all_button):
             self.tree_controls.append(button)
+        self.show_all_button = Gtk.Button()
+        _button_icon(self.show_all_button, "Show all files", "view-list-symbolic")
+        self.show_all_button.set_sensitive(False)
+        self.show_all_button.set_tooltip_text("Select a folder to load every file in it; the plan does not change")
+        self.show_all_button.connect("clicked", lambda *_: self._show_all_selected())
+        self.tree_controls.append(self.show_all_button)
+        self.shortcut_button = Gtk.MenuButton()
+        self.shortcut_button.set_icon_name("help-about-symbolic")
+        self.shortcut_button.set_tooltip_text("Keyboard shortcuts for the selected rows")
+        self.shortcut_button.set_popover(self._shortcut_help())
+        self.tree_controls.append(self.shortcut_button)
         sort_heading = Gtk.Label(label="Sort by", xalign=0)
         sort_heading.set_margin_start(12)
         self.tree_controls.append(sort_heading)
@@ -2544,7 +2564,7 @@ class Preview(Gtk.Window):
         if rule:
             header.append(self.rule_label)
 
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str, str])
         self.view = Gtk.TreeView(model=self.tree_store)
         self.view.set_headers_visible(True)
         self.view.set_enable_tree_lines(True)
@@ -2556,6 +2576,10 @@ class Preview(Gtk.Window):
         # The "Show N more file(s)…" row is a button in disguise. Requiring a
         # double click (the default) hid the streaming feature; Enter still works.
         self.view.set_activate_on_single_click(True)
+        # Ctrl/Shift click selects several rows, so several folders can be
+        # excluded, ignored, or pointed the same way in one action.
+        self.view.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
+        self.view.get_selection().connect("changed", self._selection_changed)
         self.view.connect("row-collapsed", self._remember_tree_state, False)
         for index, title, width in (
             (0, "Name", 320),
@@ -2609,6 +2633,7 @@ class Preview(Gtk.Window):
         listing.set_hexpand(True)
         root.append(listing)
         self.set_child(root)
+        self._install_shortcuts()
 
     def _attach_operation_panel(self, progress: Gtk.Window, title: str) -> Gtk.Expander:
         panel = progress.get_child()
@@ -2636,6 +2661,7 @@ class Preview(Gtk.Window):
         self._set_last = ""
         self._set_next = ""
         self.notice.set_visible(False)
+        self._fully_shown.clear()
         self.tree_store.clear()
 
     def _begin_scan(self, progress: ScanWindow, *, uncached: bool = False, after_name: str = "") -> None:
@@ -2784,13 +2810,13 @@ class Preview(Gtk.Window):
             prefix = "/".join(parts[:depth])
             folder = self._folder_iters.get(prefix)
             if folder is None:
-                folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False, ""])
+                folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False, "", ""])
                 self._folder_iters[prefix] = folder
                 self._queue_folder_expansion(prefix, folder)
             parent = folder
         current = self.tree_store.append(
             parent,
-            [parts[-1], format_bytes(row.change.size), "L ··· R", row.change.reason, rel, False, ""],
+            [parts[-1], format_bytes(row.change.size), "L ··· R", row.change.reason, rel, False, "", ""],
         )
         self._file_iters[rel] = current
         self.store.append(PlanRow(row.change))
@@ -2832,6 +2858,8 @@ class Preview(Gtk.Window):
                 self.scan_details.set_label("Scan stopped")
         if job.result is not None:
             result = job.result
+            # A new plan can change every folder's remainder, so forget the choices.
+            self._fully_shown.clear()
             self.rows = list(result.listing) if result.listing else [Listed(change, False, False) for change in result.changes]
             self._original = {row.change.rel: row.change for row in self.rows}
             self._set_last = result.set_last
@@ -3143,33 +3171,62 @@ class Preview(Gtk.Window):
                     self.store.append(PlanRow(change))
         self._loaded_files[rel] = len(files)
         if remaining:
-            self._append_more_row(rel, parent_iter, remaining)
+            more_iter = self._append_more_row(rel, parent_iter, remaining)
+            if rel in self._fully_shown:
+                # A sort or filter rebuilt this folder; keep showing all of it.
+                self._show_all_files(rel, more_iter)
+        # Removing the "Loading…" placeholder can drop the row's expanded state
+        # before the real children are appended; the user did ask to open it.
+        path = self.tree_store.get_path(parent_iter)
+        if path is not None and not self.view.row_expanded(path):
+            self.view.expand_row(path, False)
+        self._selection_changed()
         return False
 
     def _append_more_row(self, folder: str, parent_iter, remaining: int):
         from ofs.review import TreeNode
 
-        node = TreeNode(
-            name=f"Show {remaining:,} more file(s)…",
+        self._more_counts[folder] = remaining
+        batch = TreeNode(
+            name=f"Show {min(_FOLDER_MORE_BATCH, remaining):,} more file(s)…",
             rel="",
             is_file=False,
             size_text="",
             size=0,
             direction="",
-            status="Click for the next batch; right-click to show all here",
+            status="Click for the next batch",
             children=[],
             more=remaining,
             more_folder=folder,
         )
-        self._more_counts[folder] = remaining
-        return self.tree_store.append(parent_iter, self._node_values(node))
+        row = self.tree_store.append(parent_iter, self._node_values(batch))
+        if remaining > _FOLDER_MORE_BATCH:
+            everything = TreeNode(
+                name=f"Show all {remaining:,} file(s) here…",
+                rel="",
+                is_file=False,
+                size_text="",
+                size=0,
+                direction="",
+                status="Load every file of this folder; the plan does not change",
+                children=[],
+                more=remaining,
+                more_folder=folder,
+                more_all=True,
+            )
+            self.tree_store.append(parent_iter, self._node_values(everything))
+        return row
 
     def _row_activated(self, _view, path, _column) -> None:
         tree_iter = self.tree_store.get_iter(path)
         if tree_iter is None:
             return
         folder = self.tree_store.get_value(tree_iter, 6)
-        if folder:
+        if not folder:
+            return
+        if self.tree_store.get_value(tree_iter, 7) == "all":
+            self._show_all_files(folder, tree_iter)
+        else:
             self._show_more_files(folder, tree_iter)
 
     def _show_more_files(self, folder: str, more_iter) -> None:
@@ -3193,6 +3250,13 @@ class Preview(Gtk.Window):
         )
         parent_iter = self.tree_store.iter_parent(more_iter)
         self.tree_store.remove(more_iter)
+        # The pair is rebuilt below; leaving the sibling behind would duplicate it.
+        sibling = self.tree_store.iter_children(parent_iter)
+        while sibling is not None:
+            following = self.tree_store.iter_next(sibling)
+            if self.tree_store.get_value(sibling, 6) == folder:
+                self.tree_store.remove(sibling)
+            sibling = following
         target = parent_iter
         for node in files:
             current = self.tree_store.append(target, self._node_values(node))
@@ -3207,6 +3271,7 @@ class Preview(Gtk.Window):
             more_iter = self._append_more_row(folder, parent_iter, remaining)
         elif not remaining:
             self._more_counts.pop(folder, None)
+        self._selection_changed()
         return more_iter, len(files), remaining
 
     def _show_all_files(self, folder: str, more_iter) -> None:
@@ -3220,6 +3285,7 @@ class Preview(Gtk.Window):
         self._streaming_all += 1
         token = self._streaming_all
         generation = self._fill_generation
+        self._fully_shown.add(folder)
         self.detail.set_text(f"Showing all files under {folder}…")
         GLib.idle_add(
             self._stream_all_step, token, generation, folder, more_iter,
@@ -3376,7 +3442,7 @@ class Preview(Gtk.Window):
         self._refresh_detail()
 
     def _reset_tree_model(self) -> None:
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str, str])
         # Replace only the GTK model. Exclusion/filter helpers own the flat store.
         self.view.set_model(self.tree_store)
         self._folder_iters = {}
@@ -3395,6 +3461,7 @@ class Preview(Gtk.Window):
             node.rel,
             bool(node.rel) and node.rel in self._completed_rows,
             node.more_folder if node.more else "",
+            "all" if getattr(node, "more_all", False) else "",
         ]
 
     def _remember_folder_stats(self, node) -> None:
@@ -3556,6 +3623,7 @@ class Preview(Gtk.Window):
         else:
             self._refresh_tree_layout()
         self._refresh_detail()
+        self._selection_changed()
         return False
 
     def _rel_at(self, x: float, y: float) -> str | None:
@@ -3571,12 +3639,25 @@ class Preview(Gtk.Window):
             return None
         return self.tree_store.get_value(tree_iter, 4)
 
+    def _keep_selection(self, tree_iter) -> None:
+        """Right-clicking inside a selection keeps it; elsewhere it selects that row."""
+
+        selection = self.view.get_selection()
+        if tree_iter is not None and not selection.iter_is_selected(tree_iter):
+            selection.unselect_all()
+            selection.select_iter(tree_iter)
+
     def _tree_pressed(self, _gesture, _n, x: float, y: float) -> None:
-        path, _column, _cell_x, _cell_y = self.view.get_path_at_pos(int(x), int(y))
-        tree_iter = self.tree_store.get_iter(path) if path is not None else None
+        found = self.view.get_path_at_pos(int(x), int(y))
+        tree_iter = self.tree_store.get_iter(found[0]) if found is not None else None
         folder = self.tree_store.get_value(tree_iter, 6) if tree_iter is not None else ""
         if folder:
             self._popup_more(folder, tree_iter, x, y)
+            return
+        self._keep_selection(tree_iter)
+        entries = self._selected_entries()
+        if len(entries) > 1:
+            self._popup_selection(entries, x, y)
             return
         rel = self._rel_at(x, y)
         if rel is None:
@@ -3586,6 +3667,415 @@ class Preview(Gtk.Window):
             self._popup_folder(rel, x, y)
             return
         self._popup(PlanRow(listed.change), self.view, x, y)
+
+    def _selected_folder(self) -> str:
+        """The folder the selected row belongs to, for folder-level actions."""
+
+        _model, paths = self.view.get_selection().get_selected_rows()
+        if not paths:
+            return ""
+        tree_iter = self.tree_store.get_iter(paths[0])
+        if tree_iter is None:
+            return ""
+        folder = self.tree_store.get_value(tree_iter, 6)
+        if folder:
+            return folder
+        rel = self.tree_store.get_value(tree_iter, 4)
+        if not rel:
+            return ""
+        if rel in self._folder_iters:
+            return rel
+        parent = rel.rsplit("/", 1)[0] if "/" in rel else ""
+        return parent if parent in self._folder_iters else ""
+
+    def _more_row_for(self, folder: str):
+        folder_iter = self._folder_iters.get(folder)
+        if folder_iter is None:
+            return None
+        child = self.tree_store.iter_children(folder_iter)
+        while child is not None:
+            if self.tree_store.get_value(child, 6) == folder:
+                return child
+            child = self.tree_store.iter_next(child)
+        return None
+
+    def _selection_iters(self) -> list:
+        _model, paths = self.view.get_selection().get_selected_rows()
+        return [self.tree_store.get_iter(path) for path in paths]
+
+    def _selected_entries(self) -> list[tuple[str, bool]]:
+        """(relative path, is_folder) for every selected row that names a path."""
+
+        found: list[tuple[str, bool]] = []
+        for tree_iter in self._selection_iters():
+            rel = self.tree_store.get_value(tree_iter, 4)
+            if not rel:
+                continue
+            entry = (rel, rel in self._folder_iters)
+            if entry not in found:
+                found.append(entry)
+        return found
+
+    def _ignore_selected(self, *, extension: bool = False) -> None:
+        """Ignore the whole selection for this run with one refill."""
+
+        entries = self._selected_entries()
+        if not entries:
+            self.detail.set_text("Select one or more rows to ignore for this run.")
+            return
+        name = self.job.profile.name
+        gone: set[str] = set()
+        folders: list[str] = []
+        files: list[str] = []
+        suffixes: set[str] = set()
+        for rel, is_folder in entries:
+            if extension:
+                suffix = Path(rel).suffix
+                if not is_folder and suffix:
+                    suffixes.add(suffix)
+                continue
+            if is_folder:
+                folders.append(rel)
+                prefix = rel + "/"
+                gone.update(
+                    item.change.rel
+                    for item in self.rows
+                    if item.change.rel == rel or item.change.rel.startswith(prefix)
+                )
+            else:
+                files.append(rel)
+        with self.owner._session_rule_lock(name):
+            skips = self.owner.session_skips.setdefault(name, set())
+            masks = self.owner.session_masks.setdefault(name, [])
+            skips.update(files)
+            gone.update(files)
+            for rel in folders:
+                if rel not in masks:
+                    masks.append(rel)
+            for suffix in suffixes:
+                mask = f"*{suffix}"
+                if mask not in masks:
+                    masks.append(mask)
+                gone.update(item.change.rel for item in self.rows if Path(item.change.rel).suffix == suffix)
+        if not gone:
+            self.detail.set_text("Nothing in the selection could be ignored.")
+            return
+        self.rows = [item for item in self.rows if item.change.rel not in gone]
+        self._refill()
+        noun = "file" if len(gone) == 1 else "files"
+        self.detail.set_text(f"Ignored {len(gone)} {noun} for this run; nothing on disk changed.")
+
+    def _set_selected(self, action: Action | None) -> None:
+        """Point every selected file and folder the same way in one action."""
+
+        entries = self._selected_entries()
+        if not entries:
+            self.detail.set_text("Select one or more rows first.")
+            return
+        folders = 0
+        files = 0
+        for rel, is_folder in entries:
+            if is_folder:
+                if action == Action.COPY_LEFT_TO_RIGHT:
+                    self._set_folder_direction(rel, "right")
+                    folders += 1
+                elif action == Action.COPY_RIGHT_TO_LEFT:
+                    self._set_folder_direction(rel, "left")
+                    folders += 1
+                continue
+            listed = self._listed_row(rel)
+            if listed is None:
+                continue
+            self._set_action(PlanRow(listed.change), action)
+            files += 1
+        wording = {
+            None: "reverted to their scanned action",
+            Action.COPY_LEFT_TO_RIGHT: "set to copy to the right",
+            Action.COPY_RIGHT_TO_LEFT: "set to copy to the left",
+            Action.UNCHANGED: "left unchanged",
+        }.get(action, "updated")
+        parts = []
+        if files:
+            parts.append(f"{files} file(s)")
+        if folders:
+            parts.append(f"{folders} folder(s)")
+        self.detail.set_text(f"{' and '.join(parts) or 'Nothing'} {wording}.")
+
+    def _save_exclusions(self, rules: list[str], *, scope: str = "profile") -> int:
+        """Add many rules at once, with a single row refresh and overview reload."""
+
+        wanted = [rule.strip() for rule in rules if rule.strip()]
+        if not wanted:
+            return 0
+        profile = self.job.profile
+        added: list[str] = []
+        with self.owner._session_rule_lock(profile.name):
+            self._live_permanent_masks.update(wanted)
+            if scope == "global":
+                masks = global_exclusions()
+                for rule in wanted:
+                    if rule not in masks:
+                        masks.append(rule)
+                        added.append(rule)
+                if added:
+                    set_global_exclusions(masks)
+            else:
+                for rule in wanted:
+                    if rule not in profile.exclusions:
+                        profile.exclusions.append(rule)
+                        added.append(rule)
+                if added:
+                    save_profile(profile)
+        keep = [
+            item for item in self.rows
+            if not any(
+                path_matches(item.change.rel, rule)
+                or (item.change.dest_rel and path_matches(item.change.dest_rel, rule))
+                for rule in wanted
+            )
+        ]
+        if len(keep) != len(self.rows):
+            self.rows = keep
+            self._refill()
+        self.owner.reload()
+        return len(added)
+
+    def _ask_exclusions(self, entries: list[tuple[str, bool]]) -> Gtk.Window:
+        """Editable exclusion rules for several selected rows at once."""
+
+        paths = [rel for rel, _is_folder in entries]
+        window = Gtk.Window(transient_for=self, modal=True, title=f"Add {len(paths)} Exclusions")
+        window.set_default_size(780, 580)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        for edge in ("start", "end", "top", "bottom"):
+            getattr(box, f"set_margin_{edge}")(16)
+        heading = Gtk.Label(xalign=0, wrap=True)
+        heading.set_markup(f"<b>Add exclusions for {len(paths)} selected path(s)</b>")
+        scope = Gtk.DropDown.new_from_strings(["This profile", "Global exclusions (all profiles)"])
+        match = Gtk.DropDown.new_from_strings(["Full relative path", "Folder or file name (any location)"])
+        editor = ExclusionEditor(paths)
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.add_css_class("dim-label")
+        form = Gtk.Grid(column_spacing=12, row_spacing=10)
+        form.attach(Gtk.Label(label="Save to", xalign=0), 0, 0, 1, 1)
+        form.attach(scope, 1, 0, 1, 1)
+        form.attach(Gtk.Label(label="Match", xalign=0), 0, 1, 1, 1)
+        form.attach(match, 1, 1, 1, 1)
+        box.append(heading)
+        box.append(form)
+        box.append(hint)
+        editor.set_vexpand(True)
+        box.append(editor)
+        buttons = Gtk.Box(spacing=8, halign=Gtk.Align.END)
+        cancel = Gtk.Button(label="Cancel")
+        cancel.connect("clicked", lambda *_args: window.close())
+        save = Gtk.Button(label="Save exclusions", css_classes=["suggested-action"])
+        buttons.append(cancel)
+        buttons.append(save)
+        box.append(buttons)
+        window.exclusion_editor = editor
+        window.exclusion_scope = scope
+        window.exclusion_match = match
+        window.exclusion_save_button = save
+        window.exclusion_hint = hint
+
+        def explain() -> None:
+            target = "all profiles" if scope.get_selected() else f"profile {self.job.profile.name}"
+            if match.get_selected():
+                hint.set_text(f"Bare names match that folder or file at any depth on both sides in {target}.")
+            else:
+                hint.set_text(f"Relative to each profile root, on both sides in {target}. Nothing on disk is deleted.")
+            if scope.get_selected() and global_exclusion_mode() == ExclusionMode.DONT_COPY:
+                hint.set_text(hint.get_text() + " Global Don't Copy applies; rescan to recalculate deletions.")
+
+        def apply_match(*_args) -> None:
+            if match.get_selected():
+                editor.set_rules([PurePosixPath(rel).name for rel in paths])
+            else:
+                editor.set_rules(paths)
+            explain()
+
+        def on_save(*_args) -> None:
+            rules = [rule.strip() for rule in editor.rules() if rule.strip()]
+            if not rules:
+                hint.set_text("Add at least one rule before saving.")
+                return
+            if any(rule == "(all)" for rule in rules):
+                hint.set_text("(all) is an include rule and would exclude every file. Remove it first.")
+                return
+            added = self._save_exclusions(rules, scope="global" if scope.get_selected() else "profile")
+            window.close()
+            self.detail.set_text(
+                f"Saved {added} new exclusion(s). Rescan for a plan that already leaves them out."
+            )
+
+        match.connect("notify::selected", apply_match)
+        scope.connect("notify::selected", lambda *_args: explain())
+        save.connect("clicked", on_save)
+        explain()
+        window.set_child(box)
+        window.set_default_widget(save)
+        window.present()
+        return window
+
+    def _shortcut_exclusions(self) -> None:
+        entries = self._selected_entries()
+        if not entries:
+            self.detail.set_text("Select a row, or several with Ctrl/Shift, to exclude.")
+            return
+        if len(entries) == 1:
+            rel, is_folder = entries[0]
+            self._ask_exclusion(rel, folder=is_folder)
+            return
+        self._ask_exclusions(entries)
+
+    def _shortcut_direction(self, toward: str) -> None:
+        self._set_selected(Action.COPY_LEFT_TO_RIGHT if toward == "right" else Action.COPY_RIGHT_TO_LEFT)
+
+    def _shortcut_unchanged(self) -> None:
+        self._set_selected(Action.UNCHANGED)
+
+    def _shortcut_revert(self) -> None:
+        self._set_selected(None)
+
+    def _shortcut_show_all(self) -> None:
+        self._show_all_selected()
+
+    def _install_shortcuts(self) -> None:
+        """Keyboard equivalents for the row actions, over the whole selection."""
+
+        controller = Gtk.ShortcutController()
+        controller.set_scope(Gtk.ShortcutScope.GLOBAL)
+        bindings = (
+            ("<Control>e", self._shortcut_exclusions),
+            ("<Control>i", lambda: self._ignore_selected()),
+            ("<Control><Shift>i", lambda: self._ignore_selected(extension=True)),
+            ("<Control>u", self._shortcut_unchanged),
+            ("<Control>r", self._shortcut_revert),
+            ("<Control><Shift>a", self._shortcut_show_all),
+            ("<Control>Right", lambda: self._shortcut_direction("right")),
+            ("<Control>Left", lambda: self._shortcut_direction("left")),
+        )
+        for keys, callback in bindings:
+            trigger = Gtk.ShortcutTrigger.parse_string(keys)
+            if trigger is None:
+                continue
+            action = Gtk.CallbackAction.new(lambda *_args, fn=callback: (fn(), True)[1])
+            controller.add_shortcut(Gtk.Shortcut.new(trigger, action))
+        self.add_controller(controller)
+        self.shortcut_count = len(bindings)
+
+    def _shortcut_help(self) -> Gtk.Popover:
+        grid = Gtk.Grid(column_spacing=14, row_spacing=6)
+        grid.set_margin_start(12)
+        grid.set_margin_end(12)
+        grid.set_margin_top(12)
+        grid.set_margin_bottom(12)
+        rows = [
+            ("Ctrl+E", "Add exclusions for the selected rows"),
+            ("Ctrl+I", "Ignore the selected rows for this run"),
+            ("Ctrl+Shift+I", "Ignore the selected file extensions for this run"),
+            ("Ctrl+U", "Leave the selected files unchanged"),
+            ("Ctrl+R", "Revert the selected files to the scanned action"),
+            ("Ctrl+→ / Ctrl+←", "Copy the selected files and folders right / left"),
+            ("Ctrl+Shift+A", "Show every file of the selected folder"),
+            ("Ctrl/Shift+click", "Select several rows or folders"),
+        ]
+        for index, (keys, text) in enumerate(rows):
+            key = Gtk.Label(label=keys, xalign=0, css_classes=["monospace"])
+            grid.attach(key, 0, index, 1, 1)
+            grid.attach(Gtk.Label(label=text, xalign=0, wrap=True), 1, index, 1, 1)
+        popover = Gtk.Popover()
+        popover.set_child(grid)
+        return popover
+
+    def _selection_changed(self, _selection=None) -> None:
+        folder = self._selected_folder()
+        hidden = self._more_counts.get(folder, 0) if folder else 0
+        ready = bool(folder) and (hidden > 0 or folder in self._deferred)
+        self.show_all_button.set_sensitive(ready)
+        if ready and hidden:
+            self.show_all_button.set_tooltip_text(f"Load all {hidden:,} hidden file(s) under {folder}")
+        elif ready:
+            self.show_all_button.set_tooltip_text(f"Load every file under {folder}")
+        else:
+            self.show_all_button.set_tooltip_text(
+                "Select a folder to load every file in it; the plan does not change"
+            )
+
+    def _show_all_selected(self) -> None:
+        """Load every file of the selected folder, streaming in the background."""
+
+        folder = self._selected_folder()
+        if not folder:
+            return
+        folder_iter = self._folder_iters.get(folder)
+        if folder_iter is not None:
+            path = self.tree_store.get_path(folder_iter)
+            if path is not None and not self.view.row_expanded(path):
+                self.view.expand_row(path, False)
+        if folder in self._deferred:
+            self._deferred.discard(folder)
+            self._load_folder_children(folder, folder_iter)
+        more_iter = self._more_row_for(folder)
+        if more_iter is None:
+            self.detail.set_text(f"Every file under {folder} is already shown.")
+            return
+        self._show_all_files(folder, more_iter)
+
+    def _popup_selection(self, entries: list[tuple[str, bool]], x: float, y: float) -> None:
+        """Actions that apply to every selected row at once."""
+
+        if self._popover is not None:
+            self._popover.unparent()
+        popover = Gtk.Popover()
+        popover.set_parent(self.view)
+        rect = Gdk.Rectangle()
+        rect.x = int(x)
+        rect.y = int(y)
+        rect.width = 1
+        rect.height = 1
+        popover.set_pointing_to(rect)
+        count = len(entries)
+        files_only = all(not is_folder for _rel, is_folder in entries)
+        actions = [
+            (
+                f"Add exclusions for {count} selected…",
+                "Edit profile or global rules for every selected path before saving",
+                lambda: self._ask_exclusions(entries),
+            ),
+            (
+                f"Ignore {count} selected for this run",
+                "Leave them out of this run; nothing on disk changes",
+                lambda: self._ignore_selected(),
+            ),
+        ]
+        if files_only:
+            actions.append(
+                (
+                    "Ignore these extensions for this run",
+                    "Skip every file with these suffixes in this run",
+                    lambda: self._ignore_selected(extension=True),
+                )
+            )
+        actions.extend(
+            [
+                ("Copy these left to right", "Point every selected file and folder to the right", lambda: self._set_selected(Action.COPY_LEFT_TO_RIGHT)),
+                ("Copy these right to left", "Point every selected file and folder to the left", lambda: self._set_selected(Action.COPY_RIGHT_TO_LEFT)),
+                ("Leave these files unchanged", "", lambda: self._set_selected(Action.UNCHANGED)),
+                ("Revert these to the scanned action", "", lambda: self._set_selected(None)),
+            ]
+        )
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        for text, tip, callback in actions:
+            button = Gtk.Button(label=text)
+            if tip:
+                button.set_tooltip_text(tip)
+            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
+            box.append(button)
+        popover.set_child(box)
+        self._popover = popover
+        popover.popup()
 
     def _popup_more(self, folder: str, more_iter, x: float, y: float) -> None:
         """Controls for the hidden remainder of one folder, without changing the plan."""
@@ -3876,28 +4366,8 @@ class Preview(Gtk.Window):
         mask = mask.strip()
         if not mask:
             return False
-        profile = self.job.profile
-        with self.owner._session_rule_lock(profile.name):
-            self._live_permanent_masks.add(mask)
-            if scope == "global":
-                masks = global_exclusions()
-                if mask not in masks:
-                    set_global_exclusions([*masks, mask])
-            else:
-                if mask not in profile.exclusions:
-                    profile.exclusions.append(mask)
-                    save_profile(profile)
-            mode = global_exclusion_mode() if scope == "global" else profile.exclusion_mode
-
-        def allowed(relative: str) -> bool:
-            return not path_matches(relative, mask)
-
-        self.rows = [
-            item for item in self.rows
-            if allowed(item.change.rel) and (not item.change.dest_rel or allowed(item.change.dest_rel))
-        ]
-        self._refill()
-        self.owner.reload()
+        self._save_exclusions([mask], scope=scope)
+        mode = global_exclusion_mode() if scope == "global" else self.job.profile.exclusion_mode
         if mode == ExclusionMode.DONT_COPY:
             self.detail.set_text(f"Saved exclusion: {mask}. Rescan to calculate any Exact Mirror Don't Copy deletions.")
         return True
