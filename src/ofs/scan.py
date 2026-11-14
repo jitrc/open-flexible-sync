@@ -243,8 +243,11 @@ def scan_profile(
                 if skip_file(name):
                     continue
                 found = entry_stat(path, symlinks=profile.symlinks.value)
-                if found is not None:
-                    files[name] = found
+                # `walk` records regular files, folders, and links; it ignores sockets, pipes, and
+                # devices. A set must build the same plan, so skip the same special files.
+                if found is None or (found.kind == "unsupported" and not stat.S_ISLNK(info.st_mode)):
+                    continue
+                files[name] = found
                 continue
             if skip_dir(name, destination):
                 continue

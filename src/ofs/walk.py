@@ -98,7 +98,7 @@ def entry_stat(path: Path, *, symlinks: str = "follow") -> FileStat | None:
         return _file_stat(info, kind="unsupported", target=target)
     if stat.S_ISREG(info.st_mode):
         return _file_stat(info)
-    return file_stat(info, kind="unsupported")
+    return _file_stat(info, kind="unsupported")
 
 
 def walk(

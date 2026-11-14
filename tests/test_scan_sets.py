@@ -123,3 +123,43 @@ def test_a_set_limit_of_zero_keeps_one_complete_scan(tmp_path, monkeypatch):
 
     assert result.set_last == "" and result.set_next == ""
     assert sorted(change.rel for change in result.changes) == ["one/a.txt", "two/b.txt"]
+
+
+def test_a_root_level_socket_never_fails_a_set_scan_and_is_ignored(tmp_path, monkeypatch):
+    """A unix socket at the root must not abort the scan, and a set must ignore it like `walk` does."""
+
+    import socket
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _pair(tmp_path)
+    _write(tmp_path / "left" / "keep" / "a.txt", "a")
+    _write(tmp_path / "left" / "other" / "b.txt", "b")
+    sock_path = tmp_path / "left" / "ipc.sock"
+    server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    server.bind(str(sock_path))
+
+    try:
+        full = scan_profile(profile)
+        first = scan_profile(profile, set_limit=1)
+        second = scan_profile(profile, set_limit=1, after_name=first.set_next)
+    finally:
+        server.close()
+
+    assert full.errors == [] and first.errors == [] and second.errors == []
+    assert "ipc.sock" not in {change.rel for change in full.changes}
+    seen = {change.rel for change in first.changes} | {change.rel for change in second.changes}
+    assert "ipc.sock" not in seen
+    assert seen == {"keep/a.txt", "other/b.txt"}
+
+
+def test_a_pipe_inside_a_folder_is_ignored_by_sets_and_full_scans(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    profile = _pair(tmp_path)
+    _write(tmp_path / "left" / "area" / "a.txt", "a")
+    os.mkfifo(tmp_path / "left" / "area" / "pipe")
+
+    full = scan_profile(profile)
+    one = scan_profile(profile, set_limit=1)
+
+    assert [change.rel for change in full.changes] == ["area/a.txt"]
+    assert [change.rel for change in one.changes] == ["area/a.txt"]
