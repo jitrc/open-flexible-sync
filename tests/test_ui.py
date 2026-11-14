@@ -3801,6 +3801,221 @@ def test_a_big_plan_opens_collapsed_and_loads_a_folder_when_expanded(tmp_path, m
     assert seen["plan_after"] == seen["plan"]
 
 
+def test_copy_start_warns_when_the_destination_lacks_free_space(tmp_path, monkeypatch):
+    import types
+
+    import ofs.ui as ui_module
+    from ofs.apply import ApplyReport
+    from ofs.scan import ScanResult
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLowSpace")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    left.mkdir()
+    right.mkdir()
+    save_profile(Profile(name="low space", left=str(left), right=str(right)))
+    # The destination reports 100 MB free while the plan copies 10 GB.
+    monkeypatch.setattr(ui_module.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=100 * 1024**2))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            rows = [
+                Listed(Change("huge.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10 * 1024**3), True, False)
+            ]
+            job = JobResult(profile, ScanResult([row.change for row in rows], listing=rows), None)
+            preview = window._preview(job)
+            preview._finish_scan(job)
+            seen["shortfall"] = preview._space_shortfall(preview._planned())
+            preview._confirm_low_space = lambda shortfall: seen.setdefault("asked", shortfall)
+            preview._begin = lambda changes, choice: seen.setdefault("began", (len(changes), choice))
+            preview._start()
+            seen["space_ok_before"] = preview._space_ok
+            # Confirming the warning proceeds with the same plan.
+            preview._space_ok = True
+            preview._start()
+            seen["began_count"] = seen.get("began")
+            # Enough space: no question at all.
+            monkeypatch.setattr(ui_module.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=50 * 1024**3))
+            seen["plenty"] = preview._space_shortfall(preview._planned())
+            seen["copy_only_not_deleted"] = preview._space_shortfall(
+                [Change("old.bin", Action.DELETE_RIGHT, "only on destination", 5)]
+            )
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    side, root, free, needed = seen["shortfall"]
+    assert side == "Right" and root == str(right)
+    assert free == 100 * 1024**2 and needed == 10 * 1024**3
+    assert seen["asked"] == seen["shortfall"]
+    assert seen["space_ok_before"] is False
+    assert seen["began_count"] == (1, "no deletions")
+    assert seen["plenty"] is None
+    assert seen["copy_only_not_deleted"] is None
+
+
+def test_returning_to_a_result_does_not_scroll_to_an_offscreen_profile(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestNoDistantScroll")
+    for index in range(40):
+        save_profile(Profile(name=f"group-{index // 2:02d} profile-{index:02d}", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window._set_groups(True)
+            window.present()
+            settle()
+            adjustment = window.profiles_scroll.get_vadjustment()
+            adjustment.set_value((adjustment.get_upper() - adjustment.get_page_size()) * 0.7)
+            settle()
+            seen["before"] = adjustment.get_value()
+            # The finished profile is far above the viewport.
+            window._focused_profile = "group-00 profile-00"
+            window._return_to_profile("group-00 profile-00")
+            settle()
+            seen["after"] = adjustment.get_value()
+            seen["maximum"] = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
+            seen["focused"] = window._focused_profile
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["before"] > 0
+    # Keeping the offset means the far profile is not scrolled into view; a shorter
+    # viewport may only clamp it.
+    assert seen["after"] > 0
+    assert seen["after"] == pytest.approx(min(seen["before"], seen["maximum"]), abs=2)
+    assert seen["focused"] == "group-00 profile-00"
+
+
+def test_excluding_during_a_live_scan_keeps_the_tree_and_scroll_in_place(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestLiveExclude")
+    save_profile(Profile(name="live exclude", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, ScanResult([]), None))
+            progress = ScanWindow(window)
+            preview._begin_scan(progress)
+            seen["live"] = True
+            for index in range(150):
+                preview._queue_entry("Left", f"keep/item-{index}.bin", FileStat(1000 + index, 2))
+                preview._queue_entry("Left", f"drop/item-{index}.bin", FileStat(1000 + index, 2))
+            while preview._entry_queue:
+                preview._drain_pending()
+            settle()
+            preview.present()
+            settle()
+            adjustment = preview.tree_scroll.get_vadjustment()
+            adjustment.set_value((adjustment.get_upper() - adjustment.get_page_size()) / 2)
+            settle()
+            seen["scrolled"] = adjustment.get_value()
+            seen["generation"] = preview._fill_generation
+            seen["rows_before"] = len(preview.rows)
+
+            preview._save_exclusions(["drop"], scope="profile")
+
+            settle()
+            seen["generation_after"] = preview._fill_generation
+            seen["rows_after"] = [row.change.rel for row in preview.rows]
+            seen["drop_row"] = "drop/item-0.bin" in preview._file_iters
+            seen["keep_row"] = "keep/item-0.bin" in preview._file_iters
+            seen["store_rels"] = [
+                preview.store.get_item(index).change.rel for index in range(preview.store.get_n_items())
+            ]
+            settle()
+            seen["scroll_after"] = adjustment.get_value()
+            seen["maximum_after"] = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
+            seen["detail"] = preview.detail.get_text()
+            progress.allow_close()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["scrolled"] > 0
+    assert seen["rows_before"] == 300
+    # The exclusion filtered the live rows in place: no rebuild, no scrolling.
+    assert seen["generation_after"] == seen["generation"]
+    assert seen["drop_row"] is False
+    assert seen["keep_row"] is True
+    assert len(seen["rows_after"]) == 150
+    assert all(rel.startswith("keep/") for rel in seen["rows_after"])
+    assert all(rel.startswith("keep/") for rel in seen["store_rels"])
+    # The view keeps its offset; removing rows only clamps it to the shorter list.
+    assert seen["scroll_after"] > 0
+    assert seen["scroll_after"] <= seen["scrolled"] + 1
+    assert seen["scroll_after"] >= seen["scrolled"] * 0.5
+
+
+def test_entries_arriving_during_a_rebuild_are_replayed_not_rebuilt(tmp_path, monkeypatch):
+    import ofs.ui as ui_module
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestDeferredReplay")
+    monkeypatch.setattr(ui_module, "_LAZY_TREE_ROWS", 2)
+    save_profile(Profile(name="replay", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            rows = [
+                Listed(Change(f"alpha/file-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+                for index in range(4)
+            ]
+            job = JobResult(profile, ScanResult([row.change for row in rows], listing=rows), None)
+            preview = window._preview(job)
+            preview._finish_scan(job)
+            seen["generation"] = preview._fill_generation
+            # Simulate an entry discovered while the model is still filling.
+            preview._scan_active = True
+            late = Listed(Change("beta/late.txt", Action.ASK, "Discovered on left; awaiting comparison", 5), True, False)
+            preview.rows.append(late)
+            preview._append_pending(late)
+            seen["deferred"] = sorted(preview._deferred_live)
+            for _ in range(50):
+                if not preview._fill_some(preview._fill_generation):
+                    break
+            settle()
+            seen["deferred_after"] = sorted(preview._deferred_live)
+            seen["generation_after"] = preview._fill_generation
+            seen["late_row"] = "beta/late.txt" in preview._file_iters
+            seen["rows"] = [row.change.rel for row in preview.rows]
+            preview._scan_active = False
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["deferred"] == ["beta/late.txt"]
+    assert seen["deferred_after"] == []
+    # Replaying adds the row without asking for another full rebuild.
+    assert seen["generation_after"] == seen["generation"]
+    assert seen["late_row"] is True
+    assert "beta/late.txt" in seen["rows"]
+
+
 def test_several_selected_rows_are_excluded_or_ignored_together(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestMultiSelect")

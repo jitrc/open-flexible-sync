@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import threading
 import time
@@ -415,6 +416,10 @@ class MainWindow(Gtk.ApplicationWindow):
         top = point[1] - adjustment.get_value()
         height = row.get_height()
         value = adjustment.get_value()
+        if top + height <= 0 or top >= page:
+            # Completely outside the viewport: focus the row but never yank the
+            # list away from where the user left it after a finished run.
+            return
         if top < 0:
             value += top
         elif top + height > page:
@@ -2389,6 +2394,7 @@ class Preview(Gtk.Window):
         self._scan_complete = True
         self._scan_progress: ScanWindow | None = None
         self._copy_progress: ProgressWindow | None = None
+        self._space_ok = False
         self.scan_details: Gtk.Expander | None = None
         self.copy_details: Gtk.Expander | None = None
         self._entry_queue = deque()
@@ -2435,6 +2441,10 @@ class Preview(Gtk.Window):
         self._more_counts: dict[str, int] = {}
         self._streaming_all = 0
         self._fully_shown: set[str] = set()
+        self._tree_scroll_saved: tuple[int, float] | None = None
+        # Entries discovered while a rebuild is filling the model; replaying them
+        # afterwards avoids a fresh full rebuild for every new path.
+        self._deferred_live: dict[str, object] = {}
         self.partial = bool(job.result.partial_sides)
         if self.partial:
             self.set_title(f"{job.profile.name} — Partial scan (review only)")
@@ -2606,6 +2616,7 @@ class Preview(Gtk.Window):
         self.view.add_controller(click)
         scrolled = Gtk.ScrolledWindow(vexpand=True)
         scrolled.set_child(self.view)
+        self.tree_scroll = scrolled
         self.detail = Gtk.Label(xalign=0, wrap=True)
         bar = Gtk.Box(spacing=8)
         bar.set_margin_start(12)
@@ -2662,6 +2673,7 @@ class Preview(Gtk.Window):
         self._set_next = ""
         self.notice.set_visible(False)
         self._fully_shown.clear()
+        self._deferred_live.clear()
         self.tree_store.clear()
 
     def _begin_scan(self, progress: ScanWindow, *, uncached: bool = False, after_name: str = "") -> None:
@@ -2799,7 +2811,10 @@ class Preview(Gtk.Window):
             self._live_refill_pending = True
             return
         if self._scan_active and (self._pending_tree or self._replace_tree_model):
-            self._live_refill_pending = True
+            # The model is being rebuilt right now. This entry is already in
+            # self.rows, so the fill replays it at the end instead of asking for
+            # another full rebuild, which used to restart on every discovery.
+            self._deferred_live[rel] = row
             return
         if rel in self._file_iters:
             self.tree_store.set_value(self._file_iters[rel], 3, row.change.reason)
@@ -3371,8 +3386,28 @@ class Preview(Gtk.Window):
         self.filters.update(kwargs)
         self._refill()
 
+    def _remember_tree_scroll(self) -> None:
+        """Save the tree's vertical position before a rebuild replaces its rows."""
+
+        self._tree_scroll_saved = (self._fill_generation, self.tree_scroll.get_vadjustment().get_value())
+
+    def _restore_tree_scroll(self) -> bool:
+        saved = self._tree_scroll_saved
+        if saved is None:
+            return False
+        generation, value = saved
+        if generation != self._fill_generation:
+            return False
+        adjustment = self.tree_scroll.get_vadjustment()
+        maximum = max(0.0, adjustment.get_upper() - adjustment.get_page_size())
+        adjustment.set_value(min(value, maximum))
+        self._tree_scroll_saved = None
+        return False
+
     def _refill(self) -> None:
         self._fill_generation += 1
+        self._remember_tree_scroll()
+        self._deferred_live.clear()
         if not self._scan_complete and not self._scan_active:
             # A stopped scan has no plan. Drop queued batches and replace the
             # "Updating visible list…" text instead of leaving it forever.
@@ -3419,6 +3454,7 @@ class Preview(Gtk.Window):
             return
         if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD and (self.review_min_size or self._tree_sort != "name"):
             self._tree_nodes(visible)
+            GLib.idle_add(self._restore_tree_scroll, priority=GLib.PRIORITY_LOW)
             return
         if len(self.rows) >= _PREVIEW_ASYNC_THRESHOLD:
             # Keep planning cheap, and yield GTK after each small render batch.
@@ -3585,6 +3621,7 @@ class Preview(Gtk.Window):
         for node in self._tree_nodes(visible):
             add(None, node)
         self._refresh_tree_layout()
+        GLib.idle_add(self._restore_tree_scroll, priority=GLib.PRIORITY_LOW)
 
     def _fill_some(self, generation: int) -> bool:
         if generation != self._fill_generation:
@@ -3622,8 +3659,14 @@ class Preview(Gtk.Window):
             self._apply_tree_overrides()
         else:
             self._refresh_tree_layout()
+        if self._deferred_live:
+            deferred = list(self._deferred_live.values())
+            self._deferred_live.clear()
+            for row in deferred:
+                self._append_pending(row)
         self._refresh_detail()
         self._selection_changed()
+        GLib.idle_add(self._restore_tree_scroll, priority=GLib.PRIORITY_LOW)
         return False
 
     def _rel_at(self, x: float, y: float) -> str | None:
@@ -3835,10 +3878,30 @@ class Preview(Gtk.Window):
             )
         ]
         if len(keep) != len(self.rows):
+            dropped = {item.change.rel for item in self.rows} - {item.change.rel for item in keep}
             self.rows = keep
-            self._refill()
+            if self._scan_active and not (self.review_min_size or self._tree_sort != "name"):
+                # A rebuild mid-scan would clear and refill the whole tree, which
+                # made the view jump around while discovery continued.
+                self._remove_live_rows(dropped)
+            else:
+                self._refill()
         self.owner.reload()
         return len(added)
+
+    def _remove_live_rows(self, rels: set[str]) -> None:
+        """Drop rows from the live tree in place, without a rebuild."""
+
+        for rel in rels:
+            tree_iter = self._file_iters.pop(rel, None)
+            if tree_iter is not None:
+                self.tree_store.remove(tree_iter)
+            self._visible_changes.pop(rel, None)
+        for index in range(self.store.get_n_items() - 1, -1, -1):
+            if self.store.get_item(index).change.rel in rels:
+                self.store.remove(index)
+        self._refresh_detail()
+        self._selection_changed()
 
     def _ask_exclusions(self, entries: list[tuple[str, bool]]) -> Gtk.Window:
         """Editable exclusion rules for several selected rows at once."""
@@ -4537,11 +4600,72 @@ class Preview(Gtk.Window):
             self.detail.set_text("Nothing to copy, move, or delete. Recording the run.")
             self._begin([], "empty run")
             return
+        shortfall = None if self._space_ok else self._space_shortfall(changes)
+        if shortfall is not None:
+            self._confirm_low_space(shortfall)
+            return
         warning = safety_text(self.job.profile, self.rows)
         if warning is None:
             self._begin(changes, "no deletions")
             return
         self._safety(warning, changes, blocked=bool(deletion_violations(self.job.profile, self.rows)))
+
+    def _space_shortfall(self, changes: list[Change]) -> tuple[str, str, int, int] | None:
+        """(side, root, free, needed) when a destination cannot hold the copies.
+
+        Only copies toward a destination add bytes; deletions free space, so
+        they are not counted. A destination that cannot be measured is left to
+        the copy itself to report.
+        """
+
+        needed: dict[str, int] = {}
+        for change in changes:
+            if change.action == Action.COPY_LEFT_TO_RIGHT:
+                needed["Right"] = needed.get("Right", 0) + max(0, change.size)
+            elif change.action == Action.COPY_RIGHT_TO_LEFT:
+                needed["Left"] = needed.get("Left", 0) + max(0, change.size)
+        for side in ("Right", "Left"):
+            amount = needed.get(side, 0)
+            if amount <= 0:
+                continue
+            root = self.job.profile.right if side == "Right" else self.job.profile.left
+            try:
+                free = shutil.disk_usage(root).free
+            except OSError:
+                continue
+            if free < amount:
+                return side, root, free, amount
+        return None
+
+    def _confirm_low_space(self, shortfall: tuple[str, str, int, int]) -> None:
+        side, root, free, needed = shortfall
+        dialog = Gtk.AlertDialog()
+        dialog.set_message("The destination may not have enough free space")
+        dialog.set_detail(
+            f"The {side.lower()} destination has {format_bytes(free)} free, but this plan copies "
+            f"{format_bytes(needed)} there.\n\n{root}\n\n"
+            "Copies fail when the disk fills. Deletions in the same run may free space first. "
+            "Nothing has been copied yet."
+        )
+        dialog.set_buttons(["Cancel", "Continue anyway"])
+        dialog.set_cancel_button(0)
+        dialog.set_default_button(0)
+
+        def chosen(dlg, result) -> None:
+            try:
+                choice = dlg.choose_finish(result)
+            except GLib.Error:
+                return
+            if choice != 1:
+                self.detail.set_text(
+                    f"Not started: the {side.lower()} destination has {format_bytes(free)} free "
+                    f"and this plan needs {format_bytes(needed)}."
+                )
+                return
+            self._space_ok = True
+            self._start()
+
+        dialog.choose(self, None, chosen)
 
     def _rescan(self, *_args) -> None:
         self.close()
@@ -4631,6 +4755,7 @@ class Preview(Gtk.Window):
             self.detail.set_text("This profile is already scanning or copying in another OFS window. Wait for that operation to finish.")
             return
         self._running = True
+        self._space_ok = False
         self.start_button.set_sensitive(False)
         progress = ProgressWindow(self, self.job.profile.name)
         self._copy_progress = progress
@@ -4828,7 +4953,12 @@ class ScanWindow(Gtk.Window):
         root.append(buttons)
         self.set_child(root)
         self.connect("close-request", self._cancel_close)
+        if app is not None:
+            app.connect("shutdown", self._stop_timers)
         GLib.timeout_add(120, self._pulse)
+
+    def _stop_timers(self, *_args) -> None:
+        self._allow_close = True
 
     def _elapsed(self) -> float:
         now = self._paused_at if self._paused_at is not None else time.monotonic()
@@ -4993,8 +5123,13 @@ class ProgressWindow(Gtk.Window):
         root.append(buttons)
         self.set_child(root)
         self.connect("close-request", self._cancel_close)
+        if app is not None:
+            app.connect("shutdown", self._stop_timers)
         self._show_timing()
         GLib.timeout_add(250, self._tick)
+
+    def _stop_timers(self, *_args) -> None:
+        self._allow_close = True
 
     def _elapsed(self) -> float:
         now = self._paused_at if self._paused_at is not None else time.monotonic()
