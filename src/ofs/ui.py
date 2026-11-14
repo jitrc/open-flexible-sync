@@ -2397,6 +2397,10 @@ class Preview(Gtk.Window):
         self._set_after = ""
         self._set_last = ""
         self._set_next = ""
+        # Which plan this window is showing. It advances when the same window
+        # starts scanning the next set, so an older copy report cannot close or
+        # cancel the set that replaced it.
+        self._set_round = 0
         direction = job.profile.direction
         if direction == Direction.RIGHT_TO_LEFT:
             adjust = "left"
@@ -2687,6 +2691,7 @@ class Preview(Gtk.Window):
         """Drop the previous set's rows before the same window scans again."""
 
         self.job = JobResult(self.job.profile, ScanResult(changes=[]), None)
+        self._set_round += 1
         self._live_capped = False
         self.rows = []
         self._original = {}
@@ -5478,6 +5483,9 @@ class ResultsWindow(Gtk.Window):
         _install_css()
         self.owner = owner
         self.profile_name = owner.job.profile.name
+        # The preview may already have moved on to the next set by the time this
+        # report is dismissed; remember which plan this report belongs to.
+        self.set_round = owner._set_round
         self.connect("close-request", self._close_preview)
         self.set_default_size(640, 320)
         self.log_path = log_path
@@ -5556,8 +5564,16 @@ class ResultsWindow(Gtk.Window):
         self.set_child(root)
 
     def _close_preview(self, *_args) -> bool:
-        """One close is enough: neither the preview nor the progress window stay behind."""
+        """One close is enough: neither the preview nor the progress window stay behind.
 
+        A clean set copy makes the same window scan the next set, so this report
+        can sit on top of a live discovery or a plan that replaced the one it
+        reports. Dismissing it must not cancel that work or throw the next set
+        away; only a report for the plan the window still holds closes it.
+        """
+
+        if self.owner._set_round != self.set_round:
+            return False
         self.owner.close()
         return False
 

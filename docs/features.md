@@ -97,7 +97,7 @@ Detailed behavior for the current source. For a shorter overview, see the [READM
 
 - Settings has **Scan in sets of (files, 0 = one complete scan)**. A non-zero value bounds memory on very large trees: OFS walks whole root names in sorted order, stops the set once it reaches that many files, and shows the set like any other complete preview, so **Start** copies it normally.
 - Each set is complete for its own root names, so deletes, moves, and the deletion safeguards apply inside it. Every root name belongs to exactly one set; a set never overlaps another or skips one.
-- After a set finishes copying without errors or cancellation, OFS scans the next set in the same window automatically. Its copy still needs the normal Start, so no file operation ever continues on its own.
+- After a set finishes copying without errors or cancellation, OFS scans the next set in the same window automatically. Its copy still needs the normal Start, so no file operation ever continues on its own. Dismissing the Copying Results window from the finished set does not cancel that discovery or throw the next set away; the report belongs to the set that was copied, not to the one the window now holds.
 - The preview title and detail line name the set (`Set <first> … <last>`) and whether more remain. Rescan repeats the current set; a normal scan still starts from the beginning.
 - A single root folder larger than the set size cannot be split further, so that set is as large as that folder.
 - Set scans deliberately skip the destination metadata cache and the file-history baseline: a per-set snapshot or baseline would claim to describe the whole tree. Cross-set moves may therefore appear as a copy plus a delete, which is slower but copies the same bytes.

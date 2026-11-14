@@ -3073,6 +3073,7 @@ def test_results_close_request_also_closes_the_preview():
 
     class Owner:
         closed = False
+        _set_round = 3
 
         def close(self):
             self.closed = True
@@ -3080,8 +3081,19 @@ def test_results_close_request_also_closes_the_preview():
     owner = Owner()
     window = ResultsWindow.__new__(ResultsWindow)
     window.owner = owner
+    window.set_round = 3
     assert window._close_preview() is False
     assert owner.closed
+
+    # The same window already scans the next set, so this report is stale: it
+    # must not close the preview or cancel that discovery.
+    next_owner = Owner()
+    next_owner._set_round = 4
+    stale = ResultsWindow.__new__(ResultsWindow)
+    stale.owner = next_owner
+    stale.set_round = 3
+    assert stale._close_preview() is False
+    assert next_owner.closed is False
 
 
 def test_preview_states_the_comparison_rule_that_hides_equal_files(tmp_path, monkeypatch):
@@ -3622,6 +3634,88 @@ def test_a_set_preview_names_its_set_and_continues_after_a_clean_copy(tmp_path, 
     assert "the next set continues after this copy" in seen["detail"]
     assert seen["started"] == ["one"]
     assert seen["started_after_error"] == ["one"]
+
+
+def test_closing_the_copy_report_leaves_the_next_set_scanning(tmp_path, monkeypatch):
+    import threading
+
+    import ofs.ui as ui_module
+    from ofs.settings import set_scan_set_limit
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestSetReportClose")
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    right.mkdir(parents=True)
+    for name in ("a", "b", "c"):
+        (left / name).mkdir(parents=True)
+        (left / name / "file.txt").write_text(name * 2048)
+    save_profile(Profile(name="set report", left=str(left), right=str(right)))
+    set_scan_set_limit(1)
+    # Hold the next set's walk so the report is dismissed while it is running.
+    real_run = ui_module.run_checked
+    gate = threading.Event()
+
+    def gated(*args, **kwargs):
+        if kwargs.get("after_name"):
+            gate.wait(20)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(ui_module, "run_checked", gated)
+    seen = {}
+
+    def pump(seconds: float) -> None:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            while GLib.MainContext.default().pending():
+                GLib.MainContext.default().iteration(False)
+            GLib.MainContext.default().iteration(False)
+            time.sleep(0.005)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            window._run_names({profile.name})
+            preview = None
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                pump(0.02)
+                preview = next((w for w in self.get_windows() if isinstance(w, Preview)), None)
+                if preview is not None and not preview._scan_active:
+                    break
+            seen["first"] = (preview._set_last, preview._set_next)
+            preview._begin(preview._planned(), "no deletions")
+            report = None
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                pump(0.02)
+                report = next((w for w in self.get_windows() if isinstance(w, ResultsWindow)), None)
+                if report is not None and preview._scan_active:
+                    break
+            seen["scanning"] = preview._scan_active
+            report.close()
+            pump(0.1)
+            seen["kept"] = (preview._scan_active, preview.detail.get_text())
+            gate.set()
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                pump(0.02)
+                if not preview._scan_active:
+                    break
+            seen["next"] = (
+                preview.get_title(), preview._set_last, preview._set_next,
+                preview.partial, preview.job.error,
+            )
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["first"] == ("a", "a")
+    assert seen["scanning"] is True
+    assert seen["kept"][0] is True
+    assert "Canceling" not in seen["kept"][1]
+    assert seen["next"] == ("set report — Set b … b", "b", "b", False, None)
 
 
 def test_copying_results_group_repeated_errors_into_one_place(tmp_path, monkeypatch):

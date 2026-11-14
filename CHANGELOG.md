@@ -4,6 +4,10 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+### Fixed
+
+- Closing the **Copying Results** window after a clean set copy no longer cancels the next set's discovery or discards a next set that is already prepared. The report belongs to the set that was copied; the preview, which now scans or holds the next set, stays open.
+
 ## [0.5.0] - 2026-11-14
 
 ### Added
