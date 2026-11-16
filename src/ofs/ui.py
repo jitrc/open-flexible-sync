@@ -21,6 +21,7 @@ gi.require_version("Gdk", "4.0")
 gi.require_version("Pango", "1.0")
 from gi.repository import Gdk, Gio, GLib, GObject, Gtk, Pango
 
+from ofs import __version__
 from ofs.appearance import appearance_is_dark, apply_appearance
 from ofs.apply import ApplyReport, CopyProgress, RunControl, apply_plan
 from ofs.archive import older_files, restore_version
@@ -187,7 +188,7 @@ _PREVIEW_ASYNC_THRESHOLD = 1000
 
 class MainWindow(Gtk.ApplicationWindow):
     def __init__(self, app: Gtk.Application):
-        super().__init__(application=app, title="OFS")
+        super().__init__(application=app, title=f"OFS {__version__}")
         self._ofs_app = app
         self.set_default_size(1100, 740)
         self.profiles: list[Profile] = []
@@ -4663,19 +4664,22 @@ class Preview(Gtk.Window):
         if self._tree_sort != "name":
             summary += "; size-sorted within folders"
         self.shown.set_text(summary)
+        lines: list[str] = []
         if self.partial:
-            text = "Review only. Add permanent or session exclusions, then Rescan. Partial plans cannot be applied."
+            lines.append("Review only. Add permanent or session exclusions, then Rescan. Partial plans cannot be applied.")
         else:
-            text = plan_summary(planned) + "  Filters hide rows. Start runs the whole plan. Right-click a folder to point L ──▶ R or L ◀── R."
-        if self.job.result is not None and self.job.result.set_last:
-            text += (
-                f"  Set: {self.job.result.set_first} … {self.job.result.set_last}"
-                f" of {self.job.result.set_total} root names;"
-                + (" the next set continues after this copy." if self.job.result.set_next else " this is the last set.")
+            lines.append(plan_summary(planned))
+            lines.append("Filters hide rows; Start runs the whole plan. Right-click a folder to point it L ──▶ R or L ◀── R.")
+        result = self.job.result
+        if result is not None and result.set_last:
+            lines.append(
+                f"Set: {result.set_first} … {result.set_last} of {result.set_total} root names;"
+                + (" the next set continues after this copy." if result.set_next else " this is the last set.")
             )
-        if self.job.result is not None and self.job.result.note:
-            text += "  " + self.job.result.note
-        self.detail.set_text(text)
+        if result is not None and result.note:
+            # The scan note already keeps one paragraph per subject.
+            lines.append(result.note)
+        self.detail.set_text("\n".join(lines))
 
     def _start(self, *_args) -> None:
         """A pending or partial listing must never become a file operation."""

@@ -538,7 +538,7 @@ def scan_profile(
         count = "1 path" if len(unreadable) == 1 else f"{len(unreadable)} paths"
         unreadable_note = (
             f"{count} could not be read, so the contents are unknown: "
-            f"{folder} on the {side.lower()} ({message}){more}. Entries inside are left as they are: "
+            f"{folder} on the {side.lower()} ({_short_error(message)}){more}. Entries inside are left as they are: "
             "no copy, move, or delete touches an unreadable path. Repair or remount that folder, or exclude it, then rescan."
         )
     return ScanResult(
@@ -547,7 +547,7 @@ def scan_profile(
         len(right),
         bytes_read,
         discovered=sum(walked.values()),
-        note=" ".join(
+        note="\n".join(
             part
             for part in (
                 note,
@@ -611,6 +611,17 @@ def invalidate_cached_destinations(profile: Profile) -> None:
     """Invalidate both possible destinations, regardless of the current direction."""
 
     invalidate_destination(profile)
+
+
+def _short_error(message: str) -> str:
+    """Drop the repeated absolute path from an OS error; the relative path is shown.
+
+    `[Errno 22] Invalid argument: '/run/media/.../clip.mp4'` becomes
+    `[Errno 22] Invalid argument`, which keeps the reason without the noise.
+    """
+
+    head, sep, _tail = message.partition(": '")
+    return head if sep else message
 
 
 def _same_file_bytes(first: Path, second: Path) -> bool:

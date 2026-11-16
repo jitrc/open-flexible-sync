@@ -4,6 +4,27 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-15
+
+### Added
+
+- The synchronization preview separates **Copy**, **Move**, and **Delete** into their own right-aligned columns with a file count and byte total, colour-coded green, amber, and red. **Direction** lists each arrow mark once and sizes itself to fit them, and **Status** keeps only undecided, skipped, or unchanged rows, so a folder's delete and move totals are no longer cut off or hidden far from the folder name.
+- Profile Editor (Comparison tab) and Multi Edit add **Verify inferred moves by content**: every proposed move, whether inferred from the folders or from the file database, is compared byte for byte, and an unmatched or unreadable pair stays an ordinary copy plus delete. It is off by default because it reads file bytes on slow SMB/NFS mounts.
+- The window title shows the OFS version.
+
+### Changed
+
+- Move detection now requires folder evidence. A source-only and a destination-only file pair as a move only when their paths share a trailing folder, in addition to matching filename, kind, link target, size, and timestamp policy. Same-named, same-sized files in unrelated folders stay a copy plus a delete. This matters because a move renames the destination's own file instead of copying the source, so name and size alone were not enough evidence. Pairs that share one folder-rename root back each other up, so unique-named files inside a renamed folder still pair, and empty files or common placeholders are never paired.
+- **Export**, **Multi Edit**, **Replace paths**, and **Rename** act on all profiles when none are checked, instead of stopping with a "check the profiles" message. The menu labels no longer say "checked".
+- Live discovery and a completed comparison open on collapsed top-level folders, and top-level files are listed on large plans instead of being hidden behind a batch row.
+- The preview status line is split into separate lines (totals, controls, set progress, then one paragraph per notice), and an unreadable-path message no longer repeats the absolute path.
+
+### Fixed
+
+- A root-level **Show N more file(s)…** row now loads its files on click or Enter; it previously did nothing because an empty folder name was treated as "not a batch row".
+- Folder Copy totals no longer include moves: counts were keyed by the arrow mark, which a move shares with its side's copy.
+- The export dialog's title call is syntactically valid again.
+
 ## [0.5.1] - 2026-11-14
 
 ### Fixed
@@ -204,7 +225,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.8...v0.5.0
 [0.4.8]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.7...v0.4.8

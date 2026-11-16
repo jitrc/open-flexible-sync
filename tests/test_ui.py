@@ -9,6 +9,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk
 
 from ofs.apply import CopyProgress
+from ofs import __version__
 from ofs.compare import Action, Change, FileStat, format_bytes
 from ofs.jobs import JobResult
 from ofs.model import ExclusionMode, Profile, SyncMode, TimestampRules
@@ -2376,7 +2377,7 @@ def test_row_run_scans_that_profile_only(tmp_path, monkeypatch):
 
     assert App().run(None) == 0
     assert seen["runs"] == 2
-    assert seen["title"] == "OFS"
+    assert seen["title"] == f"OFS {__version__}"
     assert seen["run_class"]
     assert seen["run_icon"] == "media-playback-start-symbolic"
     assert seen["settings_icon"] == "emblem-system-symbolic"

@@ -45,7 +45,7 @@ def _record_scan_history(job: JobResult) -> None:
     except OSError as exc:
         warning = f"Could not save global run history: {exc}"
         if job.result is not None:
-            job.result.note = (job.result.note + " " if job.result.note else "") + warning
+            job.result.note = "\n".join(part for part in (job.result.note, warning) if part)
         else:
             job.error = f"{job.error or 'scan unavailable'}; {warning}"
 
@@ -129,7 +129,7 @@ def run_checked(
                 try:
                     record_scan_estimate(profile.name, result.discovered, time.monotonic() - started)
                 except OSError as exc:
-                    result.note = (result.note + " " if result.note else "") + f"Could not save the scan ETA estimate: {exc}"
+                    result.note = "\n".join(part for part in (result.note, f"Could not save the scan ETA estimate: {exc}") if part)
         completed = JobResult(profile, result, error)
         _record_scan_history(completed)
         results.append(completed)

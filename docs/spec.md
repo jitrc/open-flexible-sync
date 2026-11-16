@@ -84,7 +84,7 @@ These are the requirements added after the first draft, restated with the behavi
 ### Profile overview for many jobs
 
 - A profile has a name, a left folder, and a right folder.
-- The main window is a checklist. The group is the first word of the profile name. Each group is a heading, collapsed until opened, and visually separate from the profile rows. The heading shows how many profiles are in the group. Expand all and Collapse all open or close every group. A search opens the groups that match.
+- The main window is a checklist. The group is the first word of the profile name. Each group is a heading, collapsed until opened, and visually separate from the profile rows. The heading shows how many profiles are in the group. Expand all and Collapse all open or close every group. A search opens the groups that match. The window title carries the running version (`OFS <version>`), read from the package so it cannot drift from the build.
 - Check profiles and run only the checked set. Each profile row has Run, Edit, Duplicate, and Delete. Run on the row scans that profile only. Run checked scans the checked rows.
 - Show only scheduled profiles, and schedule only checked profiles, once scheduling exists.
 - Show the last result on the row: counts and bytes for copied, moved, folders moved, and deleted.
