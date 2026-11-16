@@ -49,6 +49,7 @@ FIELDS = (
     BulkField("compare_ownership", "Compare file owner/group", "choice", _ON_OFF),
     BulkField("preserve_ownership", "Preserve owner/group on copy/restore", "choice", _ON_OFF),
     BulkField("binary_compare", "Binary comparison", "choice", _ON_OFF),
+    BulkField("verify_moves", "Verify inferred moves by content", "choice", _ON_OFF),
     BulkField("track", "Remember files and detect moves/deletions", "choice", _ON_OFF),
     BulkField("always_copy", "Always copy even when unchanged", "choice", _ON_OFF),
     BulkField("min_size", "Minimum file size (0 = no limit)", "size"),

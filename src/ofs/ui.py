@@ -1245,6 +1245,15 @@ class MainWindow(Gtk.ApplicationWindow):
         older_keep = Gtk.SpinButton.new_with_range(1, 99, 1)
         older_keep.set_value(1 if existing is None or existing.older_keep < 1 else existing.older_keep)
         binary = Gtk.CheckButton(label="Binary compare when size matches (reads file bytes)", active=bool(existing and existing.binary_compare))
+        verify_moves = Gtk.CheckButton(
+            label="Verify inferred moves by content (reads file bytes)",
+            active=bool(existing and existing.verify_moves),
+        )
+        verify_moves.set_tooltip_text(
+            "A move renames the destination's existing file instead of copying the source. With this on, every inferred move is "
+            "compared byte for byte and an unmatched pair stays a copy plus a delete. Off by default because it reads bytes on "
+            "slow SMB/NFS mounts."
+        )
         track = Gtk.CheckButton(label="Remember files and detect moves and deletions", active=bool(existing and existing.track))
         always_copy = Gtk.CheckButton(label="Always copy even when unchanged", active=bool(existing and existing.always_copy))
         compare_permissions = Gtk.CheckButton(label="Compare file permissions", active=bool(existing and existing.compare_permissions))
@@ -1352,7 +1361,7 @@ class MainWindow(Gtk.ApplicationWindow):
         ])
         editor_page("Comparison", [
             ("Same time, different size", same_time_size),
-        ], (small, hour, seconds, ignore_time, larger, binary, track, always_copy, compare_permissions, compare_ownership, preserve_ownership))
+        ], (small, hour, seconds, ignore_time, larger, binary, verify_moves, track, always_copy, compare_permissions, compare_ownership, preserve_ownership))
         editor_page("Recovery & Safety", [
             ("Older versions", older_keep),
             ("Delete limit (%; 0 = off)", delete_limit),
@@ -1408,6 +1417,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 min_age_days=_days(min_age.get_text()),
                 max_age_days=_days(max_age.get_text()),
                 binary_compare=binary.get_active(),
+                verify_moves=verify_moves.get_active(),
                 track=track.get_active(),
                 always_copy=always_copy.get_active(),
                 disabled=disabled.get_active(),

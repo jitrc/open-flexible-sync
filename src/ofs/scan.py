@@ -522,6 +522,15 @@ def scan_profile(
                     ),
                     unreadable,
                 )
+    move_note = ""
+    if profile.verify_moves:
+        changes, move_read, downgraded = _verify_moves(changes, left_root, right_root, control=control)
+        bytes_read += move_read
+        if downgraded:
+            move_note = (
+                f"Verify moves by content: {downgraded} inferred move(s) had different or unreadable contents and stay "
+                "copy plus delete, so no destination file is renamed for them."
+            )
     unreadable_note = ""
     if unreadable:
         side, folder, message = unreadable[0]
@@ -543,6 +552,7 @@ def scan_profile(
             for part in (
                 note,
                 unreadable_note,
+                move_note,
                 *cache_notes,
                 f"Created the missing destination folder {created_destination}; this first copy is a full copy of the source."
                 if created_destination
@@ -601,6 +611,75 @@ def invalidate_cached_destinations(profile: Profile) -> None:
     """Invalidate both possible destinations, regardless of the current direction."""
 
     invalidate_destination(profile)
+
+
+def _same_file_bytes(first: Path, second: Path) -> bool:
+    """True only when two files' bytes really match; an error means 'not proven'.
+
+    Small chunks with an early exit are gentler on slow SMB/NFS mounts than
+    comparing whole files, and a blocked or failing read just downgrades the move.
+    """
+
+    try:
+        if not first.is_file() or not second.is_file():
+            return False
+        if first.stat().st_size != second.stat().st_size:
+            return False
+        with first.open("rb") as one, second.open("rb") as two:
+            while True:
+                left = one.read(65536)
+                right = two.read(65536)
+                if left != right:
+                    return False
+                if not left:
+                    return True
+    except OSError:
+        return False
+
+
+def _verify_moves(
+    changes: list[Change],
+    left_root: Path,
+    right_root: Path,
+    *,
+    control=None,
+) -> tuple[list[Change], int, int]:
+    """Check every proposed move's bytes before renaming the destination's file.
+
+    `_move` renames the destination's own old file, so an unproven match would
+    deliver that old content under the new name and drop the source's copy. A
+    mismatch or a read error becomes copy+delete instead, which is always safe.
+    Returns the plan, the bytes read, and how many moves were downgraded.
+    """
+
+    result: list[Change] = []
+    read = 0
+    downgraded = 0
+    for change in changes:
+        if change.action not in {Action.MOVE_ON_RIGHT, Action.MOVE_ON_LEFT}:
+            result.append(change)
+            continue
+        if control is not None:
+            if not control.checkpoint():
+                raise WalkStopped
+            if control.skipping:
+                raise WalkSkipped
+        if change.action == Action.MOVE_ON_RIGHT:
+            old_path, new_path = right_root / change.rel, left_root / change.dest_rel
+            copy_action, delete_action = Action.COPY_LEFT_TO_RIGHT, Action.DELETE_RIGHT
+        else:
+            old_path, new_path = left_root / change.rel, right_root / change.dest_rel
+            copy_action, delete_action = Action.COPY_RIGHT_TO_LEFT, Action.DELETE_LEFT
+        read += change.size * 2
+        if _same_file_bytes(old_path, new_path):
+            result.append(change)
+            continue
+        downgraded += 1
+        # The original "only on source"/"only on destination" reasons keep the
+        # Reason filter and the move re-pairing rules meaningful.
+        result.append(Change(change.dest_rel, copy_action, "only on source", change.size))
+        result.append(Change(change.rel, delete_action, "only on destination", change.size))
+    return result, read, downgraded
 
 
 def _equalize_identical(

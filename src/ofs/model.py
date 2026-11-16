@@ -83,6 +83,8 @@ class Profile:
     min_age_days: float = 0
     max_age_days: float = 0
     binary_compare: bool = False
+    # Before renaming the destination's own file, prove the bytes really match.
+    verify_moves: bool = False
     track: bool = False
     always_copy: bool = False
     disabled: bool = False
@@ -134,6 +136,7 @@ class Profile:
             "min_age_days": self.min_age_days,
             "max_age_days": self.max_age_days,
             "binary_compare": self.binary_compare,
+            "verify_moves": self.verify_moves,
             "track": self.track,
             "always_copy": self.always_copy,
             "disabled": self.disabled,
@@ -175,6 +178,7 @@ class Profile:
             min_age_days=_non_negative_float(data.get("min_age_days")),
             max_age_days=_non_negative_float(data.get("max_age_days")),
             binary_compare=bool(data.get("binary_compare", False)),
+            verify_moves=bool(data.get("verify_moves", False)),
             track=bool(data.get("track", False)),
             always_copy=bool(data.get("always_copy", False)),
             disabled=bool(data.get("disabled", False)),

@@ -67,7 +67,7 @@ def test_dont_copy_still_deletes_the_other_side_in_mirror():
     assert ("b.txt", Action.COPY_LEFT_TO_RIGHT) not in actions
 
 
-def test_exact_mirror_pairs_a_unique_move_without_a_database():
+def test_exact_mirror_pairs_a_move_with_a_shared_folder_without_a_database():
     profile = Profile(
         name="p",
         left="/l",
@@ -76,23 +76,53 @@ def test_exact_mirror_pairs_a_unique_move_without_a_database():
         timestamps=rules(ignore_timestamp=True),
     )
     left = {
-        "90s/song.mp3": FileStat(1000, 50),
+        "collection/90s/song.mp3": FileStat(1000, 50),
         "new.mp3": FileStat(20, 1),
     }
     right = {
-        "old/song.mp3": FileStat(1000, 10),
+        "old/90s/song.mp3": FileStat(1000, 10),
         "gone.mp3": FileStat(8, 1),
         "also.mp3": FileStat(8, 2),
     }
     plan = {item.rel: item for item in build_plan(profile, left, right)}
-    move = plan["old/song.mp3"]
+    move = plan["old/90s/song.mp3"]
     assert move.action == Action.MOVE_ON_RIGHT
-    assert move.dest_rel == "90s/song.mp3"
-    assert move.reason == "moved to 90s/song.mp3"
-    assert "90s/song.mp3" not in plan
+    assert move.dest_rel == "collection/90s/song.mp3"
+    assert move.reason == "moved to collection/90s/song.mp3"
+    assert "collection/90s/song.mp3" not in plan
     assert plan["new.mp3"].action == Action.COPY_LEFT_TO_RIGHT
     assert plan["gone.mp3"].action == Action.DELETE_RIGHT
     assert plan["also.mp3"].action == Action.DELETE_RIGHT
+
+
+def test_mirror_does_not_pair_same_name_and_size_across_unrelated_folders():
+    """Name+size alone used to invent a move anywhere, with ignored timestamps."""
+
+    profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR, timestamps=rules(ignore_timestamp=True))
+    plan = {(item.rel, item.action) for item in build_plan(
+        profile,
+        {"90s/song.mp3": FileStat(1000, 50)},
+        {"old/song.mp3": FileStat(1000, 10)},
+    )}
+    assert plan == {
+        ("90s/song.mp3", Action.COPY_LEFT_TO_RIGHT),
+        ("old/song.mp3", Action.DELETE_RIGHT),
+    }
+
+
+def test_mirror_never_moves_empty_or_placeholder_files():
+    profile = Profile(name="p", left="/l", right="/r", mode=SyncMode.EXACT_MIRROR, timestamps=rules(ignore_timestamp=True))
+    plan = {(item.rel, item.action) for item in build_plan(
+        profile,
+        {"new/.gitkeep": FileStat(0, 1), "new/sub/Thumbs.db": FileStat(100, 1)},
+        {"old/.gitkeep": FileStat(0, 1), "old/sub/Thumbs.db": FileStat(100, 1)},
+    )}
+    assert plan == {
+        ("new/.gitkeep", Action.COPY_LEFT_TO_RIGHT),
+        ("new/sub/Thumbs.db", Action.COPY_LEFT_TO_RIGHT),
+        ("old/.gitkeep", Action.DELETE_RIGHT),
+        ("old/sub/Thumbs.db", Action.DELETE_RIGHT),
+    }
 
 
 def test_exact_mirror_leaves_same_size_files_unpaired():

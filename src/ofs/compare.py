@@ -50,6 +50,9 @@ class Change:
 _COPY = {Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT}
 _DELETE = {Action.DELETE_LEFT, Action.DELETE_RIGHT}
 _MOVE = {Action.MOVE_ON_LEFT, Action.MOVE_ON_RIGHT}
+# Empty files and OS/editor placeholders prove nothing about a move: they share
+# a size, and often a name, across folders that have nothing to do with a rename.
+_MOVE_PLACEHOLDERS = {"thumbs.db", "desktop.ini", ".ds_store", ".gitkeep", ".directory"}
 
 
 def format_bytes(size: int) -> str:
@@ -304,14 +307,15 @@ def _pair_mirror_moves(
     left: Mapping[str, FileStat],
     right: Mapping[str, FileStat],
 ) -> list[Change]:
-    """Turn a unique copy-plus-delete pair into a move. No file database required.
+    """Turn a copy-plus-delete pair with folder evidence into a move. No file DB.
 
-    Exact Mirror would copy the new path and delete the old one. When one file
-    that exists only on the source matches one same-named file that exists only
-    on the destination, under the profile's timestamp rules, that pair is a move.
-    Same-named and same-sized duplicates are told apart by how many trailing
-    folders they share, so a renamed folder still becomes moves instead of a
-    whole-tree copy plus delete. Truly ambiguous pairs remain copy/delete.
+    Exact Mirror would copy the new path and delete the old one. Matching needs
+    the same filename, kind, link target, size and timestamp policy, and also a
+    shared trailing folder, because a move renames the destination's own file
+    rather than copying the source. Same-named duplicates choose the deepest
+    trailing chain; pairs that share one folder-rename root back each other up,
+    so unique names inside a renamed folder still pair. Empty files and common
+    placeholders are never paired. Weak or ambiguous candidates stay copy/delete.
     """
 
     if profile.mode != SyncMode.EXACT_MIRROR or profile.direction == Direction.BOTH:
@@ -329,21 +333,24 @@ def _pair_mirror_moves(
         source, dest = left, right
     copies = [change.rel for change in changes if change.action == copy_action and change.reason == "only on source"]
     deletes = [change.rel for change in changes if change.action == delete_action and change.reason == "only on destination"]
-    pairs: list[tuple[str, str]] = []
+    # Empty files and OS/editor placeholders have no content evidence: name plus
+    # size matches all over a tree, so they would move on coincidence alone.
+    moves_allowed = lambda rel, stat: bool(stat.size) and rel.rsplit("/", 1)[-1].lower() not in _MOVE_PLACEHOLDERS
     # Moves preserve the filename. Group by all fields that timestamp equality
     # also requires before applying the timestamp policy to remaining candidates.
     # This avoids a potentially enormous all-copies-by-all-deletes comparison.
     candidates: dict[tuple[str, str, str, int], list[str]] = {}
     for new in copies:
         new_stat = source.get(new)
-        if new_stat is None:
+        if new_stat is None or not moves_allowed(new, new_stat):
             continue
         key = (new.rsplit("/", 1)[-1], new_stat.kind, new_stat.target, new_stat.size)
         candidates.setdefault(key, []).append(new)
-    pairs: list[tuple[str, str]] = []
+    structural: list[tuple[str, str]] = []
+    deferred: list[tuple[str, str]] = []
     for old in deletes:
         old_stat = dest.get(old)
-        if old_stat is None:
+        if old_stat is None or not moves_allowed(old, old_stat):
             continue
         key = (old.rsplit("/", 1)[-1], old_stat.kind, old_stat.target, old_stat.size)
         hits = [
@@ -351,19 +358,52 @@ def _pair_mirror_moves(
             for new in candidates.get(key, [])
             if classify_time(old_stat.mtime, source[new].mtime, old_stat.size, source[new].size, profile.timestamps) == "equal"
         ]
-        if len(hits) == 1:
-            pairs.append((old, hits[0]))
-        elif hits:
-            # A renamed folder keeps its inner folders. Prefer the candidate
-            # that shares the deepest trailing folder chain, so duplicate
-            # names and sizes do not collapse a whole rename into copy/delete.
-            scores = [(_trailing_folders(old, new), new) for new in hits]
-            best = max(score for score, _new in scores)
-            if best == 0:
-                continue
-            winners = [new for score, new in scores if score == best]
-            if len(winners) == 1:
-                pairs.append((old, winners[0]))
+        if not hits:
+            continue
+        # Folder evidence is required for a unique candidate too, not just for
+        # ties: a single same-name/same-size match across unrelated folders is
+        # not proof that anything was moved.
+        scores = [(_trailing_folders(old, new), new) for new in hits]
+        best = max(score for score, _new in scores)
+        winners = [new for score, new in scores if score == best]
+        if len(winners) != 1:
+            # More than one candidate is equally close: leave copy+delete alone.
+            continue
+        new = winners[0]
+        if best >= 1:
+            structural.append((old, new))
+        else:
+            deferred.append((old, new))
+
+    def parent(rel: str) -> str:
+        return rel.rsplit("/", 1)[0] if "/" in rel else ""
+
+    def rename_roots(old: str, new: str) -> tuple[str, str]:
+        """The folders one pair says were renamed, given their shared tail.
+
+        `original/semester one/notes.pdf` -> `renamed/semester one/notes.pdf`
+        shows `original` became `renamed`, which is also evidence for its
+        unique-name files with no shared trailing folder of their own.
+        """
+
+        old_parts = old.split("/")[:-1]
+        new_parts = new.split("/")[:-1]
+        shared = _trailing_folders(old, new)
+        return (
+            "/".join(old_parts[:len(old_parts) - shared]),
+            "/".join(new_parts[:len(new_parts) - shared]),
+        )
+
+    pairs = list(structural)
+    moved_between = {rename_roots(old, new) for old, new in structural}
+    votes = Counter((parent(old), parent(new)) for old, new in deferred)
+    for old, new in deferred:
+        # Several files leaving the same folder for the same other folder say
+        # "the folder was renamed", which also covers its unique-name files that
+        # share no trailing folder of their own.
+        group = (parent(old), parent(new))
+        if group in moved_between or votes[group] >= 2:
+            pairs.append((old, new))
     used = Counter(new for _, new in pairs)
     unique = [(old, new) for old, new in pairs if used[new] == 1]
     if not unique:
