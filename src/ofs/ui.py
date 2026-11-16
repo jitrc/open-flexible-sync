@@ -908,7 +908,7 @@ class MainWindow(Gtk.ApplicationWindow):
         file_filter.set_name("OFS profile bundles (*.json)")
         file_filter.add_pattern("*.json")
         dialog = Gtk.FileDialog()
-        dialog.set_title("Export OFS profiles"
+        dialog.set_title("Export OFS profiles")
         dialog.set_initial_name("OFS-profiles.json")
         dialog.set_default_filter(file_filter)
         dialog.save(self, None, self._export_bundle_saved, chosen)
