@@ -9,7 +9,7 @@ gi.require_version("Gtk", "4.0")
 from gi.repository import Gio, GLib, Gtk
 
 from ofs.apply import CopyProgress
-from ofs.compare import Action, Change, FileStat
+from ofs.compare import Action, Change, FileStat, format_bytes
 from ofs.jobs import JobResult
 from ofs.model import ExclusionMode, Profile, SyncMode, TimestampRules
 from ofs.review import Listed, build_listing
@@ -2688,10 +2688,10 @@ def test_profile_menu_path_options_and_batch_rename_previews(tmp_path, monkeypat
     assert seen["toolbar"][0] == "New profile"
     assert "Import 5.71 profiles…" in seen["menu"]
     assert "Import OFS profiles…" in seen["menu"]
-    assert "Export checked profiles…" in seen["menu"]
-    assert "Multi Edit checked profiles…" in seen["menu"]
-    assert "Replace paths in checked profiles…" in seen["menu"]
-    assert "Rename checked profiles…" in seen["menu"]
+    assert "Export profiles…" in seen["menu"]
+    assert "Multi Edit profiles…" in seen["menu"]
+    assert "Replace paths in profiles…" in seen["menu"]
+    assert "Rename profiles…" in seen["menu"]
     assert "/mnt/old/photos\n→ /mnt/new/photos" in seen["left_preview"]
     assert "old-archive" not in seen["left_preview"]
     assert "1 of 2" in seen["left_preview_count"]
@@ -3234,7 +3234,68 @@ def test_live_discovery_does_not_rebuild_layout_every_batch(tmp_path, monkeypatc
     # Expanding the whole model per 250-row batch is quadratic on huge trees.
     assert seen["expand_all"] == 0
     assert seen["top"] >= 12
-    assert seen["folder_expanded"] is True
+    # Live discovery shows root folders only; folders open on request.
+    assert seen["folder_expanded"] is False
+
+
+def test_discovery_and_a_finished_scan_show_root_folders_collapsed(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestRootCollapsed")
+    save_profile(Profile(name="root collapsed", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    def settle():
+        while GLib.MainContext.default().pending():
+            GLib.MainContext.default().iteration(False)
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, ScanResult([]), None))
+            preview.present()
+            progress = ScanWindow(window)
+            preview._begin_scan(progress)
+            for index in range(40):
+                preview._queue_entry("Left", f"area/sub/item-{index}.bin", FileStat(10, 1))
+            while preview._entry_queue:
+                preview._drain_pending()
+            settle()
+            first = preview.tree_store.iter_nth_child(None, 0)
+            path = preview.tree_store.get_path(first)
+            seen["top_folders"] = preview.tree_store.iter_n_children(None)
+            seen["live_expanded"] = preview.view.row_expanded(path)
+            # An explicit user expand still works while discovery is running.
+            preview.view.expand_row(path, False)
+            seen["manual_expanded"] = preview.view.row_expanded(path)
+            rows = [
+                Listed(Change(f"area/sub/item-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+                for index in range(40)
+            ]
+            preview._finish_scan(JobResult(profile, ScanResult([], listing=rows), None))
+            settle()
+            first = preview.tree_store.iter_nth_child(None, 0)
+            seen["finished_expanded"] = preview.view.row_expanded(preview.tree_store.get_path(first))
+            seen["finished_default"] = preview._tree_default_expanded
+            seen["finished_overrides"] = dict(preview._tree_state_overrides)
+            seen["copy_cell"] = preview.tree_store.get_value(first, 8)
+            seen["delete_cell"] = preview.tree_store.get_value(first, 10)
+            seen["direction_cell"] = preview.tree_store.get_value(first, 2)
+            progress.allow_close()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["top_folders"] == 1
+    assert seen["live_expanded"] is False
+    assert seen["manual_expanded"] is True
+    # A completed comparison starts on the root folders, not on the rows the
+    # live list happened to queue.
+    assert seen["finished_default"] is False
+    assert seen["finished_overrides"] == {}
+    assert seen["finished_expanded"] is False
+    assert seen["copy_cell"] == f"40 ({format_bytes(400)})"
+    assert seen["delete_cell"] == ""
+    assert seen["direction_cell"] == "L ──▶ R"
 
 
 def test_reason_filter_dropdown_narrows_rows_without_changing_the_plan(tmp_path, monkeypatch):
@@ -4055,6 +4116,10 @@ def test_excluding_during_a_live_scan_keeps_the_tree_and_scroll_in_place(tmp_pat
             settle()
             preview.present()
             settle()
+            # Discovery keeps the top level collapsed, so open the folders the
+            # way a user does before checking that scroll survives an exclusion.
+            preview.view.expand_all()
+            settle()
             adjustment = preview.tree_scroll.get_vadjustment()
             adjustment.set_value((adjustment.get_upper() - adjustment.get_page_size()) / 2)
             settle()
@@ -4384,13 +4449,15 @@ def test_incremental_row_changes_update_folder_totals_without_a_rebuild():
     rows[0].change = Change("area/a.txt", Action.ASK, "chosen in preview", 10)
     fake._apply_row_changes([(rows[0], before, rows[0].change)])
 
-    assert fake.tree_store.values[(("folder", "area"), 3)] == "1 to copy to the right · 1 undecided"
+    assert fake.tree_store.values[(("folder", "area"), 3)] == "1 undecided"
+    assert fake.tree_store.values[(("folder", "area"), 8)] == f"1 ({format_bytes(20)})"
     assert fake.tree_store.values[(("file", "a"), 3)] == "chosen in preview"
     assert fake.tree_store.values[(("file", "a"), 2)].startswith("L ──? R")
+    assert fake.tree_store.values[(("file", "a"), 8)] == ""
     assert fake._visible_changes["area/a.txt"].action == Action.ASK
     assert fake.detail_refreshed == 1
 
-    # A direction change for the folder flips both rows and the folder wording.
+    # A direction change for the folder flips both rows and the folder cells.
     updates = []
     for row in rows:
         old = row.change
@@ -4398,7 +4465,11 @@ def test_incremental_row_changes_update_folder_totals_without_a_rebuild():
         updates.append((row, old, row.change))
     fake._apply_row_changes(updates)
 
-    assert fake.tree_store.values[(("folder", "area"), 2)] == "L ◀── R  2"
-    assert fake.tree_store.values[(("folder", "area"), 3)] == "2 to copy to the left"
+    assert fake.tree_store.values[(("folder", "area"), 2)] == "L ◀── R"
+    assert fake.tree_store.values[(("folder", "area"), 3)] == ""
+    assert fake.tree_store.values[(("folder", "area"), 8)] == f"2 ({format_bytes(30)})"
+    assert fake.tree_store.values[(("folder", "area"), 9)] == ""
+    assert fake.tree_store.values[(("folder", "area"), 10)] == ""
     assert fake.tree_store.values[(("folder", "area"), 1)] == "30 B"
     assert fake.tree_store.values[(("file", "b"), 3)] == "chosen in preview"
+    assert fake.tree_store.values[(("file", "b"), 8)] == format_bytes(20)

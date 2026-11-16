@@ -142,12 +142,17 @@ class TreeNode:
     more_folder: str = ""
     # The row that loads every remaining file of its folder, not just a batch.
     more_all: bool = False
-    # Counts and sizes per direction group, so a later single-row change can
-    # update this folder's totals without rescanning the whole plan.
-    groups: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Counts and sizes per action, so a later single-row change can update this
+    # folder's totals and Copy/Move/Delete cells without rescanning the plan.
+    groups: dict[Action, tuple[int, int]] = field(default_factory=dict)
     # Large plans render the top level only; a folder's children are built when
     # it is expanded, so the window never holds a row per file up front.
     deferred: bool = False
+    # The dedicated Copy/Move/Delete columns: a folder shows "N (bytes)" cells
+    # and a file shows its size in the one column that applies.
+    copy: str = ""
+    move: str = ""
+    delete: str = ""
 
 
 def direction_mark(action: Action) -> str:
@@ -166,34 +171,25 @@ def direction_mark(action: Action) -> str:
     }.get(action, "L ─── R")
 
 
-def _active_groups(changes: list[Change]) -> list[tuple[str, list[Change]]]:
-    buckets: dict[str, list[Change]] = {}
-    for change in changes:
-        if change.action == Action.UNCHANGED:
-            continue
-        buckets.setdefault(direction_mark(change.action), []).append(change)
-    ordered: list[tuple[str, list[Change]]] = []
-    for action in (
-        Action.COPY_LEFT_TO_RIGHT,
-        Action.COPY_RIGHT_TO_LEFT,
-        Action.DELETE_RIGHT,
-        Action.DELETE_LEFT,
-        Action.ASK,
-        Action.SKIPPED,
-    ):
-        mark = direction_mark(action)
-        chosen = buckets.pop(mark, None)
-        if chosen:
-            ordered.append((mark, chosen))
-    ordered.extend(buckets.items())
-    return ordered
-
-
 def direction_summary(changes: list[Change]) -> str:
-    groups = _active_groups(changes)
-    if not groups:
-        return direction_mark(Action.UNCHANGED)
-    return "    ".join(f"{mark}  {len(chosen)}" for mark, chosen in groups)
+    """Arrow marks only, once each: the numbers belong in the Copy/Move/Delete cells.
+
+    A move shares the copy arrow for its side, so repeating a count after every
+    mark pushed the delete/move information off the right edge of the window.
+    """
+
+    return direction_marks(group_counts(changes))
+
+
+def direction_marks(counts: dict[Action, tuple[int, int]]) -> str:
+    marks: list[str] = []
+    for action, (count, _size) in sorted(counts.items(), key=lambda item: group_rank(item[0])):
+        if not count:
+            continue
+        mark = direction_mark(action)
+        if mark not in marks:
+            marks.append(mark)
+    return "   ".join(marks) if marks else direction_mark(Action.UNCHANGED)
 
 
 def file_detail(change: Change) -> str:
@@ -264,66 +260,116 @@ _GROUP_VERBS = {
 }
 
 
-def group_counts(changes: list[Change]) -> dict[str, tuple[int, int]]:
-    """Files and bytes per direction group, the numbers a folder row displays."""
+def group_counts(changes: list[Change]) -> dict[Action, tuple[int, int]]:
+    """Files and bytes per action: the numbers a folder's Copy/Move/Delete cells show.
 
-    counts: dict[str, tuple[int, int]] = {}
-    for mark, chosen in _active_groups(changes):
-        counts[mark] = (len(chosen), sum(change.size for change in chosen))
+    Keyed by action rather than by arrow mark, because a copy and a move share
+    a mark and used to be added together into one misleading total.
+    """
+
+    counts: dict[Action, tuple[int, int]] = {}
+    for change in changes:
+        if change.action == Action.UNCHANGED:
+            continue
+        count, size = counts.get(change.action, (0, 0))
+        counts[change.action] = (count + 1, size + change.size)
     return counts
 
 
-def group_verb(mark: str) -> str:
-    """The words for a direction group, keyed by the mark a row displays."""
+def group_verb(action: Action) -> str:
+    """The words for one action, used for the entries that still need attention."""
 
-    return {
-        direction_mark(Action.COPY_LEFT_TO_RIGHT): _GROUP_VERBS[Action.COPY_LEFT_TO_RIGHT],
-        direction_mark(Action.COPY_RIGHT_TO_LEFT): _GROUP_VERBS[Action.COPY_RIGHT_TO_LEFT],
-        direction_mark(Action.DELETE_RIGHT): _GROUP_VERBS[Action.DELETE_RIGHT],
-        direction_mark(Action.DELETE_LEFT): _GROUP_VERBS[Action.DELETE_LEFT],
-        direction_mark(Action.ASK): _GROUP_VERBS[Action.ASK],
-        direction_mark(Action.SKIPPED): _GROUP_VERBS[Action.SKIPPED],
-    }.get(mark, "changed")
+    return _GROUP_VERBS.get(action, "changed")
 
 
-_GROUP_ORDER = {
-    direction_mark(action): index
-    for index, action in enumerate(
-        (
-            Action.COPY_LEFT_TO_RIGHT,
-            Action.COPY_RIGHT_TO_LEFT,
-            Action.DELETE_RIGHT,
-            Action.DELETE_LEFT,
-            Action.ASK,
-            Action.SKIPPED,
-        )
-    )
-}
+_ACTION_ORDER = (
+    Action.COPY_LEFT_TO_RIGHT,
+    Action.COPY_RIGHT_TO_LEFT,
+    Action.MOVE_ON_RIGHT,
+    Action.MOVE_ON_LEFT,
+    Action.DELETE_RIGHT,
+    Action.DELETE_LEFT,
+    Action.ASK,
+    Action.SKIPPED,
+)
+_ACTION_RANK = {action: index for index, action in enumerate(_ACTION_ORDER)}
 
 
-def group_rank(mark: str) -> int:
-    """Keep folder wording in the same order the direction column uses."""
+def group_rank(action: Action) -> int:
+    """Keep the arrow column in a stable, copy-then-move-then-delete order."""
 
-    return _GROUP_ORDER.get(mark, len(_GROUP_ORDER))
+    return _ACTION_RANK.get(action, len(_ACTION_RANK))
 
 
 def folder_status(changes: list[Change]) -> tuple[int, str]:
-    """Total size under a folder, and what happens there in words.
+    """Total size under a folder, plus the entries that still need a decision.
 
-    The size column already shows the total, so this must not repeat a byte
-    count; it names the work instead ("427 undecided", "12 to copy to the right").
+    Copy, move and delete counts and sizes have their own columns now, so this
+    text no longer repeats them in a sentence that used to be cut off.
     """
 
     total = sum(change.size for change in changes)
-    groups = _active_groups(changes)
-    if not groups:
+    counts = group_counts(changes)
+    if not counts:
         noun = "file" if len(changes) == 1 else "files"
         return total, f"{len(changes)} {noun} unchanged"
+    return total, folder_remainder(counts)
+
+
+def folder_remainder(counts: dict[Action, tuple[int, int]]) -> str:
+    """Undecided and skipped wording for a folder; empty when nothing is pending."""
+
+    return " · ".join(
+        f"{counts[action][0]:,} {group_verb(action)}"
+        for action in (Action.ASK, Action.SKIPPED)
+        if counts.get(action, (0, 0))[0]
+    )
+
+
+def action_cells(counts: dict[Action, tuple[int, int]]) -> tuple[str, str, str]:
+    """Copy / Move / Delete column text for a folder, from its per-action totals."""
+
+    return (
+        _side_cell(counts, Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT),
+        _side_cell(counts, Action.MOVE_ON_RIGHT, Action.MOVE_ON_LEFT),
+        _side_cell(counts, Action.DELETE_RIGHT, Action.DELETE_LEFT),
+    )
+
+
+def _side_cell(
+    counts: dict[Action, tuple[int, int]],
+    right_action: Action,
+    left_action: Action,
+) -> str:
+    """'1,021 (305.2 GB)'; when both sides have work, name the side of each part."""
+
+    right = counts.get(right_action, (0, 0))
+    left = counts.get(left_action, (0, 0))
+    if not right[0] and not left[0]:
+        return ""
+    both = bool(right[0] and left[0])
     parts = []
-    for _mark, chosen in groups:
-        verb = _GROUP_VERBS.get(chosen[0].action, "changed")
-        parts.append(f"{len(chosen)} {verb}")
-    return total, " · ".join(parts)
+    for (count, size), side in ((right, "R"), (left, "L")):
+        if not count:
+            continue
+        label = f"{count:,} ({format_bytes(size)})"
+        parts.append(f"{side} {label}" if both else label)
+    return "   ".join(parts)
+
+
+def folder_cells(changes: list[Change]) -> tuple[str, str, str]:
+    return action_cells(group_counts(changes))
+
+
+def file_cells(change: Change) -> tuple[str, str, str]:
+    """One file's size in the column that says what happens to it."""
+
+    size = format_bytes(change.size)
+    return (
+        size if change.action in COPY_LEFT | COPY_RIGHT else "",
+        size if change.action in MOVE else "",
+        size if change.action in DELETE else "",
+    )
 
 
 def build_tree(
@@ -396,6 +442,7 @@ def build_tree(
                 hidden = len(items) - index
                 break
             change = row.change
+            copy, move, delete = file_cells(change)
             shown.append(
                 TreeNode(
                     name=change.rel.rsplit("/", 1)[-1],
@@ -406,6 +453,9 @@ def build_tree(
                     direction=direction_mark(change.action),
                     status=file_detail(change),
                     children=[],
+                    copy=copy,
+                    move=move,
+                    delete=delete,
                 )
             )
             if budget["files"]:
@@ -419,6 +469,7 @@ def build_tree(
             total, status = folder_status(changes)
             if minimum_size and size_target in {"folders", "all"} and in_scope(child["rel"]) and total < minimum_size:
                 continue
+            copy, move, delete = folder_cells(changes)
             folders.append(
                 TreeNode(
                     name=name,
@@ -430,6 +481,9 @@ def build_tree(
                     status=status,
                     children=emit(child, child["rel"]),
                     groups=group_counts(changes),
+                    copy=copy,
+                    move=move,
+                    delete=delete,
                 )
             )
         files, hidden = file_nodes(node["files"])
@@ -459,6 +513,7 @@ def build_tree(
         total, status = folder_status(changes)
         if minimum_size and size_target in {"folders", "all"} and in_scope(child["rel"]) and total < minimum_size:
             continue
+        copy, move, delete = folder_cells(changes)
         folders.append(
             TreeNode(
                 name=name,
@@ -471,6 +526,9 @@ def build_tree(
                 children=[],
                 deferred=True,
                 groups=group_counts(changes),
+                copy=copy,
+                move=move,
+                delete=delete,
             )
         )
     files, hidden = file_nodes(root["files"])
@@ -545,6 +603,7 @@ def folder_children(
         total, status = folder_status(changes)
         if minimum_size and size_target in {"folders", "all"} and in_scope(rel) and total < minimum_size:
             continue
+        copy, move, delete = folder_cells(changes)
         folders.append(
             TreeNode(
                 name=rel.rsplit("/", 1)[-1],
@@ -557,21 +616,29 @@ def folder_children(
                 children=[],
                 deferred=True,
                 groups=group_counts(changes),
+                copy=copy,
+                move=move,
+                delete=delete,
             )
         )
-    nodes = [
-        TreeNode(
-            name=row.change.rel.rsplit("/", 1)[-1],
-            rel=row.change.rel,
-            is_file=True,
-            size_text=format_bytes(row.change.size),
-            size=row.change.size,
-            direction=direction_mark(row.change.action),
-            status=file_detail(row.change),
-            children=[],
+    nodes = []
+    for row in batch:
+        copy, move, delete = file_cells(row.change)
+        nodes.append(
+            TreeNode(
+                name=row.change.rel.rsplit("/", 1)[-1],
+                rel=row.change.rel,
+                is_file=True,
+                size_text=format_bytes(row.change.size),
+                size=row.change.size,
+                direction=direction_mark(row.change.action),
+                status=file_detail(row.change),
+                children=[],
+                copy=copy,
+                move=move,
+                delete=delete,
+            )
         )
-        for row in batch
-    ]
     return order_nodes(folders, sort_by), nodes, remaining
 
 
@@ -616,19 +683,24 @@ def stream_files(
     else:
         items.sort(key=lambda row: row.change.rel.rsplit("/", 1)[-1].lower())
     batch = items[offset:offset + limit]
-    nodes = [
-        TreeNode(
-            name=row.change.rel.rsplit("/", 1)[-1],
-            rel=row.change.rel,
-            is_file=True,
-            size_text=format_bytes(row.change.size),
-            size=row.change.size,
-            direction=direction_mark(row.change.action),
-            status=file_detail(row.change),
-            children=[],
+    nodes = []
+    for row in batch:
+        copy, move, delete = file_cells(row.change)
+        nodes.append(
+            TreeNode(
+                name=row.change.rel.rsplit("/", 1)[-1],
+                rel=row.change.rel,
+                is_file=True,
+                size_text=format_bytes(row.change.size),
+                size=row.change.size,
+                direction=direction_mark(row.change.action),
+                status=file_detail(row.change),
+                children=[],
+                copy=copy,
+                move=move,
+                delete=delete,
+            )
         )
-        for row in batch
-    ]
     return nodes, max(0, len(items) - offset - len(batch))
 
 

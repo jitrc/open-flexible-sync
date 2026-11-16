@@ -43,14 +43,21 @@ def test_tree_shows_folder_size_and_status():
     folder = tree[0]
     assert folder.is_file is False
     assert folder.size_text == format_bytes(1500)
-    assert folder.direction == "L ──▶ R  2"
-    assert folder.status == "2 to copy to the right"
+    assert folder.direction == "L ──▶ R"
+    # Counts and sizes live in the Copy/Move/Delete cells, not in the arrow text.
+    assert folder.copy == f"2 ({format_bytes(1500)})"
+    assert folder.move == ""
+    assert folder.delete == ""
+    assert folder.status == ""
     assert [child.name for child in folder.children] == ["a.mp3", "b.mp3"]
     assert folder.children[0].size_text == format_bytes(1000)
     assert folder.children[0].direction == direction_mark(Action.COPY_LEFT_TO_RIGHT)
+    assert folder.children[0].copy == format_bytes(1000)
     assert "because" in folder.children[0].status
     assert tree[1].is_file
     assert tree[1].direction == direction_mark(Action.DELETE_RIGHT)
+    assert tree[1].delete == format_bytes(20)
+    assert tree[1].copy == ""
     assert "copy_l2r" not in tree[1].status
 
 
@@ -307,16 +314,21 @@ def test_reason_filter_keeps_parent_folders_of_visible_files():
     assert [child.name for child in tree[0].children] == ["a.txt"]
 
 
-def test_folder_status_names_the_work_instead_of_repeating_a_size():
+def test_folder_status_keeps_pending_work_and_moves_are_not_added_to_copies():
     rows = [
         _row("mix/a.bin", Action.COPY_LEFT_TO_RIGHT, 1000, left=True, right=False),
+        _row("mix/moved.bin", Action.MOVE_ON_RIGHT, 1000, left=True, right=False),
         _row("mix/b.bin", Action.ASK, 500, left=True, right=True),
         _row("mix/c.bin", Action.UNCHANGED, 20, left=True, right=True),
     ]
     folder = build_tree(rows)[0]
-    assert folder.size_text == format_bytes(1520)
-    assert folder.status == "1 to copy to the right · 1 undecided"
-    assert "B" not in folder.status or "1520" not in folder.status
+    assert folder.size_text == format_bytes(2520)
+    assert folder.status == "1 undecided"
+    # A copy and a move share an arrow mark; they must not be added together.
+    assert folder.copy == f"1 ({format_bytes(1000)})"
+    assert folder.move == f"1 ({format_bytes(1000)})"
+    assert folder.delete == ""
+    assert "copy" not in folder.status
 
 
 def test_a_big_plan_can_render_the_top_level_only_and_load_children_later():
@@ -328,7 +340,8 @@ def test_a_big_plan_can_render_the_top_level_only_and_load_children_later():
     assert [node.name for node in top] == ["area0", "area1"]
     assert all(node.deferred for node in top)
     assert all(node.children == [] for node in top)
-    assert top[0].status == "20 to copy to the right"
+    assert top[0].status == ""
+    assert top[0].copy == f"20 ({format_bytes(200)})"
 
     folders, files, remaining = folder_children(rows, "area0", file_limit=5)
     assert [node.name for node in folders] == ["sub"]

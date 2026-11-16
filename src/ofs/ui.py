@@ -38,18 +38,20 @@ from ofs.run_history import list_history, record as record_run
 from ofs.review import (
     SAFETY_SECONDS,
     Listed,
-    log_body,
-    matches,
-    outcome_headline,
-    result_rows,
-    safety_text,
+    action_cells,
     build_tree,
     deletion_violations,
     direction_mark,
+    direction_marks,
+    file_cells,
     file_detail,
-    group_rank,
-    group_verb,
+    folder_remainder,
+    log_body,
+    matches,
+    outcome_headline,
     point_change,
+    result_rows,
+    safety_text,
     shown_summary,
     status_lines,
     without_deletes,
@@ -2045,6 +2047,16 @@ def _not_run_since(last_result: str, days: int, now: float | None = None) -> boo
     return current - run_at >= days * 86400
 
 
+def _action_foreground(index: int) -> str:
+    """Theme-aware colour for the Move and Delete cells; Name/Copy/Status stay plain."""
+
+    if index == 9:
+        return "#d9a13b" if appearance_is_dark() else "#8a5a00"
+    if index == 10:
+        return "#ff8878" if appearance_is_dark() else "#b42318"
+    return ""
+
+
 def _status_icon(last_result: str) -> Gtk.Image | None:
     """5.71-style row status: green check ran clean, red for errors, orange for stopped, none for never run."""
 
@@ -2610,7 +2622,7 @@ class Preview(Gtk.Window):
         if rule:
             header.append(self.rule_label)
 
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str, str])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str, str, str, str, str])
         self.view = Gtk.TreeView(model=self.tree_store)
         self.view.set_headers_visible(True)
         self.view.set_enable_tree_lines(True)
@@ -2628,10 +2640,13 @@ class Preview(Gtk.Window):
         self.view.get_selection().connect("changed", self._selection_changed)
         self.view.connect("row-collapsed", self._remember_tree_state, False)
         for index, title, width in (
-            (0, "Name", 320),
-            (1, "Size", 80),
-            (2, "Direction", 180),
-            (3, "Status", 300),
+            (0, "Name", 300),
+            (1, "Size", 90),
+            (2, "Direction", 110),
+            (8, "Copy", 130),
+            (9, "Move", 120),
+            (10, "Delete", 150),
+            (3, "Status", 220),
         ):
             renderer = Gtk.CellRendererText()
             renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
@@ -2639,12 +2654,12 @@ class Preview(Gtk.Window):
             column.set_resizable(True)
             column.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
             column.set_fixed_width(width)
-            if index == 1:
+            if index in (1, 8, 9, 10):
                 renderer.set_property("xalign", 1.0)
             if index == 2:
                 renderer.set_property("family", "monospace")
                 renderer.set_property("scale", 1.15)
-            column.set_cell_data_func(renderer, self._result_cell_style)
+            column.set_cell_data_func(renderer, self._result_cell_style, index)
             self.view.append_column(column)
         click = Gtk.GestureClick()
         click.set_button(3)
@@ -2862,13 +2877,13 @@ class Preview(Gtk.Window):
             prefix = "/".join(parts[:depth])
             folder = self._folder_iters.get(prefix)
             if folder is None:
-                folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False, "", ""])
+                folder = self.tree_store.append(parent, [component, "", "L ··· R", "Discovering…", prefix, False, "", "", "", "", ""])
                 self._folder_iters[prefix] = folder
                 self._queue_folder_expansion(prefix, folder)
             parent = folder
         current = self.tree_store.append(
             parent,
-            [parts[-1], format_bytes(row.change.size), "L ··· R", row.change.reason, rel, False, "", ""],
+            [parts[-1], format_bytes(row.change.size), "L ··· R", row.change.reason, rel, False, "", "", "", "", ""],
         )
         self._file_iters[rel] = current
         self.store.append(PlanRow(row.change))
@@ -2948,6 +2963,12 @@ class Preview(Gtk.Window):
                 else "Scan this profile again from the start; the rows found before the stop are shown for review only"
             )
             self.completion_action.set_sensitive(False)
+        # A finished comparison opens on the root folders, collapsed. The live
+        # list may have queued expansions for folders the user never asked for,
+        # and they would open while the model is refilled.
+        self._tree_default_expanded = False
+        self._tree_state_overrides.clear()
+        self._expand_queue.clear()
         self._refill()
 
     def _mark_unavailable_side(self, error: str) -> None:
@@ -2984,8 +3005,14 @@ class Preview(Gtk.Window):
         else:
             self._start()
 
-    def _result_cell_style(self, _column, renderer, model, tree_iter, _data) -> None:
+    def _result_cell_style(self, _column, renderer, model, tree_iter, index) -> None:
         renderer.set_property("sensitive", not model.get_value(tree_iter, 5))
+        # Copy/move/delete totals need to be readable at a glance, without
+        # expanding a folder or scrolling to a column that ran off the window.
+        color = _action_foreground(index)
+        renderer.set_property("foreground-set", bool(color))
+        if color:
+            renderer.set_property("foreground", color)
 
     def _side_head(self, title: str, path: str, status: Gtk.Label) -> Gtk.Widget:
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -3367,6 +3394,10 @@ class Preview(Gtk.Window):
         very large trees and makes the window unresponsive during discovery.
         """
 
+        if self._scan_active:
+            # Discovery only shows the top level. Expanding every folder as it
+            # appears scrolls the plan away and keeps rebuilding the open rows.
+            return
         if not self._tree_default_expanded or not self._tree_state_overrides.get(rel, True):
             return
         if self._collapsed_ancestor(rel):
@@ -3515,7 +3546,7 @@ class Preview(Gtk.Window):
         self._refresh_detail()
 
     def _reset_tree_model(self) -> None:
-        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str, str])
+        self.tree_store = Gtk.TreeStore.new([str, str, str, str, str, bool, str, str, str, str, str])
         # Replace only the GTK model. Exclusion/filter helpers own the flat store.
         self.view.set_model(self.tree_store)
         self._folder_iters = {}
@@ -3535,6 +3566,9 @@ class Preview(Gtk.Window):
             bool(node.rel) and node.rel in self._completed_rows,
             node.more_folder if node.more else "",
             "all" if getattr(node, "more_all", False) else "",
+            node.copy,
+            node.move,
+            node.delete,
         ]
 
     def _remember_folder_stats(self, node) -> None:
@@ -3558,30 +3592,29 @@ class Preview(Gtk.Window):
             return
         groups = self._folder_stats[rel]
         total = self._folder_totals.get(rel, 0)
-        parts = [
-            f"{count} {group_verb(mark)}"
-            for mark, (count, _size) in sorted(groups.items(), key=lambda item: group_rank(item[0]))
-            if count
-        ]
-        status = " · ".join(parts) if parts else "unchanged"
-        direction = "    ".join(
-            f"{mark}  {count}"
-            for mark, (count, _size) in sorted(groups.items(), key=lambda item: group_rank(item[0]))
-            if count
-        ) or "L ─── R"
+        counts = {action: (entry[0], entry[1]) for action, entry in groups.items()}
+        copy, move, delete = action_cells(counts)
+        status = folder_remainder(counts) if counts else "unchanged"
         self.tree_store.set_value(it, 0, f"{rel.rsplit('/', 1)[-1]}    {format_bytes(total)}")
         self.tree_store.set_value(it, 1, format_bytes(total))
-        self.tree_store.set_value(it, 2, direction)
+        self.tree_store.set_value(it, 2, direction_marks(counts))
         self.tree_store.set_value(it, 3, status)
+        self.tree_store.set_value(it, 8, copy)
+        self.tree_store.set_value(it, 9, move)
+        self.tree_store.set_value(it, 10, delete)
 
     def _refresh_file_row(self, listed) -> None:
         change = listed.change
         it = self._file_iters.get(change.rel)
         if it is None:
             return
+        copy, move, delete = file_cells(change)
         self.tree_store.set_value(it, 2, direction_mark(change.action))
         self.tree_store.set_value(it, 3, file_detail(change))
         self.tree_store.set_value(it, 5, change.rel in self._completed_rows)
+        self.tree_store.set_value(it, 8, copy)
+        self.tree_store.set_value(it, 9, move)
+        self.tree_store.set_value(it, 10, delete)
 
     def _apply_row_changes(self, updates: list[tuple[object, Change, Change]]) -> None:
         """Update rows and folder totals in place; no model rebuild.
@@ -3595,21 +3628,21 @@ class Preview(Gtk.Window):
             if old.action == new.action and old.size == new.size:
                 continue
             rel = new.rel
-            old_mark = direction_mark(old.action)
-            new_mark = direction_mark(new.action)
+            old_action = old.action
+            new_action = new.action
             for folder in self._ancestors(rel):
                 stats = self._folder_stats.get(folder)
                 if stats is None:
                     continue
-                if old.action != Action.UNCHANGED:
-                    entry = stats.get(old_mark)
+                if old_action != Action.UNCHANGED:
+                    entry = stats.get(old_action)
                     if entry is not None:
                         entry[0] -= 1
                         entry[1] -= old.size
                         if entry[0] <= 0:
-                            stats.pop(old_mark, None)
-                if new.action != Action.UNCHANGED:
-                    entry = stats.setdefault(new_mark, [0, 0])
+                            stats.pop(old_action, None)
+                if new_action != Action.UNCHANGED:
+                    entry = stats.setdefault(new_action, [0, 0])
                     entry[0] += 1
                     entry[1] += new.size
                 if old.size != new.size:
