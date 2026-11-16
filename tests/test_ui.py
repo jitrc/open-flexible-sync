@@ -4473,3 +4473,58 @@ def test_incremental_row_changes_update_folder_totals_without_a_rebuild():
     assert fake.tree_store.values[(("folder", "area"), 1)] == "30 B"
     assert fake.tree_store.values[(("file", "b"), 3)] == "chosen in preview"
     assert fake.tree_store.values[(("file", "b"), 8)] == format_bytes(20)
+
+
+def test_root_level_show_more_row_loads_the_hidden_root_files(tmp_path, monkeypatch):
+    """Activating a root batch must work even though its folder name is empty."""
+
+    import ofs.ui as ui_module
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestRootMore")
+    monkeypatch.setattr(ui_module, "_LAZY_TREE_ROWS", 2)
+    monkeypatch.setattr(ui_module, "_FOLDER_FILE_BATCH", 2)
+    save_profile(Profile(name="root more", left="/sample/left", right="/sample/right"))
+    rows = [
+        Listed(Change(f"root-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+        for index in range(4)
+    ] + [
+        Listed(Change(f"group/item-{index}.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10), True, False)
+        for index in range(4)
+    ]
+    seen = {}
+
+    def root_rows(preview):
+        found = []
+        it = preview.tree_store.get_iter_first()
+        while it is not None:
+            found.append((preview.tree_store.get_value(it, 0), preview.tree_store.get_value(it, 7), it))
+            it = preview.tree_store.iter_next(it)
+        return found
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            job = JobResult(window.profiles[0], ScanResult([row.change for row in rows], listing=rows), None)
+            preview = window._preview(job)
+            preview._finish_scan(job)
+            for _ in range(50):
+                if not preview._fill_some(preview._fill_generation):
+                    break
+            seen["before"] = [name for name, _marker, _it in root_rows(preview)]
+            more = [(it, marker) for _name, marker, it in root_rows(preview) if marker == "more"]
+            seen["has_more"] = bool(more)
+            if more:
+                preview.view.emit("row-activated", preview.tree_store.get_path(more[0][0]), None)
+            seen["after"] = [name for name, _marker, _it in root_rows(preview)]
+            seen["plan"] = [change.rel for change in preview._planned()]
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    # Root files are visible too, with the rest behind a working batch row.
+    assert "root-0.bin" in seen["before"]
+    assert "root-2.bin" not in seen["before"]
+    assert seen["has_more"] is True
+    assert "root-3.bin" in seen["after"]
+    assert len(seen["plan"]) == len(rows)

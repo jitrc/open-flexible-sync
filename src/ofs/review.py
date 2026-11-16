@@ -438,7 +438,7 @@ def build_tree(
             if folder_limit and index >= folder_limit:
                 hidden = len(items) - index
                 break
-            if budget["files"] == 0 and (file_limit or folder_limit):
+            if budget["files"] == 0 and file_limit:
                 hidden = len(items) - index
                 break
             change = row.change

@@ -2058,8 +2058,10 @@ def _not_run_since(last_result: str, days: int, now: float | None = None) -> boo
 
 
 def _action_foreground(index: int) -> str:
-    """Theme-aware colour for the Move and Delete cells; Name/Copy/Status stay plain."""
+    """Theme-aware colour for the Copy, Move and Delete cells; the others stay plain."""
 
+    if index == 8:
+        return "#5ec26a" if appearance_is_dark() else "#1a7f37"
     if index == 9:
         return "#d9a13b" if appearance_is_dark() else "#8a5a00"
     if index == 10:
@@ -2662,8 +2664,16 @@ class Preview(Gtk.Window):
             renderer.set_property("ellipsize", Pango.EllipsizeMode.END)
             column = Gtk.TreeViewColumn(title, renderer, text=index)
             column.set_resizable(True)
-            column.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
-            column.set_fixed_width(width)
+            if index == 2:
+                # Fit the actual arrow groups: a fixed width used to ellipsize a
+                # folder's delete or undecided marks out of sight.
+                column.set_sizing(Gtk.TreeViewColumnSizing.AUTOSIZE)
+                column.set_min_width(90)
+                column.set_max_width(320)
+                renderer.set_property("ellipsize", Pango.EllipsizeMode.NONE)
+            else:
+                column.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
+                column.set_fixed_width(width)
             if index in (1, 8, 9, 10):
                 renderer.set_property("xalign", 1.0)
             if index == 2:
@@ -3310,10 +3320,13 @@ class Preview(Gtk.Window):
         tree_iter = self.tree_store.get_iter(path)
         if tree_iter is None:
             return
-        folder = self.tree_store.get_value(tree_iter, 6)
-        if not folder:
+        marker = self.tree_store.get_value(tree_iter, 7)
+        if not marker:
             return
-        if self.tree_store.get_value(tree_iter, 7) == "all":
+        # A root-level batch has an empty folder name, so the marker, not the
+        # folder string, tells these rows apart from ordinary files.
+        folder = self.tree_store.get_value(tree_iter, 6)
+        if marker == "all":
             self._show_all_files(folder, tree_iter)
         else:
             self._show_more_files(folder, tree_iter)
@@ -3575,7 +3588,7 @@ class Preview(Gtk.Window):
             node.rel,
             bool(node.rel) and node.rel in self._completed_rows,
             node.more_folder if node.more else "",
-            "all" if getattr(node, "more_all", False) else "",
+            ("all" if getattr(node, "more_all", False) else ("more" if node.more else "")),
             node.copy,
             node.move,
             node.delete,
