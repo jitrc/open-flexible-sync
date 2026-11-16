@@ -240,7 +240,7 @@ class MainWindow(Gtk.ApplicationWindow):
         for label, callback in (
             ("Import 5.71 profiles…", self._import),
             ("Import OFS profiles…", self._import_bundle),
-            ("Export checked profiles…", self._export_bundle),
+            ("Export profiles…", self._export_bundle),
         ):
             button = Gtk.Button(label=label)
             button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
@@ -249,9 +249,9 @@ class MainWindow(Gtk.ApplicationWindow):
         choices.append(Gtk.Label(label="Checked profiles", xalign=0, css_classes=["dim-label"]))
         for label, callback in (
             ("Copy new folder…", self._copy_new_folder),
-            ("Multi Edit checked profiles…", self._multi_edit),
-            ("Replace paths in checked profiles…", self._replace_paths),
-            ("Rename checked profiles…", self._rename_checked),
+            ("Multi Edit profiles…", self._multi_edit),
+            ("Replace paths in profiles…", self._replace_paths),
+            ("Rename profiles…", self._rename_checked),
         ):
             button = Gtk.Button(label=label)
             button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
@@ -900,13 +900,15 @@ class MainWindow(Gtk.ApplicationWindow):
     def _export_bundle(self, *_args) -> None:
         chosen = [profile for profile in self.profiles if profile.name in self.checked]
         if not chosen:
-            self.status.set_text("Check the profiles or groups to export.")
+            chosen = list(self.profiles)
+        if not chosen:
+            self.status.set_text("No profiles are available to export.")
             return
         file_filter = Gtk.FileFilter()
         file_filter.set_name("OFS profile bundles (*.json)")
         file_filter.add_pattern("*.json")
         dialog = Gtk.FileDialog()
-        dialog.set_title("Export checked OFS profiles")
+        dialog.set_title("Export OFS profiles"
         dialog.set_initial_name("OFS-profiles.json")
         dialog.set_default_filter(file_filter)
         dialog.save(self, None, self._export_bundle_saved, chosen)
@@ -924,7 +926,7 @@ class MainWindow(Gtk.ApplicationWindow):
         except OSError as exc:
             self.status.set_text(f"Could not export profiles: {exc}")
             return
-        self.status.set_text(f"Exported {len(chosen)} checked profiles to {path}.")
+        self.status.set_text(f"Exported {len(chosen)} profiles to {path}.")
 
     def _restore_older(self, *_args) -> None:
         checked = [profile for profile in self.profiles if profile.name in self.checked]
@@ -955,7 +957,9 @@ class MainWindow(Gtk.ApplicationWindow):
     def _multi_edit(self, *_args) -> BulkEditWindow | None:
         chosen = [profile for profile in self.profiles if profile.name in self.checked]
         if not chosen:
-            self.status.set_text("Check the profiles to change with Multi Edit.")
+            chosen = list(self.profiles)
+        if not chosen:
+            self.status.set_text("No profiles are available for Multi Edit.")
             return None
         window = BulkEditWindow(self, chosen)
         window.present()
@@ -990,7 +994,9 @@ class MainWindow(Gtk.ApplicationWindow):
     def _replace_paths(self, *_args) -> CheckedReplacementWindow | None:
         chosen = [profile for profile in self.profiles if profile.name in self.checked]
         if not chosen:
-            self.status.set_text("Check the profiles whose paths should change.")
+            chosen = list(self.profiles)
+        if not chosen:
+            self.status.set_text("No profiles are available for path replacement.")
             return None
         window = CheckedReplacementWindow(self, chosen, "paths")
         window.present()
@@ -999,7 +1005,9 @@ class MainWindow(Gtk.ApplicationWindow):
     def _rename_checked(self, *_args) -> CheckedReplacementWindow | None:
         chosen = [profile for profile in self.profiles if profile.name in self.checked]
         if not chosen:
-            self.status.set_text("Check the profiles or groups to rename.")
+            chosen = list(self.profiles)
+        if not chosen:
+            self.status.set_text("No profiles are available to rename.")
             return None
         window = CheckedReplacementWindow(self, chosen, "names")
         window.present()
@@ -1037,7 +1045,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _confirm_name_replacements(self, changes: list[tuple[str, str]]) -> None:
         dialog = Gtk.AlertDialog()
-        dialog.set_message(f"Rename {len(changes)} checked profiles?")
+        dialog.set_message(f"Rename {len(changes)} profiles?")
         preview = "\n".join(f"{old} → {new}" for old, new in changes[:12])
         extra = "" if len(changes) <= 12 else f"\n… and {len(changes) - 12} more"
         dialog.set_detail(preview + extra + "\n\nPaths and all other profile settings are preserved. The old file database is removed.")
@@ -5631,7 +5639,7 @@ class CheckedReplacementWindow(Gtk.Window):
 
     def __init__(self, owner: MainWindow, profiles: list[Profile], operation: str):
         names = operation == "names"
-        super().__init__(transient_for=owner, modal=True, title="Rename checked profiles" if names else "Replace checked profile paths")
+        super().__init__(transient_for=owner, modal=True, title="Rename profiles" if names else "Replace profile paths")
         self.owner = owner
         self.profiles = profiles
         self.operation = operation
@@ -5699,7 +5707,7 @@ class CheckedReplacementWindow(Gtk.Window):
         while child := self.items.get_first_child():
             self.items.remove(child)
         if not self.find.get_text():
-            self.summary.set_text(f"{len(self.profiles)} checked profiles. Enter text to replace.")
+            self.summary.set_text(f"{len(self.profiles)} profiles. Enter text to replace.")
             return
         try:
             changes = self._changes()
@@ -5713,7 +5721,7 @@ class CheckedReplacementWindow(Gtk.Window):
                 row = Gtk.Label(xalign=0, wrap=True, selectable=True)
                 row.set_text(f"{profile.name} · {label}\n{original}\n→ {updated}")
                 self.items.append(row)
-        self.summary.set_text(f"{len(changes)} of {len(self.profiles)} checked profiles would change. Every changed side is listed below.")
+        self.summary.set_text(f"{len(changes)} of {len(self.profiles)} profiles would change. Every changed side is listed below.")
 
     def _review(self, *_args) -> None:
         try:
@@ -5735,7 +5743,7 @@ class BulkEditWindow(Gtk.Window):
     """Change one field; show the exact profile/value set before saving."""
 
     def __init__(self, owner: MainWindow, profiles: list[Profile]):
-        super().__init__(transient_for=owner, modal=True, title=f"Multi Edit — {len(profiles)} checked profiles")
+        super().__init__(transient_for=owner, modal=True, title=f"Multi Edit — {len(profiles)} profiles")
         self.owner = owner
         self.profiles = profiles
         self.set_default_size(640, 310)
@@ -5754,7 +5762,7 @@ class BulkEditWindow(Gtk.Window):
         self.value_widget: Gtk.Widget | None = None
         self.mask_operation: Gtk.DropDown | None = None
         self.preview = Gtk.Label(xalign=0, wrap=True)
-        self.preview.set_text(f"{len(profiles)} checked profiles. Choose one field to change; other fields are preserved. Search for cache, then choose Off or On.")
+        self.preview.set_text(f"{len(profiles)} profiles. Choose one field to change; other fields are preserved. Search for cache, then choose Off or On.")
         self.apply = Gtk.Button(label="Preview Changes…")
         self.apply.add_css_class("suggested-action")
         self.apply.connect("clicked", self._preview_changes)
