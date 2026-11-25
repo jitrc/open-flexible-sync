@@ -2545,7 +2545,11 @@ class Preview(Gtk.Window):
         self.tree_controls.append(self.show_all_button)
         self.shortcut_button = Gtk.MenuButton()
         self.shortcut_button.set_icon_name("help-about-symbolic")
-        self.shortcut_button.set_tooltip_text("Keyboard shortcuts for the selected rows")
+        self.shortcut_button.set_tooltip_text(
+            "Keyboard shortcuts for the selected rows: "
+            "Ctrl+I ignore, Ctrl+Shift+I ignore extensions, Ctrl+E exclusions, "
+            "Ctrl+U unchanged, Ctrl+R revert, Ctrl+←/Ctrl+→ direction, Ctrl+Shift+A show all files"
+        )
         self.shortcut_button.set_popover(self._shortcut_help())
         self.tree_controls.append(self.shortcut_button)
         sort_heading = Gtk.Label(label="Sort by", xalign=0)
@@ -2684,6 +2688,10 @@ class Preview(Gtk.Window):
             self.view.append_column(column)
         click = Gtk.GestureClick()
         click.set_button(3)
+        # Capture and claim the click before TreeView's own handler. Otherwise a
+        # right-click inside a multi-selection collapses it to the cursor row,
+        # and Ignore then sees one file or none.
+        click.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
         click.connect("pressed", self._tree_pressed)
         self.view.add_controller(click)
         scrolled = Gtk.ScrolledWindow(vexpand=True)
@@ -3763,30 +3771,73 @@ class Preview(Gtk.Window):
         GLib.idle_add(self._restore_tree_scroll, priority=GLib.PRIORITY_LOW)
         return False
 
-    def _rel_at(self, x: float, y: float) -> str | None:
+    def _bin_coords(self, x: float, y: float) -> tuple[int, int]:
+        return self.view.convert_widget_to_bin_window_coords(int(x), int(y))
+
+    def _path_at_bin(self, x: int, y: int):
+        return self.view.get_path_at_pos(int(x), int(y))
+
+    def _row_at_widget(self, x: float, y: float):
         # Gesture coordinates include the column header. The tree hit test
         # starts below that header, so an unconverted click on a folder lands
-        # on the first file in it.
-        bx, by = self.view.convert_widget_to_bin_window_coords(int(x), int(y))
-        found = self.view.get_path_at_pos(int(bx), int(by))
+        # on the first file in it and a multi-selection is replaced by that file.
+        bx, by = self._bin_coords(x, y)
+        found = self._path_at_bin(bx, by)
         if not found:
             return None
-        tree_iter = self.tree_store.get_iter(found[0])
+        return self.tree_store.get_iter(found[0])
+
+    def _rel_at(self, x: float, y: float) -> str | None:
+        tree_iter = self._row_at_widget(x, y)
         if tree_iter is None:
             return None
         return self.tree_store.get_value(tree_iter, 4)
 
     def _keep_selection(self, tree_iter) -> None:
-        """Right-clicking inside a selection keeps it; elsewhere it selects that row."""
+        """Right-clicking inside a selection keeps it; elsewhere it selects that row.
 
+        A fresh TreeIter for an already selected path does not always count as
+        selected, and treating it as a new row used to drop the rest of the selection.
+        """
+
+        if tree_iter is None:
+            return
+        path = self.tree_store.get_path(tree_iter)
+        if path is None:
+            return
+        key = str(path)
         selection = self.view.get_selection()
-        if tree_iter is not None and not selection.iter_is_selected(tree_iter):
-            selection.unselect_all()
-            selection.select_iter(tree_iter)
+        _model, selected = selection.get_selected_rows()
+        if key in [str(item) for item in selected]:
+            return
+        selection.unselect_all()
+        selection.select_path(Gtk.TreePath.new_from_string(key))
 
-    def _tree_pressed(self, _gesture, _n, x: float, y: float) -> None:
-        found = self.view.get_path_at_pos(int(x), int(y))
-        tree_iter = self.tree_store.get_iter(found[0]) if found is not None else None
+    def _restore_selection_soon(self, paths: list[str]) -> None:
+        """Put a multi-selection back if the right-click handler still clears it."""
+
+        wanted = list(paths)
+
+        def restore() -> bool:
+            popover = self._popover
+            if popover is None or not popover.is_visible():
+                return False
+            selection = self.view.get_selection()
+            _model, now = selection.get_selected_rows()
+            if [str(path) for path in now] == wanted:
+                return False
+            selection.unselect_all()
+            for key in wanted:
+                path = Gtk.TreePath.new_from_string(key)
+                if self.tree_store.get_iter(path) is not None:
+                    selection.select_path(path)
+            return False
+
+        GLib.idle_add(restore)
+
+    def _tree_pressed(self, gesture, _n, x: float, y: float) -> None:
+        gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+        tree_iter = self._row_at_widget(x, y)
         folder = self.tree_store.get_value(tree_iter, 6) if tree_iter is not None else ""
         if folder:
             self._popup_more(folder, tree_iter, x, y)
@@ -3794,10 +3845,12 @@ class Preview(Gtk.Window):
         self._keep_selection(tree_iter)
         entries = self._selected_entries()
         if len(entries) > 1:
+            frozen = [str(path) for path in self.view.get_selection().get_selected_rows()[1]]
             self._popup_selection(entries, x, y)
+            self._restore_selection_soon(frozen)
             return
-        rel = self._rel_at(x, y)
-        if rel is None:
+        rel = self.tree_store.get_value(tree_iter, 4) if tree_iter is not None else None
+        if not rel:
             return
         listed = next((item for item in self.rows if item.change.rel == rel), None)
         if listed is None:
@@ -3853,10 +3906,11 @@ class Preview(Gtk.Window):
                 found.append(entry)
         return found
 
-    def _ignore_selected(self, *, extension: bool = False) -> None:
+    def _ignore_selected(self, *, extension: bool = False, entries: list[tuple[str, bool]] | None = None) -> None:
         """Ignore the whole selection for this run with one refill."""
 
-        entries = self._selected_entries()
+        if entries is None:
+            entries = self._selected_entries()
         if not entries:
             self.detail.set_text("Select one or more rows to ignore for this run.")
             return
@@ -3902,10 +3956,11 @@ class Preview(Gtk.Window):
         noun = "file" if len(gone) == 1 else "files"
         self.detail.set_text(f"Ignored {len(gone)} {noun} for this run; nothing on disk changed.")
 
-    def _set_selected(self, action: Action | None) -> None:
+    def _set_selected(self, action: Action | None, entries: list[tuple[str, bool]] | None = None) -> None:
         """Point every selected file and folder the same way in one action."""
 
-        entries = self._selected_entries()
+        if entries is None:
+            entries = self._selected_entries()
         if not entries:
             self.detail.set_text("Select one or more rows first.")
             return
@@ -4180,6 +4235,29 @@ class Preview(Gtk.Window):
             return
         self._show_all_files(folder, more_iter)
 
+    def _context_button(self, text: str, tip: str, shortcut: str = "") -> Gtk.Button:
+        """A menu row with the action, its shortcut, and a tooltip that names both."""
+
+        button = Gtk.Button()
+        row = Gtk.Box(spacing=24)
+        row.append(Gtk.Label(label=text, xalign=0, hexpand=True))
+        if shortcut:
+            row.append(Gtk.Label(label=shortcut, xalign=1, css_classes=["dim-label"]))
+        button.set_child(row)
+        if tip and shortcut:
+            button.set_tooltip_text(f"{tip} ({shortcut})")
+        elif shortcut:
+            button.set_tooltip_text(shortcut)
+        elif tip:
+            button.set_tooltip_text(tip)
+        return button
+
+    def _fill_context_menu(self, box: Gtk.Box, popover: Gtk.Popover, actions: list[tuple[str, str, object, str]]) -> None:
+        for text, tip, callback, shortcut in actions:
+            button = self._context_button(text, tip, shortcut)
+            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
+            box.append(button)
+
     def _popup_selection(self, entries: list[tuple[str, bool]], x: float, y: float) -> None:
         """Actions that apply to every selected row at once."""
 
@@ -4194,17 +4272,20 @@ class Preview(Gtk.Window):
         rect.height = 1
         popover.set_pointing_to(rect)
         count = len(entries)
-        files_only = all(not is_folder for _rel, is_folder in entries)
+        chosen = list(entries)
+        files_only = all(not is_folder for _rel, is_folder in chosen)
         actions = [
             (
                 f"Add exclusions for {count} selected…",
                 "Edit profile or global rules for every selected path before saving",
-                lambda: self._ask_exclusions(entries),
+                lambda chosen=chosen: self._ask_exclusions(chosen),
+                "Ctrl+E",
             ),
             (
                 f"Ignore {count} selected for this run",
                 "Leave them out of this run; nothing on disk changes",
-                lambda: self._ignore_selected(),
+                lambda chosen=chosen: self._ignore_selected(entries=chosen),
+                "Ctrl+I",
             ),
         ]
         if files_only:
@@ -4212,24 +4293,20 @@ class Preview(Gtk.Window):
                 (
                     "Ignore these extensions for this run",
                     "Skip every file with these suffixes in this run",
-                    lambda: self._ignore_selected(extension=True),
+                    lambda chosen=chosen: self._ignore_selected(extension=True, entries=chosen),
+                    "Ctrl+Shift+I",
                 )
             )
         actions.extend(
             [
-                ("Copy these left to right", "Point every selected file and folder to the right", lambda: self._set_selected(Action.COPY_LEFT_TO_RIGHT)),
-                ("Copy these right to left", "Point every selected file and folder to the left", lambda: self._set_selected(Action.COPY_RIGHT_TO_LEFT)),
-                ("Leave these files unchanged", "", lambda: self._set_selected(Action.UNCHANGED)),
-                ("Revert these to the scanned action", "", lambda: self._set_selected(None)),
+                ("Copy these left to right", "Point every selected file and folder to the right", lambda chosen=chosen: self._set_selected(Action.COPY_LEFT_TO_RIGHT, chosen), "Ctrl+→"),
+                ("Copy these right to left", "Point every selected file and folder to the left", lambda chosen=chosen: self._set_selected(Action.COPY_RIGHT_TO_LEFT, chosen), "Ctrl+←"),
+                ("Leave these files unchanged", "Do not copy or delete these files in this run", lambda chosen=chosen: self._set_selected(Action.UNCHANGED, chosen), "Ctrl+U"),
+                ("Revert these to the scanned action", "Put back the action from the scan", lambda chosen=chosen: self._set_selected(None, chosen), "Ctrl+R"),
             ]
         )
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        for text, tip, callback in actions:
-            button = Gtk.Button(label=text)
-            if tip:
-                button.set_tooltip_text(tip)
-            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
-            box.append(button)
+        self._fill_context_menu(box, popover, actions)
         popover.set_child(box)
         self._popover = popover
         popover.popup()
@@ -4262,9 +4339,7 @@ class Preview(Gtk.Window):
             ),
         ]
         for text, tip, callback in actions:
-            button = Gtk.Button(label=text)
-            if tip:
-                button.set_tooltip_text(tip)
+            button = self._context_button(text, tip)
             button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
             box.append(button)
         popover.set_child(box)
@@ -4366,24 +4441,19 @@ class Preview(Gtk.Window):
         popover.set_pointing_to(rect)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         actions = ([] if self.partial else [
-            ("Copy whole new folder…", "Only when the matching destination is absent; uses no scanned plan and never overwrites or deletes", lambda: self._confirm_tree_folder_copy(rel)),
+            ("Copy whole new folder…", "Only when the matching destination is absent; uses no scanned plan and never overwrites or deletes", lambda: self._confirm_tree_folder_copy(rel), ""),
         ]) + [
-            ("L ──▶ R", "Copy this folder left to right", lambda: self._set_folder_direction(rel, "right")),
-            ("L ◀── R", "Copy this folder right to left", lambda: self._set_folder_direction(rel, "left")),
-            ("Delete folder files on Right…", "Add known right-side files to the reviewed deletion plan; nothing is deleted now", lambda: self._ask_folder_delete(rel, "right")),
-            ("Delete folder files on Left…", "Add known left-side files to the reviewed deletion plan; nothing is deleted now", lambda: self._ask_folder_delete(rel, "left")),
-            ("Open left folder", "", lambda: open_uri(Path(self.job.profile.left) / rel)),
-            ("Open right folder", "", lambda: open_uri(Path(self.job.profile.right) / rel)),
-            ("Add exclusion…", "Choose profile/global, a relative path or name, and edit the rule", lambda: self._ask_exclusion(rel, folder=True)),
-            ("Filter sizes under this folder", "Review only; change what is displayed without changing the synchronization plan", lambda: self._set_size_scope(None, rel)),
-            ("Ignore this folder for this run", "", lambda: self._ignore_folder(rel)),
+            ("L ──▶ R", "Copy this folder left to right", lambda: self._set_folder_direction(rel, "right"), "Ctrl+→"),
+            ("L ◀── R", "Copy this folder right to left", lambda: self._set_folder_direction(rel, "left"), "Ctrl+←"),
+            ("Delete folder files on Right…", "Add known right-side files to the reviewed deletion plan; nothing is deleted now", lambda: self._ask_folder_delete(rel, "right"), ""),
+            ("Delete folder files on Left…", "Add known left-side files to the reviewed deletion plan; nothing is deleted now", lambda: self._ask_folder_delete(rel, "left"), ""),
+            ("Open left folder", "", lambda: open_uri(Path(self.job.profile.left) / rel), ""),
+            ("Open right folder", "", lambda: open_uri(Path(self.job.profile.right) / rel), ""),
+            ("Add exclusion…", "Choose profile/global, a relative path or name, and edit the rule", lambda: self._ask_exclusion(rel, folder=True), "Ctrl+E"),
+            ("Filter sizes under this folder", "Review only; change what is displayed without changing the synchronization plan", lambda: self._set_size_scope(None, rel), ""),
+            ("Ignore this folder for this run", "Leave this folder out of this run; nothing on disk changes", lambda: self._ignore_folder(rel), "Ctrl+I"),
         ]
-        for text, tip, callback in actions:
-            button = Gtk.Button(label=text)
-            if tip:
-                button.set_tooltip_text(tip)
-            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
-            box.append(button)
+        self._fill_context_menu(box, popover, actions)
         popover.set_child(box)
         self._popover = popover
         popover.popup()
@@ -4410,25 +4480,20 @@ class Preview(Gtk.Window):
         popover.set_pointing_to(rect)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         actions = [
-            ("Open left file", "", lambda: self._open_side("left", row.change.rel, folder=False)),
-            ("Open right file", "", lambda: self._open_side("right", row.change.rel, folder=False)),
-            ("Open left folder", "", lambda: self._open_side("left", row.change.rel, folder=True)),
-            ("Open right folder", "", lambda: self._open_side("right", row.change.rel, folder=True)),
-            ("Add exclusion…", "Choose profile/global, a relative path or name, and edit the rule", lambda: self._ask_exclusion(row)),
-            ("Ignore for this run", "", lambda: self._ignore(row, extension=False)),
-            ("Ignore this extension for this run", "", lambda: self._ignore(row, extension=True)),
-            ("Compare files", "", lambda: self._compare(row)),
-            ("L ──▶ R", "Copy this file left to right", lambda: self._set_action(row, Action.COPY_LEFT_TO_RIGHT)),
-            ("L ◀── R", "Copy this file right to left", lambda: self._set_action(row, Action.COPY_RIGHT_TO_LEFT)),
-            ("Leave unchanged", "", lambda: self._set_action(row, Action.UNCHANGED)),
-            ("Revert to scanned action", "", lambda: self._set_action(row, None)),
+            ("Open left file", "", lambda: self._open_side("left", row.change.rel, folder=False), ""),
+            ("Open right file", "", lambda: self._open_side("right", row.change.rel, folder=False), ""),
+            ("Open left folder", "", lambda: self._open_side("left", row.change.rel, folder=True), ""),
+            ("Open right folder", "", lambda: self._open_side("right", row.change.rel, folder=True), ""),
+            ("Add exclusion…", "Choose profile/global, a relative path or name, and edit the rule", lambda: self._ask_exclusion(row), "Ctrl+E"),
+            ("Ignore for this run", "Leave it out of this run; nothing on disk changes", lambda: self._ignore(row, extension=False), "Ctrl+I"),
+            ("Ignore this extension for this run", "Skip every file with this suffix in this run", lambda: self._ignore(row, extension=True), "Ctrl+Shift+I"),
+            ("Compare files", "", lambda: self._compare(row), ""),
+            ("L ──▶ R", "Copy this file left to right", lambda: self._set_action(row, Action.COPY_LEFT_TO_RIGHT), "Ctrl+→"),
+            ("L ◀── R", "Copy this file right to left", lambda: self._set_action(row, Action.COPY_RIGHT_TO_LEFT), "Ctrl+←"),
+            ("Leave unchanged", "Do not copy or delete this file in this run", lambda: self._set_action(row, Action.UNCHANGED), "Ctrl+U"),
+            ("Revert to scanned action", "Put back the action from the scan", lambda: self._set_action(row, None), "Ctrl+R"),
         ]
-        for text, tip, callback in actions:
-            button = Gtk.Button(label=text)
-            if tip:
-                button.set_tooltip_text(tip)
-            button.connect("clicked", lambda _b, fn=callback: (popover.popdown(), fn()))
-            box.append(button)
+        self._fill_context_menu(box, popover, actions)
         popover.set_child(box)
         self._popover = popover
         popover.popup()

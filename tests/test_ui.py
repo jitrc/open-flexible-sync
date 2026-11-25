@@ -58,6 +58,21 @@ def _run_buttons_are_marked(widget) -> bool:
     return bool(runs) and all("run" in button.get_css_classes() for button in runs)
 
 
+def _menu_action_labels(widget) -> list[str]:
+    """Action names from a context menu, ignoring the shortcut hints beside them."""
+
+    labels = []
+    for button in _buttons(widget):
+        if button.get_label():
+            labels.append(button.get_label())
+            continue
+        for child in _widgets(button):
+            if isinstance(child, Gtk.Label) and "dim-label" not in child.get_css_classes() and child.get_label():
+                labels.append(child.get_label())
+                break
+    return labels
+
+
 def _button_labels(widget) -> list[str]:
     found = []
     if isinstance(widget, (Gtk.Button, Gtk.MenuButton)):
@@ -2207,7 +2222,12 @@ def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, mon
             preview._confirm_tree_folder_copy("cache")
             seen["guarded_copy"] = "copy_requested" not in seen
             preview._popup_folder("cache", 0, 0)
-            seen["folder_actions"] = [button.get_label() for button in _buttons(preview._popover)]
+            seen["folder_actions"] = _menu_action_labels(preview._popover)
+            seen["ignore_tip"] = next(
+                button.get_tooltip_text()
+                for button in _buttons(preview._popover)
+                if "Ctrl+I" in (button.get_tooltip_text() or "")
+            )
             seen["uniform_menu_font"] = all("monospace" not in button.get_css_classes() for button in _buttons(preview._popover))
             seen["rescan"] = None
             window._run_names = lambda names: seen.update(rescan=names)
@@ -2226,6 +2246,7 @@ def test_partial_scan_allows_exclusions_and_rescan_but_never_start(tmp_path, mon
     assert "Copy whole new folder…" not in seen["folder_actions"]
     assert "Add exclusion…" in seen["folder_actions"]
     assert "Filter sizes under this folder" in seen["folder_actions"]
+    assert seen["ignore_tip"] == "Leave this folder out of this run; nothing on disk changes (Ctrl+I)"
     assert seen["uniform_menu_font"] is True
     assert seen["rescan"] == {"partial job"}
 
@@ -4235,6 +4256,7 @@ def test_several_selected_rows_are_excluded_or_ignored_together(tmp_path, monkey
             preview._finish_scan(job)
             seen["mode"] = preview.view.get_selection().get_mode()
             seen["shortcuts"] = preview.shortcut_count
+            seen["shortcut_tip"] = preview.shortcut_button.get_tooltip_text()
             seen["controller"] = any(
                 isinstance(item, Gtk.ShortcutController) for item in preview.observe_controllers()
             )
@@ -4247,6 +4269,39 @@ def test_several_selected_rows_are_excluded_or_ignored_together(tmp_path, monkey
             seen["after_right_click"] = sorted(rel for rel, _folder in preview._selected_entries())
             preview._keep_selection(preview._file_iters["top.txt"])
             seen["after_other_row"] = preview._selected_entries()
+
+            selection.unselect_all()
+            selection.select_iter(preview._folder_iters["alpha"])
+            selection.select_iter(preview._file_iters["top.txt"])
+            hit = preview.tree_store.get_path(preview._file_iters["top.txt"])
+            converted = {}
+
+            def convert(x, y):
+                converted["widget"] = (x, y)
+                return (7, 9)
+
+            def path_at(x, y):
+                converted["bin"] = (x, y)
+                return (hit, None, None, None)
+
+            preview._bin_coords = convert
+            preview._path_at_bin = path_at
+
+            class Claim:
+                def set_state(self, state):
+                    converted["claimed"] = state
+
+            seen["before_press"] = sorted(rel for rel, _folder in preview._selected_entries())
+            preview._tree_pressed(Claim(), 1, 12, 48)
+            seen["right_click_keeps"] = sorted(rel for rel, _folder in preview._selected_entries())
+            seen["converted"] = converted
+            seen["menu"] = _menu_action_labels(preview._popover)
+            seen["ignore_shortcut"] = next(
+                button.get_tooltip_text()
+                for button in _buttons(preview._popover)
+                if (button.get_tooltip_text() or "").endswith("(Ctrl+I)")
+            )
+            preview._popover.popdown()
 
             # One editable window holds every selected path.
             dialog = preview._ask_exclusions(seen["entries"])
@@ -4268,10 +4323,18 @@ def test_several_selected_rows_are_excluded_or_ignored_together(tmp_path, monkey
     assert App().run(None) == 0
     assert seen["mode"] == Gtk.SelectionMode.MULTIPLE
     assert seen["shortcuts"] == 8
+    assert "Ctrl+I ignore" in seen["shortcut_tip"]
     assert seen["controller"] is True
     assert seen["entries"] == [("alpha", True), ("beta", True)]
     assert seen["after_right_click"] == ["alpha", "beta"]
     assert seen["after_other_row"] == [("top.txt", False)]
+    assert seen["converted"]["widget"] == (12, 48)
+    assert seen["converted"]["bin"] == (7, 9)
+    assert seen["converted"]["claimed"] == Gtk.EventSequenceState.CLAIMED
+    assert seen["before_press"] == ["alpha", "top.txt"]
+    assert seen["right_click_keeps"] == ["alpha", "top.txt"]
+    assert "Ignore 2 selected for this run" in seen["menu"]
+    assert seen["ignore_shortcut"].endswith("(Ctrl+I)")
     assert seen["seeded"] == ["alpha", "beta"]
     assert seen["excluded"] == ["alpha", "beta"]
     assert seen["left"] == ["top.txt"]

@@ -4,6 +4,13 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-11-25
+
+### Fixed
+
+- Right-clicking a multi-selection in the scan results keeps every selected row, so Ignore, exclusions, and the other selection actions apply to all of them.
+- Context-menu actions show their keyboard shortcut, including Ctrl+I to ignore the selection. The help button beside the folder controls lists the same keys in its tooltip.
+
 ## [0.6.0] - 2026-11-15
 
 ### Added
@@ -225,7 +232,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.4.8...v0.5.0
