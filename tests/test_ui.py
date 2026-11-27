@@ -433,6 +433,33 @@ def test_groups_start_collapsed_and_toggle_together(tmp_path, monkeypatch):
     assert seen["closed"] == [("alpha", False)]
 
 
+def test_profile_filter_matches_source_and_destination_paths(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestPathFilter")
+    save_profile(Profile(name="alpha notes", left=str(tmp_path / "camera" / "inbox"), right=str(tmp_path / "vault" / "photos")))
+    save_profile(Profile(name="alpha spare", left=str(tmp_path / "desk"), right=str(tmp_path / "vault" / "docs")))
+    save_profile(Profile(name="beta other", left=str(tmp_path / "desk"), right=str(tmp_path / "vault" / "docs")))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            window.search.set_text("camera/inbox")
+            seen["source"] = sorted(window._profile_rows)
+            seen["source_open"] = _group_titles(window.list_box)
+            window.search.set_text("VAULT/photos")
+            seen["destination"] = sorted(window._profile_rows)
+            window.search.set_text("missing-path")
+            seen["miss"] = sorted(window._profile_rows)
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["source"] == ["alpha notes"]
+    assert seen["source_open"] == [("alpha", True)]
+    assert seen["destination"] == ["alpha notes"]
+    assert seen["miss"] == []
+
+
 def test_group_checkbox_selects_visible_enabled_members_only(tmp_path, monkeypatch):
     monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestGroupChecks")
@@ -1601,6 +1628,51 @@ def test_live_preview_batches_entries_and_keeps_start_disabled_until_complete(tm
     assert seen["excluded_removed"] is True and seen["queued_exclusion"] is True
     assert seen["complete"] and seen["collapsed"] and seen["start_enabled"]
     assert seen["final_paths"] == ["root.txt"]
+
+
+def _operation_labels(preview) -> list[str]:
+    labels = []
+    child = preview.operation_area.get_first_child()
+    while child is not None:
+        labels.append(child.get_label())
+        child = child.get_next_sibling()
+    return labels
+
+
+def test_the_next_set_replaces_earlier_scan_and_copy_panels(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestSetPanels")
+    save_profile(Profile(name="sets", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            profile = window.profiles[0]
+            preview = window._preview(JobResult(profile, ScanResult([]), None))
+            first = ScanWindow(window)
+            preview._begin_scan(first)
+            preview._finish_scan(JobResult(profile, ScanResult([]), None))
+            copy = ProgressWindow(preview, profile.name)
+            preview._copy_progress = copy
+            preview.copy_details = preview._attach_operation_panel(copy, "Copying")
+            preview.copy_details.set_label("Copy complete")
+            seen["during_copy"] = _operation_labels(preview)
+            preview._reset_for_scan()
+            preview._begin_scan(ScanWindow(window))
+            seen["next_set"] = _operation_labels(preview)
+            seen["only_current_scan"] = preview.scan_details.get_expanded() and preview.copy_details is None
+            seen["set_count"] = preview._scan_progress.count_label.get_text().splitlines()[0]
+            first.allow_close()
+            preview._scan_progress.allow_close()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["during_copy"] == ["Scan complete", "Copy complete"]
+    assert seen["next_set"] == ["Scanning · set 2"]
+    assert seen["set_count"] == "Set 2"
+    assert seen["only_current_scan"] is True
 
 
 def test_scan_reports_cache_off_fresh_and_reused_states(tmp_path, monkeypatch):
@@ -3395,6 +3467,7 @@ def test_folder_direction_copies_destination_files_back(tmp_path, monkeypatch):
 
 
 def test_scan_panel_names_the_profile_only_in_the_window_title(tmp_path, monkeypatch):
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
     monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestScanNameOnce")
     save_profile(Profile(name="named profile", left="/sample/left", right="/sample/right"))
     seen = {}
@@ -3818,6 +3891,13 @@ def test_copying_results_group_repeated_errors_into_one_place(tmp_path, monkeypa
         "archive/2024/batch/J7KQ (3 entries): [Errno 22] Invalid argument",
         "unrelated/file.bin: [Errno 13] Permission denied",
     ]
+    escapes = [
+        "JitLinux/legacy/profile/times.json: path escapes the profile folder: JitLinux/legacy/profile/times.json",
+        "JitLinux/legacy/profile/xulstore.json: path escapes the profile folder: JitLinux/legacy/profile/xulstore.json",
+    ]
+    assert _error_groups(escapes) == [
+        "JitLinux/legacy/profile (2 entries): path escapes the profile folder",
+    ]
     profile = Profile(name="grouped errors", left="/sample/left", right="/sample/right")
     save_profile(profile)
     seen = {}
@@ -3868,6 +3948,10 @@ def test_live_preview_stops_queueing_rows_past_its_limit(tmp_path, monkeypatch):
             preview._begin_scan(ScanWindow(window))
             for index in range(100):
                 preview._queue_entry("Left", f"folder/item-{index}", FileStat(index + 1, 2))
+            # The cap has to hold before the UI paints. Otherwise a fast walk
+            # keeps every later path while Copying Results cannot take a click.
+            seen["held_before_drain"] = len(preview._entry_queue)
+            seen["capped_before_drain"] = preview._live_capped
             preview._drain_pending()
             seen["shown"] = preview.shown.get_text()
             seen["queued_after_cap"] = len(preview._entry_queue)
@@ -3882,6 +3966,8 @@ def test_live_preview_stops_queueing_rows_past_its_limit(tmp_path, monkeypatch):
             self.quit()
 
     assert App().run(None) == 0
+    assert seen["held_before_drain"] == 20
+    assert seen["capped_before_drain"] is True
     assert seen["capped"] is True
     assert seen["queued_after_cap"] == 0
     assert "Live list paused after 20 shown paths" in seen["shown"]
@@ -3889,6 +3975,38 @@ def test_live_preview_stops_queueing_rows_past_its_limit(tmp_path, monkeypatch):
     assert seen["rows"] == 20
     assert seen["queue_still_empty"] is True
     assert seen["complete_rows"] == ["folder/item-1"]
+
+
+def test_scan_stat_updates_keep_only_the_latest_sample(tmp_path, monkeypatch):
+    from ofs.walk import WalkStats
+
+    monkeypatch.setenv("OFS_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OFS_APP_ID", "com.ofs.LocalSyncTestStatSample")
+    save_profile(Profile(name="stats", left="/sample/left", right="/sample/right"))
+    seen = {}
+
+    class App(SfsApplication):
+        def do_activate(self):
+            window = MainWindow(self)
+            preview = window._preview(JobResult(window.profiles[0], ScanResult([]), None))
+            progress = ScanWindow(window)
+            preview._begin_scan(progress)
+            for index in range(100):
+                preview._post_scan_stats("stats", "Left", f"dir/file-{index}", WalkStats(index + 1, 0, index + 1))
+            seen["scheduled_once"] = preview._stats_scheduled
+            seen["pending_path"] = preview._pending_stats[2]
+            preview._apply_pending_scan_stats()
+            seen["shown_path"] = progress.file_label.get_text()
+            seen["cleared"] = preview._pending_stats is None and not preview._stats_scheduled
+            progress.allow_close()
+            preview.close()
+            self.quit()
+
+    assert App().run(None) == 0
+    assert seen["scheduled_once"] is True
+    assert seen["pending_path"] == "dir/file-99"
+    assert seen["shown_path"] == "dir/file-99"
+    assert seen["cleared"] is True
 
 
 def test_a_big_plan_opens_collapsed_and_loads_a_folder_when_expanded(tmp_path, monkeypatch):
@@ -4045,6 +4163,16 @@ def test_copy_start_warns_when_the_destination_lacks_free_space(tmp_path, monkey
             preview._space_ok = True
             preview._start()
             seen["began_count"] = seen.get("began")
+            # 10 GB copied and 12 GB deleted on the same side fits even when little is free.
+            seen["covered_by_deletes"] = preview._space_shortfall([
+                Change("huge.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10 * 1024**3),
+                Change("old.bin", Action.DELETE_RIGHT, "only on destination", 12 * 1024**3),
+            ])
+            # A smaller deletion does not cover the copy, so the warning stays.
+            seen["delete_too_small"] = preview._space_shortfall([
+                Change("huge.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 10 * 1024**3),
+                Change("old.bin", Action.DELETE_RIGHT, "only on destination", 1024**3),
+            ])
             # Enough space: no question at all.
             monkeypatch.setattr(ui_module.shutil, "disk_usage", lambda _path: types.SimpleNamespace(free=50 * 1024**3))
             seen["plenty"] = preview._space_shortfall(preview._planned())
@@ -4063,6 +4191,8 @@ def test_copy_start_warns_when_the_destination_lacks_free_space(tmp_path, monkey
     assert seen["began_count"] == (1, "no deletions")
     assert seen["plenty"] is None
     assert seen["copy_only_not_deleted"] is None
+    assert seen["covered_by_deletes"] is None
+    assert seen["delete_too_small"][3] == 10 * 1024**3
 
 
 def test_returning_to_a_result_does_not_scroll_to_an_offscreen_profile(tmp_path, monkeypatch):

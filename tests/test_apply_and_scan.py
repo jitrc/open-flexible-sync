@@ -225,6 +225,45 @@ def test_apply_keeps_the_previous_file_under_older(tmp_path):
     assert (right / "Older" / "docs" / "a.txt").read_text() == "old"
 
 
+def test_deletions_run_first_when_they_are_what_makes_the_copy_fit(tmp_path, monkeypatch):
+    import ofs.apply as apply_module
+
+    left = tmp_path / "left"
+    right = tmp_path / "right"
+    _write(left / "new.bin", "n" * 1000)
+    _write(right / "old.bin", "o" * 5000)
+    profile = Profile(name="p", left=str(left), right=str(right))
+    # The volume looks too small for the copy until old.bin is removed.
+    monkeypatch.setattr(apply_module.shutil, "disk_usage", lambda _path: type("Usage", (), {"free": 100})())
+    order: list[str | None] = []
+
+    def started(_index, _total, rel, *_rest) -> None:
+        if not order or order[-1] != rel:
+            order.append(rel)
+
+    report = apply_plan(
+        profile,
+        [
+            Change("new.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 1000),
+            Change("old.bin", Action.DELETE_RIGHT, "only on destination", 5000),
+        ],
+        on_progress=started,
+    )
+    assert report.errors == []
+    assert report.copied == 1 and report.deleted == 1
+    assert order[:2] == ["old.bin", "new.bin"]
+    assert not (right / "old.bin").exists()
+    assert (right / "new.bin").read_text() == "n" * 1000
+
+    # Plenty of free space keeps the safer order: copy, then delete.
+    monkeypatch.setattr(apply_module.shutil, "disk_usage", lambda _path: type("Usage", (), {"free": 10**12})())
+    again = apply_module._arrange_for_space(profile, [
+        Change("new.bin", Action.COPY_LEFT_TO_RIGHT, "only on source", 1000),
+        Change("old.bin", Action.DELETE_RIGHT, "only on destination", 50),
+    ])
+    assert [change.rel for change in again] == ["new.bin", "old.bin"]
+
+
 def test_apply_deletes_only_the_planned_file(tmp_path):
     left = tmp_path / "left"
     right = tmp_path / "right"

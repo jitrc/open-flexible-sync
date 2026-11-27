@@ -341,7 +341,7 @@ def apply_plan(
     left_root = Path(profile.left)
     right_root = Path(profile.right)
     report = ApplyReport()
-    ordered = sorted(changes, key=_apply_order)
+    ordered = _arrange_for_space(profile, changes)
     progress = _CopyProgressReporter(ordered, report, on_progress, on_copy_progress)
     limiter = _RateLimiter(bytes_per_second)
     cache_invalidated = False
@@ -506,6 +506,78 @@ def _apply_order(change: Change) -> int:
     if change.action in (Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT):
         return 1
     return 2
+
+
+_COPY_TO_SIDE = {
+    Action.COPY_LEFT_TO_RIGHT: "Right",
+    Action.COPY_RIGHT_TO_LEFT: "Left",
+}
+_DELETE_ON_SIDE = {
+    Action.DELETE_LEFT: "Left",
+    Action.DELETE_RIGHT: "Right",
+}
+
+
+def side_transfer_bytes(changes: list[Change]) -> dict[str, tuple[int, int]]:
+    """Bytes copied onto each side, and bytes deleted on that same side."""
+
+    copies = {"Left": 0, "Right": 0}
+    deletes = {"Left": 0, "Right": 0}
+    for change in changes:
+        copied = _COPY_TO_SIDE.get(change.action)
+        if copied is not None:
+            copies[copied] += max(0, change.size)
+            continue
+        removed = _DELETE_ON_SIDE.get(change.action)
+        if removed is not None:
+            deletes[removed] += max(0, change.size)
+    return {side: (copies[side], deletes[side]) for side in ("Left", "Right")}
+
+
+def deletions_cover_copies(free: int, copy_bytes: int, delete_bytes: int) -> bool:
+    """True when this side's deletions are what makes the copy fit.
+
+    Copies normally run before deletions, so free space has to hold the whole
+    copy. When the deletions on that same side free enough room, they run
+    first instead and the copy is not reported as short.
+    """
+
+    return copy_bytes > free and delete_bytes > 0 and free + delete_bytes >= copy_bytes
+
+
+def _arrange_for_space(profile: Profile, changes: list[Change]) -> list[Change]:
+    """Moves, then copies, then deletions — unless deletions have to free a side first."""
+
+    ordered = sorted(changes, key=_apply_order)
+    totals = side_transfer_bytes(ordered)
+    early: set[str] = set()
+    for side, root in (("Left", profile.left), ("Right", profile.right)):
+        if not root:
+            continue
+        copy_bytes, delete_bytes = totals[side]
+        try:
+            free = shutil.disk_usage(root).free
+        except OSError:
+            continue
+        if deletions_cover_copies(free, copy_bytes, delete_bytes):
+            early.add(side)
+    if not early:
+        return ordered
+    moves: list[Change] = []
+    pulled: list[Change] = []
+    copies: list[Change] = []
+    rest: list[Change] = []
+    for change in ordered:
+        action = change.action
+        if action in (Action.MOVE_ON_LEFT, Action.MOVE_ON_RIGHT):
+            moves.append(change)
+        elif action in (Action.COPY_LEFT_TO_RIGHT, Action.COPY_RIGHT_TO_LEFT):
+            copies.append(change)
+        elif _DELETE_ON_SIDE.get(action) in early:
+            pulled.append(change)
+        else:
+            rest.append(change)
+    return moves + pulled + copies + rest
 
 
 def _count(report: ApplyReport, side: str, kind: str, size: int) -> None:

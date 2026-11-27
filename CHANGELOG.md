@@ -4,6 +4,20 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-11-26
+
+### Fixed
+
+- A split scan no longer keeps every earlier set's scan and copy panel. Starting the next set leaves only that set's progress above the file list, labeled with the set count (set 1, set 2, …).
+- Copying Results stays clickable while the next set is discovered. The live list stops retaining paths once it has its sample, instead of waiting until those rows are drawn, and scan totals keep only the latest sample so they are not queued ahead of clicks. Copy progress is applied in idle slices, so a fast copy does not block the window either.
+- The free-space check counts deletions on the same side when they free enough room for the copy, and those deletions run before the copies. A plan that copies 2 TB and deletes 2.2 TB on that disk no longer warns that the copy will not fit.
+- The window uses OpenGL instead of GTK's Vulkan renderer. Vulkan aborted the process while Copying Results closed a window, which GNOME reported as Force Quit.
+- Copying Results no longer lays out every failure on screen. Repeated "path escapes the profile folder" errors collapse into one line, and only the first few lines are shown, so a long failure list does not trip GNOME's Force Quit check.
+
+### Added
+
+- The profile filter matches the source path and the destination path as well as the name and group.
+
 ## [0.6.1] - 2026-11-25
 
 ### Fixed
@@ -232,7 +246,8 @@ All notable changes to OFS are documented here. Entries are grouped by public re
 - Organized profile overview, dry-run comparison, and synchronization preview.
 - Linux AppImage and tar downloads, public project documentation, and CI test/release workflows.
 
-[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.1...HEAD
+[Unreleased]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.1...v0.6.0
 [0.5.1]: https://github.com/jitrc/open-flexible-sync/compare/v0.5.0...v0.5.1

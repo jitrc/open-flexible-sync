@@ -172,8 +172,11 @@ _UNGROUPED = "(ungrouped)"
 _UNGROUPED_PROFILE_MINIMUM = 12
 _UNGROUPED_GROUP_MINIMUM = 3
 _PREVIEW_BATCH_SIZE = 250
-# A live preview is a courtesy, not the plan: stop queueing rows past this point so a
-# million-entry scan cannot pin gigabytes of GTK rows before the comparison finishes.
+_RESULT_ERROR_LINES = 12
+# A live preview is a courtesy, not the plan: stop accepting paths past this point
+# immediately, before they are drawn. Waiting until the tree had painted the cap
+# let a fast walk retain every path and freeze the window that was already open
+# (Copying Results, pause, cancel).
 _PREVIEW_LIVE_LIMIT = 50_000
 # A finished comparison over a big plan opens collapsed, top-level folders only;
 # expanding a folder builds its children then, so rows cost what you look at.
@@ -291,7 +294,8 @@ class MainWindow(Gtk.ApplicationWindow):
         header.pack_end(settings_button)
         header.pack_end(self.appearance_button)
 
-        self.search = Gtk.SearchEntry(placeholder_text="Filter profiles")
+        self.search = Gtk.SearchEntry(placeholder_text="Filter by name or path")
+        self.search.set_tooltip_text("Matches the profile name, group, source path, or destination path")
         self.search.set_hexpand(True)
         self.search.connect("changed", lambda *_: self._on_search())
         expand_all = Gtk.Button(label="Expand all")
@@ -508,10 +512,27 @@ class MainWindow(Gtk.ApplicationWindow):
             and len(real_groups) >= _UNGROUPED_GROUP_MINIMUM
         )
 
-    def _shown(self, profile: Profile, query: str, status: str) -> bool:
+    def _matches_query(self, profile: Profile, query: str) -> bool:
+        """Name, group, and source or destination path. An empty query matches everything."""
+
+        if not query:
+            return True
         group_text = " ".join(_group_parts(profile)).lower()
-        unmatched_group = self._ungrouped_enabled() and not self._is_grouped(profile) and query in _UNGROUPED
-        if query not in profile.name.lower() and query not in profile.group.lower() and query not in group_text and not unmatched_group:
+        if self._ungrouped_enabled() and not self._is_grouped(profile) and query in _UNGROUPED:
+            return True
+        return any(
+            query in text
+            for text in (
+                profile.name.lower(),
+                profile.group.lower(),
+                group_text,
+                profile.left.lower(),
+                profile.right.lower(),
+            )
+        )
+
+    def _shown(self, profile: Profile, query: str, status: str) -> bool:
+        if not self._matches_query(profile, query):
             return False
         if self.available_only.get_active() and not self._available(profile):
             return False
@@ -632,7 +653,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if self._ungrouped_enabled() and query in _UNGROUPED:
                 self._group_expanded[_UNGROUPED] = True
             for profile in self.profiles:
-                if query in profile.name.lower() or query in profile.group.lower() or query in " ".join(_group_parts(profile)).lower():
+                if self._matches_query(profile, query):
                     parts = _group_parts(profile)
                     if self._ungrouped_enabled() and not self._is_grouped(profile):
                         self._group_expanded[_UNGROUPED] = True
@@ -1774,7 +1795,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self._ofs_app.hold()
 
         def on_stats(name: str, side: str, rel: str, values) -> None:
-            GLib.idle_add(preview._record_scan_stats, name, side, rel, values, priority=GLib.PRIORITY_DEFAULT)
+            # One pending sample at idle priority. A callback per path sits in
+            # the same band as clicks and leaves Copying Results unable to close.
+            preview._post_scan_stats(name, side, rel, values)
 
         def on_entry(name: str, side: str, rel: str, stat) -> None:
             if name == profile.name:
@@ -2106,6 +2129,17 @@ def _failed_relative_paths(errors: list[str]) -> list[str]:
     return paths
 
 
+def _error_group_key(rel: str, detail: str) -> str:
+    """Group one failure kind even when the message repeats the relative path."""
+
+    repeated = f": {rel}"
+    if rel and detail.endswith(repeated):
+        trimmed = detail[: -len(repeated)].strip()
+        if trimmed:
+            return trimmed
+    return detail
+
+
 def _error_groups(errors: list[str]) -> list[str]:
     """One line per failing place: repeated errors in one folder collapse into one line."""
 
@@ -2113,7 +2147,7 @@ def _error_groups(errors: list[str]) -> list[str]:
     order: list[str] = []
     for message in errors:
         rel, separator, detail = message.partition(": ")
-        key = detail if separator else message
+        key = _error_group_key(rel, detail) if separator else message
         if key not in groups:
             groups[key] = []
             order.append(key)
@@ -2460,8 +2494,13 @@ class Preview(Gtk.Window):
         self.copy_details: Gtk.Expander | None = None
         self._entry_queue = deque()
         self._live_capped = False
+        self._live_accepted: set[str] = set()
         self._entry_lock = threading.Lock()
         self._entry_refresh_scheduled = False
+        self._pending_stats = None
+        self._stats_scheduled = False
+        self._copy_events: deque = deque()
+        self._copy_scheduled = False
         self._live_refill_pending = False
         self._force_uncached = False
         self._cache_sides: set[str] = set()
@@ -2739,12 +2778,35 @@ class Preview(Gtk.Window):
         self.operation_area.append(expander)
         return expander
 
+    def _drop_previous_operations(self) -> None:
+        """A new scan replaces earlier scan and copy panels instead of stacking them."""
+
+        previous = [window for window in (self._scan_progress, self._copy_progress) if window is not None]
+        child = self.operation_area.get_first_child()
+        while child is not None:
+            nxt = child.get_next_sibling()
+            self.operation_area.remove(child)
+            child = nxt
+        self.scan_details = None
+        self.copy_details = None
+        self._scan_progress = None
+        self._copy_progress = None
+        for window in previous:
+            window.allow_close()
+
     def _reset_for_scan(self) -> None:
         """Drop the previous set's rows before the same window scans again."""
 
         self.job = JobResult(self.job.profile, ScanResult(changes=[]), None)
         self._set_round += 1
         self._live_capped = False
+        self._live_accepted.clear()
+        with self._entry_lock:
+            self._entry_queue.clear()
+            self._pending_stats = None
+            self._stats_scheduled = False
+            self._copy_events.clear()
+            self._copy_scheduled = False
         self.rows = []
         self._original = {}
         self._copy_planned = {}
@@ -2755,9 +2817,32 @@ class Preview(Gtk.Window):
         self.notice.set_visible(False)
         self._fully_shown.clear()
         self._deferred_live.clear()
+        # Clearing an attached model notifies the view per row. On the set that
+        # just finished, that work runs inside the same turn that shows Copying
+        # Results, so the report is on screen and cannot take a click.
+        self.view.set_model(None)
         self.tree_store.clear()
+        self._file_iters.clear()
+        self._folder_iters.clear()
+        self._expand_queue.clear()
+        self.view.set_model(self.tree_store)
+        self.store = Gio.ListStore.new(PlanRow)
+
+    def _set_number(self) -> int:
+        """1-based round while this window walks a split scan. Zero for one complete scan."""
+
+        if self._set_round or self._set_after or scan_set_limit() > 0:
+            return self._set_round + 1
+        return 0
+
+    def _operation_label(self, state: str) -> str:
+        number = self._set_number()
+        if not number:
+            return state
+        return f"{state} · set {number}"
 
     def _begin_scan(self, progress: ScanWindow, *, uncached: bool = False, after_name: str = "") -> None:
+        self._drop_previous_operations()
         self._set_after = after_name
         self._set_last = ""
         self._set_next = ""
@@ -2768,7 +2853,8 @@ class Preview(Gtk.Window):
         self._cache_sides = set(destination_sides(self.job.profile))
         self._cached_discovery.clear()
         self._fresh_discovery.clear()
-        self.scan_details = self._attach_operation_panel(progress, "Scanning")
+        progress.set_set_number(self._set_number())
+        self.scan_details = self._attach_operation_panel(progress, self._operation_label("Scanning"))
         self.start_button.set_label("Scanning…")
         self.start_button.set_sensitive(False)
         self.start_button.set_tooltip_text("Wait for the complete comparison, or cancel discovery")
@@ -2805,15 +2891,50 @@ class Preview(Gtk.Window):
         self._show_live_side(side)
         return False
 
-    def _queue_entry(self, side: str, rel: str, stat) -> None:
-        if self._live_capped:
-            return
+    def _post_scan_stats(self, name: str, side: str, rel: str, values) -> None:
+        """Keep the newest scan sample. Older path strings are not queued."""
+
+        schedule = False
         with self._entry_lock:
+            self._pending_stats = (name, side, rel, values)
+            if not self._stats_scheduled:
+                self._stats_scheduled = True
+                schedule = True
+        if schedule:
+            GLib.idle_add(self._apply_pending_scan_stats, priority=GLib.PRIORITY_DEFAULT_IDLE)
+
+    def _apply_pending_scan_stats(self) -> bool:
+        with self._entry_lock:
+            pending = self._pending_stats
+            self._pending_stats = None
+            self._stats_scheduled = False
+        if pending is not None:
+            self._record_scan_stats(*pending)
+        return False
+
+    def _queue_entry(self, side: str, rel: str, stat) -> None:
+        schedule = False
+        with self._entry_lock:
+            if self._live_capped:
+                return
+            if rel not in self._live_accepted and len(self._live_accepted) >= _PREVIEW_LIVE_LIMIT:
+                # The cap used to wait until the rows were on screen. A walk
+                # faster than that paint kept every later path in memory and
+                # the main loop never returned to the open results window.
+                self._live_capped = True
+                return
+            # A second side may report a path already accepted. Two reports per
+            # path are enough; anything beyond that is the same courtesy row.
+            if len(self._entry_queue) >= _PREVIEW_LIVE_LIMIT * 2:
+                return
+            self._live_accepted.add(rel)
             self._entry_queue.append((side, rel, stat))
             if self._entry_refresh_scheduled:
                 return
             self._entry_refresh_scheduled = True
-        GLib.idle_add(self._drain_pending)
+            schedule = True
+        if schedule:
+            GLib.idle_add(self._drain_pending)
 
     def _live_hidden(self, rel: str) -> bool:
         profile = self.job.profile
@@ -2826,12 +2947,27 @@ class Preview(Gtk.Window):
                 )
             )
 
+    def _detach_live_view(self) -> None:
+        """Insert courtesy rows without notifying the visible tree per path."""
+
+        if self.view.get_model() is not None:
+            self.view.set_model(None)
+
+    def _restore_live_view(self) -> None:
+        if self.view.get_model() is None:
+            self.view.set_model(self.tree_store)
+
     def _drain_pending(self) -> bool:
         self._entry_refresh_scheduled = False
         if not self._scan_active:
             with self._entry_lock:
                 self._entry_queue.clear()
+            self._restore_live_view()
             return False
+        # An attached TreeView costs more on every insert as the model grows.
+        # Fifty thousand of those, in the turn after Copying Results opens,
+        # is what makes the report ignore clicks until the process is killed.
+        self._detach_live_view()
         for _ in range(_PREVIEW_BATCH_SIZE):
             with self._entry_lock:
                 if not self._entry_queue:
@@ -2856,6 +2992,7 @@ class Preview(Gtk.Window):
             self._append_pending(existing)
             if len(self._live_seen) >= _PREVIEW_LIVE_LIMIT:
                 self._cap_live_rows()
+                self._restore_live_view()
                 return False
         if self._live_refill_pending and not (self._pending_tree or self._replace_tree_model):
             self._live_refill_pending = False
@@ -2866,9 +3003,14 @@ class Preview(Gtk.Window):
         if self._scan_active and self._entry_queue:
             with self._entry_lock:
                 if self._entry_refresh_scheduled:
+                    self._restore_live_view()
                     return False
                 self._entry_refresh_scheduled = True
+            # A refill may have put the model back. Stay detached so the next
+            # slice does not pay the view for every path.
+            self._detach_live_view()
             return True
+        self._restore_live_view()
         return False
 
     def _cap_live_rows(self) -> None:
@@ -2935,8 +3077,11 @@ class Preview(Gtk.Window):
         self._filter_current_rules(job)
         self._scan_active = False
         self._scan_complete = job.result is not None
+        self._live_accepted.clear()
         with self._entry_lock:
             self._entry_queue.clear()
+            self._pending_stats = None
+            self._stats_scheduled = False
         self._live_seen.clear()
         self._live_rows.clear()
         progress = self._scan_progress
@@ -2947,11 +3092,11 @@ class Preview(Gtk.Window):
         if self.scan_details is not None:
             self.scan_details.set_expanded(False)
             if self._scan_complete:
-                self.scan_details.set_label("Scan complete")
+                self.scan_details.set_label(self._operation_label("Scan complete"))
             elif _scan_failure(job.error):
-                self.scan_details.set_label("Scan failed")
+                self.scan_details.set_label(self._operation_label("Scan failed"))
             else:
-                self.scan_details.set_label("Scan stopped")
+                self.scan_details.set_label(self._operation_label("Scan stopped"))
         if job.result is not None:
             result = job.result
             # A new plan can change every folder's remainder, so forget the choices.
@@ -4737,8 +4882,10 @@ class Preview(Gtk.Window):
             lines.append("Filters hide rows; Start runs the whole plan. Right-click a folder to point it L ──▶ R or L ◀── R.")
         result = self.job.result
         if result is not None and result.set_last:
+            number = self._set_number()
+            which = f"Set {number}: " if number else "Set: "
             lines.append(
-                f"Set: {result.set_first} … {result.set_last} of {result.set_total} root names;"
+                f"{which}{result.set_first} … {result.set_last} of {result.set_total} root names;"
                 + (" the next set continues after this copy." if result.set_next else " this is the last set.")
             )
         if result is not None and result.note:
@@ -4775,19 +4922,17 @@ class Preview(Gtk.Window):
     def _space_shortfall(self, changes: list[Change]) -> tuple[str, str, int, int] | None:
         """(side, root, free, needed) when a destination cannot hold the copies.
 
-        Only copies toward a destination add bytes; deletions free space, so
-        they are not counted. A destination that cannot be measured is left to
-        the copy itself to report.
+        Deletions on that same side count when they free enough room for the
+        copy; those deletions then run first. A smaller deletion does not,
+        because the copy would still run while the files are there. A
+        destination that cannot be measured is left to the copy itself.
         """
 
-        needed: dict[str, int] = {}
-        for change in changes:
-            if change.action == Action.COPY_LEFT_TO_RIGHT:
-                needed["Right"] = needed.get("Right", 0) + max(0, change.size)
-            elif change.action == Action.COPY_RIGHT_TO_LEFT:
-                needed["Left"] = needed.get("Left", 0) + max(0, change.size)
+        from ofs.apply import deletions_cover_copies, side_transfer_bytes
+
+        totals = side_transfer_bytes(changes)
         for side in ("Right", "Left"):
-            amount = needed.get(side, 0)
+            amount, freed = totals[side]
             if amount <= 0:
                 continue
             root = self.job.profile.right if side == "Right" else self.job.profile.left
@@ -4795,8 +4940,9 @@ class Preview(Gtk.Window):
                 free = shutil.disk_usage(root).free
             except OSError:
                 continue
-            if free < amount:
-                return side, root, free, amount
+            if free >= amount or deletions_cover_copies(free, amount, freed):
+                continue
+            return side, root, free, amount
         return None
 
     def _confirm_low_space(self, shortfall: tuple[str, str, int, int]) -> None:
@@ -4806,8 +4952,8 @@ class Preview(Gtk.Window):
         dialog.set_detail(
             f"The {side.lower()} destination has {format_bytes(free)} free, but this plan copies "
             f"{format_bytes(needed)} there.\n\n{root}\n\n"
-            "Copies fail when the disk fills. Deletions in the same run may free space first. "
-            "Nothing has been copied yet."
+            "Copies fail when the disk fills. Deletions on this side are not enough to free this "
+            "room before the copy. Nothing has been copied yet."
         )
         dialog.set_buttons(["Cancel", "Continue anyway"])
         dialog.set_cancel_button(0)
@@ -4921,7 +5067,7 @@ class Preview(Gtk.Window):
         self.start_button.set_sensitive(False)
         progress = ProgressWindow(self, self.job.profile.name)
         self._copy_progress = progress
-        self.copy_details = self._attach_operation_panel(progress, "Copying")
+        self.copy_details = self._attach_operation_panel(progress, self._operation_label("Copying"))
         self._copy_planned = {change.rel: change for change in changes}
         self._copy_cache_invalidated = False
         self._last_copy_done = 0
@@ -4937,7 +5083,7 @@ class Preview(Gtk.Window):
                     self.job.profile,
                     changes,
                     control=progress.control,
-                    on_copy_progress=lambda update: GLib.idle_add(self._update_copy, progress, update, priority=GLib.PRIORITY_DEFAULT),
+                    on_copy_progress=lambda update: self._post_copy_progress(progress, update),
                     bytes_per_second=copy_speed_limit(),
                     listing=self.rows,
                 )
@@ -4966,6 +5112,47 @@ class Preview(Gtk.Window):
             GLib.idle_add(self._finished, progress, report, path, priority=GLib.PRIORITY_DEFAULT)
 
         threading.Thread(target=work, daemon=True).start()
+
+    def _post_copy_progress(self, progress: ProgressWindow, event: CopyProgress) -> None:
+        """Keep the latest copy events off the input band.
+
+        A small-file copy used to queue one priority-0 update per chunk, ahead
+        of every click. Idle slices still mark each completed row; they just
+        run after input, so pause, cancel, and Copying Results stay reachable.
+        """
+
+        schedule = False
+        with self._entry_lock:
+            self._copy_events.append((progress, event))
+            if not self._copy_scheduled:
+                self._copy_scheduled = True
+                schedule = True
+        if schedule:
+            GLib.idle_add(self._drain_copy_progress, priority=GLib.PRIORITY_DEFAULT_IDLE)
+
+    def _drain_copy_progress(self) -> bool:
+        for _ in range(_PREVIEW_BATCH_SIZE):
+            with self._entry_lock:
+                if not self._copy_events:
+                    break
+                progress, event = self._copy_events.popleft()
+            self._update_copy(progress, event)
+        with self._entry_lock:
+            if self._copy_events:
+                return True
+            self._copy_scheduled = False
+        return False
+
+    def _flush_copy_progress(self) -> None:
+        """Apply every queued copy mark before the results window is shown."""
+
+        while True:
+            with self._entry_lock:
+                if not self._copy_events:
+                    self._copy_scheduled = False
+                    return
+                progress, event = self._copy_events.popleft()
+            self._update_copy(progress, event)
 
     def _update_copy(self, progress: ProgressWindow, event: CopyProgress) -> bool:
         if progress is not self._copy_progress:
@@ -5005,10 +5192,11 @@ class Preview(Gtk.Window):
         return False
 
     def _finished(self, progress: ProgressWindow, report: ApplyReport, path: Path | None) -> bool:
+        self._flush_copy_progress()
         progress.allow_close()
         if self.copy_details is not None:
             self.copy_details.set_expanded(False)
-            self.copy_details.set_label("Copy complete")
+            self.copy_details.set_label(self._operation_label("Copy complete"))
         if self._copy_progress is not None:
             self._copy_progress.pause_button.set_sensitive(False)
             self._copy_progress.cancel_button.set_sensitive(False)
@@ -5078,6 +5266,7 @@ class ScanWindow(Gtk.Window):
         self._paused_total = 0.0
         self._estimates = estimates or {}
         self._estimate = (0, 0.0)
+        self._set_number = 0
         self._stats = {side: {"discovered": 0, "filtered": 0, "added": 0} for side in ("Left", "Right")}
         # The window title already names the profile; the panel leads with the
         # reading side instead of repeating it.
@@ -5134,10 +5323,17 @@ class ScanWindow(Gtk.Window):
         speed = int(discovered / elapsed) if elapsed else 0
         eta = _estimate_eta(discovered, elapsed, self._estimate)
         eta_text = f"ETA ~{_duration(eta)}" if eta is not None else "ETA after first completed scan"
+        set_line = f"Set {self._set_number}\n" if self._set_number else ""
         self.count_label.set_text(
-            f"Folders and files found: {discovered}\nFiltered (ignored): {filtered}\nAdded to file list: {added}\n"
+            f"{set_line}Folders and files found: {discovered}\nFiltered (ignored): {filtered}\nAdded to file list: {added}\n"
             f"Elapsed {_duration(elapsed)} · {speed} entries/s · {eta_text}"
         )
+
+    def set_set_number(self, number: int) -> None:
+        """Show which split-scan round this panel is. Zero hides the count."""
+
+        self._set_number = number
+        self._update_counts()
 
     def _new_profile(self, name: str) -> None:
         if name != self._name:
@@ -5662,9 +5858,18 @@ class ResultsWindow(Gtk.Window):
                 grouped = Gtk.Label(xalign=0)
                 grouped.set_markup(f"<b>{len(report.errors)} errors in {len(lines)} place(s)</b>")
                 root.append(grouped)
-            errors = Gtk.Label(label="\n".join(lines), xalign=0, wrap=True)
+            # A wrapping label of every failure, plus the same text as a tooltip,
+            # lays out on the UI thread when Copying Results opens. Hundreds of
+            # long paths take longer than GNOME's response check.
+            shown = lines[:_RESULT_ERROR_LINES]
+            hidden = len(lines) - len(shown)
+            text = "\n".join(shown)
+            if hidden:
+                text += f"\n… {hidden} more. The full list is in the log."
+            errors = Gtk.Label(label=text, xalign=0, wrap=True)
             errors.add_css_class("error")
-            errors.set_tooltip_text("\n".join(report.errors))
+            if len(report.errors) <= _RESULT_ERROR_LINES:
+                errors.set_tooltip_text("\n".join(report.errors))
             root.append(errors)
             failed_paths = _failed_relative_paths(report.errors)
             common_folder = _failed_common_folder(failed_paths)
